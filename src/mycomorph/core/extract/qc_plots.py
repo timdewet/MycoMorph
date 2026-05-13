@@ -26,11 +26,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from .ot_cache import (
+    copy_to_variant_cache as _copy_to_variant_cache,
     embedding_ot_cache_path as _embedding_ot_cache_path,
     features_ot_cache_path as _features_ot_cache_path,
     ot_sidecar_path as _ot_sidecar_path,
     save_ot_sidecar as _save_ot_sidecar,
     try_load_ot_cache as _try_load_ot_cache,
+    variant_cache_path as _ot_variant_cache_path,
 )
 
 if TYPE_CHECKING:
@@ -2800,10 +2802,19 @@ def render_embeddings_ot_html(
         "emb_mtime_ns": emb_path.stat().st_mtime_ns,
     }
     cache_sidecar = _embedding_ot_cache_path(emb_path)
+    variant_sidecar = _ot_variant_cache_path(
+        cache_sidecar,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
     cache_miss: list[str] = []
     cached = _try_load_ot_cache(
-        cache_sidecar, cache_params, miss_reason=cache_miss,
+        variant_sidecar, cache_params, miss_reason=cache_miss,
     )
+    if cached is None:
+        cached = _try_load_ot_cache(
+            cache_sidecar, cache_params, miss_reason=cache_miss,
+        )
     if cached is None and cache_miss:
         # Surface why a precomputed cache didn't take so the user can
         # see "param mismatch on emb_mtime_ns: ..." in the status bar
@@ -3075,6 +3086,12 @@ def render_embeddings_ot_html(
     except Exception:  # noqa: BLE001
         pass
 
+    _copy_to_variant_cache(
+        cache_sidecar,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
+
     return _ot_render_from_distance(
         out_path,
         D=D, group_meta=group_meta,
@@ -3166,14 +3183,23 @@ def render_features_ot_html(
         "n_features": len(morph_cols),
     }
     cache_sidecar = _features_ot_cache_path(library_dir, species)
-    cache_miss: list[str] = []
-    cached = _try_load_ot_cache(
+    variant_sidecar = _ot_variant_cache_path(
         cache_sidecar,
-        # Only validate D-affecting params + library state. n_features
-        # is metadata and shouldn't gate cache hits.
-        {k: v for k, v in cache_params.items() if k != "n_features"},
-        miss_reason=cache_miss,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
     )
+    cache_miss: list[str] = []
+    validate_params = {
+        key: value for key, value in cache_params.items()
+        if key != "n_features"
+    }
+    cached = _try_load_ot_cache(
+        variant_sidecar, validate_params, miss_reason=cache_miss,
+    )
+    if cached is None:
+        cached = _try_load_ot_cache(
+            cache_sidecar, validate_params, miss_reason=cache_miss,
+        )
     if cached is None and cache_miss:
         progress_cb(0.05, f"OT cache miss: {cache_miss[0]}")
         import logging
@@ -3423,6 +3449,12 @@ def render_features_ot_html(
             )
     except Exception:  # noqa: BLE001
         pass
+
+    _copy_to_variant_cache(
+        cache_sidecar,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
 
     progress_cb(0.85)
 

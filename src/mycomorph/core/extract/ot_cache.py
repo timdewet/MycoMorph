@@ -71,6 +71,58 @@ def features_ot_cache_path(library_dir: Path | None, species: str) -> Path:
     return cache_dir / f"{safe_species}.ot_distance.parquet"
 
 
+def variant_cache_path(
+    canonical_path: Path,
+    *,
+    batch_correct: bool,
+    merge_replicates: bool,
+) -> Path:
+    """Return the cache slot for one batch/replicate toggle combination."""
+    canonical_path = Path(canonical_path)
+    batch = "on" if batch_correct else "off"
+    merge = "on" if merge_replicates else "off"
+    variants_dir = canonical_path.parent / f"{canonical_path.stem}.variants"
+    variants_dir.mkdir(parents=True, exist_ok=True)
+    return variants_dir / f"bc-{batch}__merge-{merge}.ot_distance.parquet"
+
+
+def copy_to_variant_cache(
+    canonical_path: Path,
+    *,
+    batch_correct: bool,
+    merge_replicates: bool,
+) -> Path | None:
+    """Atomically snapshot a canonical cache into its matching variant slot."""
+    import shutil
+
+    from ..provenance import atomic_output_path
+
+    canonical_path = Path(canonical_path)
+    if not canonical_path.exists():
+        return None
+    variant = variant_cache_path(
+        canonical_path,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
+    tmp = atomic_output_path(variant)
+    params_source = canonical_path.with_suffix(canonical_path.suffix + ".params.json")
+    params_target = variant.with_suffix(variant.suffix + ".params.json")
+    params_tmp = atomic_output_path(params_target)
+    try:
+        shutil.copy2(canonical_path, tmp)
+        tmp.replace(variant)
+        if params_source.exists():
+            shutil.copy2(params_source, params_tmp)
+            params_tmp.replace(params_target)
+        return variant
+    except OSError:
+        return None
+    finally:
+        tmp.unlink(missing_ok=True)
+        params_tmp.unlink(missing_ok=True)
+
+
 def try_load_ot_cache(
     cache_sidecar: Path,
     requested_params: dict,
