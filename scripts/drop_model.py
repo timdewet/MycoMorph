@@ -21,7 +21,7 @@ import argparse
 import shutil
 from pathlib import Path
 
-from mycoprep.core.extract.feature_library import FeatureLibrary
+from mycomorph.core.extract.feature_library import FeatureLibrary
 
 
 def main() -> None:
@@ -36,7 +36,7 @@ def main() -> None:
     ap.add_argument(
         "--library-dir",
         default=None,
-        help="Library directory (default: ~/.mycoprep/morphology_library).",
+        help="Library directory (default: ~/.mycomorph/morphology_library).",
     )
     ap.add_argument(
         "--dry-run",

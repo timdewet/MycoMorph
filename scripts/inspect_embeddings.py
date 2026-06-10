@@ -6,7 +6,7 @@ conditions. Run this script to see whether ResNet-18 / Lightweight /
 SupCon variants all cover the same runs and conditions, or whether one
 has dropped data.
 
-Usage (from the MycoPrep dir, with the venv active):
+Usage (from the MycoMorph dir, with the venv active):
     python scripts/inspect_embeddings.py
     python scripts/inspect_embeddings.py --library-dir <path>
 """
@@ -24,8 +24,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument(
         "--library-dir",
-        default=os.path.join(os.path.expanduser("~"), ".mycoprep", "morphology_library"),
-        help="Library root (default: ~/.mycoprep/morphology_library)",
+        default=os.path.join(os.path.expanduser("~"), ".mycomorph", "morphology_library"),
+        help="Library root (default: ~/.mycomorph/morphology_library)",
     )
     args = ap.parse_args()
 

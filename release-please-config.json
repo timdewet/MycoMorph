@@ -3,9 +3,9 @@
   "release-type": "python",
   "packages": {
     ".": {
-      "package-name": "mycoprep",
+      "package-name": "mycomorph",
       "extra-files": [
-        "src/mycoprep/__init__.py"
+        "src/mycomorph/__init__.py"
       ]
     }
   }

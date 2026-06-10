@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mycoprep"
+name = "mycomorph"
 version = "0.2.0"
-description = "MycoPrep: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
+description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -42,12 +42,12 @@ profiling = [
 test = ["pytest>=8", "pytest-qt>=4"]
 
 [project.scripts]
-mycoprep = "mycoprep.gui.app:main"
-mycoprep-cli = "mycoprep.core.cli:app"
-mycoprep-focus = "mycoprep.core.focus.cli:app"
+mycomorph = "mycomorph.gui.app:main"
+mycomorph-cli = "mycomorph.core.cli:app"
+mycomorph-focus = "mycomorph.core.focus.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mycoprep.core" = ["models/*.pth"]
+"mycomorph.core" = ["models/*.pth"]
