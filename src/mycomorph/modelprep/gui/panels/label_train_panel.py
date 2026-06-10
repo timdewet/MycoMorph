@@ -48,8 +48,10 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ...core._render import outline_of, to_outlined_rgb
 from ...core.cli import list_preset_models
 from ...core.crops_h5 import CropRecord, HDF5CropsReader
+from ...core.fov_context import FovContextProvider
 from ...core.labels_store import (
     LABEL_TO_IDX,
     LabelRow,
@@ -294,21 +296,13 @@ class _CellThumb(QPushButton):
 
     def _render(self) -> None:
         from PyQt6.QtGui import QImage, QPixmap, QIcon
-        from skimage.segmentation import find_boundaries
 
         # crop layout: (3, H, W) = [phase, mask, area]
         phase = self.record.crop[0]
         mask = self.record.crop[1] > 0.5
 
-        lo, hi = np.percentile(phase, (1, 99))
-        scaled = np.clip((phase - lo) / max(hi - lo, 1e-6), 0, 1)
-        gray = (scaled * 255).astype(np.uint8)
-        h, w = gray.shape
-        rgb = np.stack([gray, gray, gray], axis=-1)
-        if mask.any():
-            boundary = find_boundaries(mask, mode="outer")
-            rgb[boundary] = (0x21, 0xD4, 0xFD)  # cyan
-        rgb = np.ascontiguousarray(rgb)
+        rgb = to_outlined_rgb(phase, outline_of(mask))
+        h, w = rgb.shape[:2]
 
         qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
         pix = QPixmap.fromImage(qimg).scaled(
@@ -438,6 +432,7 @@ class LabelTrainPanel(QWidget):
         self._labels_dir: Optional[Path] = None
         self._reader: Optional[HDF5CropsReader] = None
         self._store: Optional[LabelsStore] = None
+        self._context_provider: Optional[FovContextProvider] = None
 
         self._pool: list[tuple[CropRecord, float]] = []
         self._page_index = 0
@@ -479,6 +474,7 @@ class LabelTrainPanel(QWidget):
             self._h5_path = None
             self._labels_dir = None
             self._store = None
+            self._context_provider = None
             self._info_label.setText("(no source — pick an HDF5)")
             self._refresh_dataset_stats()
             return
@@ -504,6 +500,10 @@ class LabelTrainPanel(QWidget):
             self._reader = None
             self._store = None
             return
+
+        # Optional: locate the pipeline originals beside the HDF5 so the cell
+        # inspector can show each cell in its full field-of-view context.
+        self._context_provider = FovContextProvider(self._h5_path)
 
         self._info_label.setText(
             f"Loaded {len(self._reader):,} cells from {self._h5_path.name} · "
@@ -1037,6 +1037,7 @@ class LabelTrainPanel(QWidget):
             get_label=self._pool_label,
             set_label=self._set_pool_label,
             parent=self,
+            context_provider=self._context_provider,
         )
         dialog.exec()
 
