@@ -172,23 +172,27 @@ QComboBox::down-arrow {{
     margin-right: 4px;
 }}
 
-QSpinBox, QDoubleSpinBox {{
-    padding-right: 18px;
-}}
+/* ModelPrep uses button-less spin boxes (setButtonSymbols(NoButtons)), so no
+ * extra right padding is reserved. The ::up/down-button rules below are inert
+ * unless a spin box re-enables its steppers. */
 QSpinBox::up-button, QDoubleSpinBox::up-button {{
     subcontrol-origin: border;
     subcontrol-position: top right;
-    width: 16px; height: 12px;
+    width: 18px;
+    margin: 1px 1px 0 0;                       /* sit inside the rounded border */
     border-left: 1px solid {p.border_strong};
-    border-bottom: 1px solid {p.border_strong};
-    background: {p.surface};
+    border-top-right-radius: {tokens.R_SM}px;
+    background: {p.surface_alt};
 }}
 QSpinBox::down-button, QDoubleSpinBox::down-button {{
     subcontrol-origin: border;
     subcontrol-position: bottom right;
-    width: 16px; height: 12px;
+    width: 18px;
+    margin: 0 1px 1px 0;
     border-left: 1px solid {p.border_strong};
-    background: {p.surface};
+    border-top: 1px solid {p.border_strong};   /* divider between up/down */
+    border-bottom-right-radius: {tokens.R_SM}px;
+    background: {p.surface_alt};
 }}
 QSpinBox::up-arrow, QDoubleSpinBox::up-arrow {{
     image: url({chev_up}); width: 10px; height: 10px;
@@ -198,7 +202,7 @@ QSpinBox::down-arrow, QDoubleSpinBox::down-arrow {{
 }}
 QSpinBox::up-button:hover, QDoubleSpinBox::up-button:hover,
 QSpinBox::down-button:hover, QDoubleSpinBox::down-button:hover {{
-    background: {p.surface_alt};
+    background: {p.border};
 }}
 
 QPushButton:focus, QCheckBox:focus, QSpinBox:focus, QDoubleSpinBox:focus,

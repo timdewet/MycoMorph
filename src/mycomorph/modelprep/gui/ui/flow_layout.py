@@ -69,18 +69,29 @@ class FlowLayout(QLayout):
         eff = rect.adjusted(margins.left(), margins.top(),
                             -margins.right(), -margins.bottom())
         x, y = eff.x(), eff.y()
+        line: list[tuple] = []   # (item, x, sizeHint) buffered until the line is full
         line_height = 0
+
+        def place_line() -> None:
+            # Center each item on the line's vertical midpoint so short labels
+            # line up with taller inputs instead of clinging to the top edge.
+            if test_only:
+                return
+            for it, ix, sz in line:
+                oy = y + (line_height - sz.height()) // 2
+                it.setGeometry(QRect(QPoint(ix, oy), sz))
+
         for item in self._items:
-            hint = item.sizeHint()
-            w, h = hint.width(), hint.height()
-            next_x = x + w
-            if next_x - eff.x() > eff.width() and line_height > 0:
+            sz = item.sizeHint()
+            w, h = sz.width(), sz.height()
+            if x + w - eff.x() > eff.width() and line:
+                place_line()
+                line = []
                 x = eff.x()
                 y = y + line_height + self._vspace
-                next_x = x + w
                 line_height = 0
-            if not test_only:
-                item.setGeometry(QRect(QPoint(x, y), hint))
-            x = next_x + self._hspace
+            line.append((item, x, sz))
+            x += w + self._hspace
             line_height = max(line_height, h)
+        place_line()
         return y + line_height - rect.y() + margins.bottom()

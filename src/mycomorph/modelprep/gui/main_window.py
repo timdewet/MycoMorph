@@ -76,6 +76,7 @@ class MainWindow(QMainWindow):
 
         # Wire signals before chrome so callbacks can reach widgets.
         self.source_panel.sourceChanged.connect(self._on_source_changed)
+        self.source_panel.modelNameChanged.connect(self._on_model_name_changed)
 
         self._build_chrome()
         self._apply_card_shadows()
@@ -86,6 +87,9 @@ class MainWindow(QMainWindow):
         # its modal dialogs (cell detail, message boxes) centre correctly.
         self.label_train_panel.setParent(self)
         self.label_train_panel.hide()
+
+        # Seed the trainer with the initial model name from the Source page.
+        self.label_train_panel.set_model_name(self.source_panel.current_model_name())
 
         self._restore_settings()
 
@@ -242,6 +246,9 @@ class MainWindow(QMainWindow):
             return
         self._stack.setCurrentIndex(idx)
         entry = NAV_ENTRIES[idx]
+        if entry.key == "source":
+            # Pick up names of models trained since this page was last shown.
+            self.source_panel.refresh_models()
         self._breadcrumb.setText(
             f"Step {idx + 1} of {len(NAV_ENTRIES)} · {entry.label}"
         )
@@ -250,6 +257,10 @@ class MainWindow(QMainWindow):
         self, h5_path: Optional[Path], labels_dir: Optional[Path]
     ) -> None:
         self.label_train_panel.set_source(h5_path, labels_dir)
+        self._save_settings()
+
+    def _on_model_name_changed(self, name: str) -> None:
+        self.label_train_panel.set_model_name(name)
         self._save_settings()
 
     # ── status bar ─────────────────────────────────────────────────────────
@@ -267,6 +278,9 @@ class MainWindow(QMainWindow):
             data = json.loads(SETTINGS_FILE.read_text())
         except Exception:  # noqa: BLE001
             return
+        name = data.get("last_model_name")
+        if name:
+            self.source_panel.set_model_name(name)
         last_h5 = data.get("last_h5")
         if last_h5:
             p = Path(last_h5)
@@ -280,6 +294,7 @@ class MainWindow(QMainWindow):
         try:
             SETTINGS_FILE.write_text(json.dumps({
                 "last_h5": str(h5) if h5 else "",
+                "last_model_name": self.source_panel.current_model_name(),
             }, indent=2))
         except Exception:  # noqa: BLE001
             pass

@@ -7,6 +7,7 @@ from typing import Optional
 
 from PyQt6.QtCore import pyqtSignal
 from PyQt6.QtWidgets import (
+    QComboBox,
     QFileDialog,
     QGroupBox,
     QHBoxLayout,
@@ -19,13 +20,16 @@ from PyQt6.QtWidgets import (
 
 from ...core.crops_h5 import HDF5CropsReader
 from ...core.labels_store import default_labels_dir_for
+from ..trained_models import list_model_names
 
 
 class SourcePanel(QGroupBox):
     """Top-of-window file picker. Emits ``sourceChanged`` whenever the
-    HDF5 or labels-dir selection changes."""
+    HDF5 or labels-dir selection changes, and ``modelNameChanged`` when the
+    model name is edited."""
 
     sourceChanged = pyqtSignal(object, object)  # (h5_path | None, labels_dir | None)
+    modelNameChanged = pyqtSignal(str)
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__("Source", parent)
@@ -64,6 +68,27 @@ class SourcePanel(QGroupBox):
         row_lbl.addWidget(browse_lbl)
         layout.addLayout(row_lbl)
 
+        # Model-name row — names the trained model. A human-readable timestamp
+        # is appended at train time, so each run lands in <name>_<time>/. Pick
+        # an existing name to add a new dated version, or type a new one.
+        row_model = QHBoxLayout()
+        row_model.addWidget(QLabel("Model name:"))
+        self._model_name_combo = QComboBox()
+        self._model_name_combo.setEditable(True)
+        self._model_name_combo.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self._model_name_combo.lineEdit().setPlaceholderText(
+            "(name this model, e.g. mtb-v2 — a date is added automatically)"
+        )
+        row_model.addWidget(self._model_name_combo, stretch=1)
+        self._model_ts_hint = QLabel("")
+        self._model_ts_hint.setObjectName("caption")
+        row_model.addWidget(self._model_ts_hint)
+        layout.addLayout(row_model)
+        # Connect + populate only after both widgets exist (refresh touches the
+        # hint label).
+        self._model_name_combo.currentTextChanged.connect(self._on_name_changed)
+        self.refresh_models()
+
         # Info
         self._info_label = QLabel("")
         self._info_label.setObjectName("muted")
@@ -80,6 +105,33 @@ class SourcePanel(QGroupBox):
 
     def set_h5_path(self, path: Path) -> None:
         self._set_h5(path)
+
+    # ── model name ──────────────────────────────────────────────────────
+
+    def current_model_name(self) -> str:
+        return self._model_name_combo.currentText().strip()
+
+    def set_model_name(self, name: str) -> None:
+        self._model_name_combo.setCurrentText(name or "")
+
+    def refresh_models(self) -> None:
+        """Repopulate the existing-model-name suggestions, preserving the
+        current text."""
+        current = self._model_name_combo.currentText()
+        self._model_name_combo.blockSignals(True)
+        self._model_name_combo.clear()
+        self._model_name_combo.addItems(list_model_names())
+        self._model_name_combo.setCurrentText(current)
+        self._model_name_combo.blockSignals(False)
+        self._update_ts_hint(current)
+
+    def _on_name_changed(self, text: str) -> None:
+        self._update_ts_hint(text)
+        self.modelNameChanged.emit(text)
+
+    def _update_ts_hint(self, text: str) -> None:
+        from ..trained_models import slugify
+        self._model_ts_hint.setText(f"→ {slugify(text)}_<date>")
 
     # ── actions ────────────────────────────────────────────────────────
 

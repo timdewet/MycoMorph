@@ -21,15 +21,15 @@ from __future__ import annotations
 
 import math
 import shutil
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 from PyQt6.QtCore import QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QDesktopServices
+from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -39,6 +39,7 @@ from PyQt6.QtWidgets import (
     QGroupBox,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QProgressBar,
     QPushButton,
@@ -66,9 +67,11 @@ from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
 
 
-def _flow_row(spacing: int = 6) -> tuple[QWidget, FlowLayout]:
+def _flow_row(spacing: int = 10) -> tuple[QWidget, FlowLayout]:
     """A host widget carrying a wrapping FlowLayout, sized height-for-width so
-    the containing column can narrow freely."""
+    the containing column can narrow freely. The (slightly larger) spacing is
+    the gap *between groups*; a label and its field are bound tighter via
+    ``_labeled`` so they read as one unit."""
     host = QWidget()
     layout = FlowLayout(host, hspacing=spacing, vspacing=spacing)
     sp = host.sizePolicy()
@@ -77,9 +80,20 @@ def _flow_row(spacing: int = 6) -> tuple[QWidget, FlowLayout]:
     return host, layout
 
 
-# Where GUI-trained models land (kept in sync with _start_training).
-def _trained_models_root() -> Path:
-    return Path.home() / ".modelprep" / "models"
+def _labeled(text: str, widget: QWidget) -> QWidget:
+    """A caption glued to its field as a single flow item, so the two stay
+    together on wrap and share a vertical centerline."""
+    host = QWidget()
+    h = QHBoxLayout(host)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(5)
+    h.addWidget(QLabel(text))
+    h.addWidget(widget)
+    return host
+
+
+# Trained-model naming + enumeration lives in ..trained_models.
+from ..trained_models import list_trained_models, new_run_dir  # noqa: E402
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -367,6 +381,7 @@ class _TrainWorker(QThread):
         device: Optional[str],
         freeze_backbone: bool,
         pretrained: Optional[Path],
+        model_name: str = "",
     ) -> None:
         super().__init__()
         self.h5_path = h5_path
@@ -382,6 +397,7 @@ class _TrainWorker(QThread):
         self.device = device
         self.freeze_backbone = freeze_backbone
         self.pretrained = pretrained
+        self.model_name = model_name
 
     def run(self) -> None:
         try:
@@ -399,6 +415,7 @@ class _TrainWorker(QThread):
             class_counts = {CLASS_NAMES[i]: int((labels == i).sum())
                             for i in range(NUM_CLASSES)}
             provenance = {
+                "model_name": self.model_name or self.output_dir.name,
                 "source_h5": self.h5_path.name,
                 "labels_dir": str(self.labels_dir),
                 "n_labelled": int(len(used_uids)),
@@ -461,6 +478,7 @@ class LabelTrainPanel(QWidget):
         self._session_seen_uids: set[str] = set()
         self._session_label_count = 0
         self._last_model_dir: Optional[Path] = None
+        self._model_name = ""  # set from the Source page; names the trained run
 
         self._al_worker: Optional[_ActiveLearningWorker] = None
         self._train_worker: Optional[_TrainWorker] = None
@@ -469,6 +487,10 @@ class LabelTrainPanel(QWidget):
         self._refresh_dataset_stats()
 
     # ── public ─────────────────────────────────────────────────────────
+
+    def set_model_name(self, name: str) -> None:
+        """Name used for the trained-run directory (``<slug>_<time>``)."""
+        self._model_name = (name or "").strip()
 
     def set_source(self, h5_path: Optional[Path], labels_dir: Optional[Path]) -> None:
         # Auto-save any unsaved labels to the OLD store before swapping, and
@@ -532,7 +554,7 @@ class LabelTrainPanel(QWidget):
         self._session_label_count = 0
         self._review_mode = False
         self._populate_grid_from_page()
-        self._save_btn.setEnabled(False)
+        self._save_action.setEnabled(False)
         self._save_next_btn.setEnabled(False)
         self._prev_btn.setEnabled(False)
         self._next_btn.setEnabled(False)
@@ -562,6 +584,11 @@ class LabelTrainPanel(QWidget):
         # whole, so it carries no layout of its own.
         self.label_section = self._build_label_section()
         self.train_section = self._build_train_section()
+        # Plain numeric fields — no stepper arrows. Type the value; the scroll
+        # wheel and ↑/↓ keys still adjust it.
+        for section in (self.label_section, self.train_section):
+            for sb in section.findChildren(QAbstractSpinBox):
+                sb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
     def _build_label_section(self) -> QWidget:
         box = QGroupBox("Label cells")
@@ -602,9 +629,13 @@ class LabelTrainPanel(QWidget):
         self._conf_thresh = QDoubleSpinBox()
         self._conf_thresh.setRange(0.5, 1.0); self._conf_thresh.setSingleStep(0.05)
         self._conf_thresh.setValue(0.85); self._conf_thresh.setDecimals(2)
-        self._conf_thresh.setToolTip("Confidence cutoff for 'uncertain only' / Review.")
+        self._conf_thresh.setPrefix("conf< ")
+        self._conf_thresh.setEnabled(False)  # only relevant with 'Uncertain only'
+        self._conf_thresh.setToolTip("Confidence cutoff for 'Uncertain only' / Review.")
+        self._uncertain_only.toggled.connect(self._conf_thresh.setEnabled)
 
         self._load_btn = QPushButton("Load pool")
+        self._load_btn.setObjectName("primary")
         self._load_btn.setToolTip(
             "Score every unlabelled cell with the chosen model and load the "
             "most-uncertain into memory. Subsequent pages turn instantly."
@@ -612,6 +643,7 @@ class LabelTrainPanel(QWidget):
         self._load_btn.clicked.connect(lambda: self._load_pool(review=False))
 
         self._review_btn = QPushButton("Review predictions")
+        self._review_btn.setObjectName("ghost")
         self._review_btn.setToolTip(
             "Load cells with the model's prediction pre-applied (including "
             "already-labelled ones), so you only flip the wrong ones with g/b, "
@@ -619,62 +651,57 @@ class LabelTrainPanel(QWidget):
         )
         self._review_btn.clicked.connect(lambda: self._load_pool(review=True))
 
-        self._save_btn = QPushButton("Save labels")
-        self._save_btn.clicked.connect(lambda: self._save_batch())
-        self._save_btn.setEnabled(False)
+        # Row 1 — get cells.
+        bar.addWidget(_labeled("Model:", self._model_combo))
+        bar.addWidget(_labeled("Pool:", self._pool_size))
+        bar.addWidget(_labeled("Page:", self._page_size))
+        bar.addWidget(self._diversify)
+        bar.addWidget(self._uncertain_only)
+        bar.addWidget(self._conf_thresh)
+        bar.addWidget(self._load_btn)
+        bar.addWidget(self._review_btn)
+        v.addWidget(bar_host)
 
-        self._prev_btn = QPushButton("← Prev")
+        # Bottom action bar (added to the layout below the grid, at the end of
+        # this method — where you land after labelling a page). Pagination + the
+        # primary save stay visible; rare actions live in a "More" menu.
+        actions_host, actions = _flow_row()
+        self._prev_btn = QPushButton("← Prev"); self._prev_btn.setEnabled(False)
         self._prev_btn.clicked.connect(self._prev_page)
-        self._prev_btn.setEnabled(False)
-        self._next_btn = QPushButton("Next →")
+        self._next_btn = QPushButton("Next →"); self._next_btn.setEnabled(False)
         self._next_btn.clicked.connect(self._next_page)
-        self._next_btn.setEnabled(False)
-
         self._save_next_btn = QPushButton("Save && next page")
         self._save_next_btn.setObjectName("primary")
         self._save_next_btn.clicked.connect(self._save_then_next_page)
         self._save_next_btn.setEnabled(False)
 
-        self._reset_btn = QPushButton("Reset session")
-        self._reset_btn.setToolTip(
-            "Forget which cells have been shown this session, so previously-skipped "
-            "cells become eligible again."
-        )
-        self._reset_btn.clicked.connect(self._reset_session)
+        more_menu = QMenu(self)
+        self._save_action = QAction("Save labels (no advance)", self)
+        self._save_action.setEnabled(False)
+        self._save_action.triggered.connect(lambda: self._save_batch())
+        more_menu.addAction(self._save_action)
+        reset_action = QAction("Reset session", self)
+        reset_action.triggered.connect(self._reset_session)
+        more_menu.addAction(reset_action)
+        more_menu.addSeparator()
+        open_action = QAction("Open labels folder", self)
+        open_action.triggered.connect(self._open_labels_folder)
+        more_menu.addAction(open_action)
+        export_action = QAction("Export labels…", self)
+        export_action.triggered.connect(self._export_labels)
+        more_menu.addAction(export_action)
+        self._more_btn = QPushButton("More ▾")
+        self._more_btn.setMenu(more_menu)
 
-        bar.addWidget(QLabel("Model:"))
-        bar.addWidget(self._model_combo)
-        bar.addWidget(QLabel("Pool:"))
-        bar.addWidget(self._pool_size)
-        bar.addWidget(QLabel("Page:"))
-        bar.addWidget(self._page_size)
-        bar.addWidget(self._diversify)
-        bar.addWidget(self._uncertain_only)
-        bar.addWidget(QLabel("conf<"))
-        bar.addWidget(self._conf_thresh)
-        bar.addWidget(self._load_btn)
-        bar.addWidget(self._review_btn)
-        bar.addWidget(self._save_btn)
-        bar.addWidget(self._prev_btn)
-        bar.addWidget(self._next_btn)
-        bar.addWidget(self._save_next_btn)
-        bar.addWidget(self._reset_btn)
-        v.addWidget(bar_host)
-
-        # Secondary row: folder actions.
-        actions_host, actions = _flow_row()
-        self._open_labels_btn = QPushButton("Open labels folder")
-        self._open_labels_btn.setObjectName("ghost")
-        self._open_labels_btn.clicked.connect(self._open_labels_folder)
-        self._export_btn = QPushButton("Export labels…")
-        self._export_btn.setObjectName("ghost")
-        self._export_btn.clicked.connect(self._export_labels)
         self._balance_label = QLabel("")
         self._balance_label.setObjectName("caption")
-        actions.addWidget(self._open_labels_btn)
-        actions.addWidget(self._export_btn)
+
+        actions.addWidget(self._prev_btn)
+        actions.addWidget(self._next_btn)
+        actions.addWidget(self._save_next_btn)
+        actions.addWidget(self._more_btn)
         actions.addWidget(self._balance_label)
-        v.addWidget(actions_host)
+        self._actions_host = actions_host  # added below the grid at end of method
 
         self._info_label = QLabel("(no source — pick an HDF5)")
         self._info_label.setObjectName("muted")
@@ -709,6 +736,9 @@ class LabelTrainPanel(QWidget):
         scroll.setWidget(self._grid_host)
         v.addWidget(scroll, stretch=1)
 
+        # Pagination + save below the cells — where you land after labelling.
+        v.addWidget(self._actions_host)
+
         return box
 
     def _build_train_section(self) -> QWidget:
@@ -738,15 +768,29 @@ class LabelTrainPanel(QWidget):
         self._train_btn.setObjectName("primary")
         self._train_btn.clicked.connect(self._start_training)
 
-        bar.addWidget(QLabel("Epochs:")); bar.addWidget(self._epochs)
-        bar.addWidget(QLabel("LR:"));     bar.addWidget(self._lr)
+        self._adv_toggle = QPushButton("Advanced ▸")
+        self._adv_toggle.setObjectName("ghost")
+        self._adv_toggle.setCheckable(True)
+        self._adv_toggle.setToolTip("Show device, batch size, split fractions, patience, seed.")
+        self._adv_toggle.toggled.connect(self._toggle_advanced)
+
+        self._open_model_btn = QPushButton("Open model folder")
+        self._open_model_btn.setObjectName("ghost")
+        self._open_model_btn.clicked.connect(self._open_model_folder)
+        self._open_model_btn.setEnabled(False)
+
+        bar.addWidget(_labeled("Epochs:", self._epochs))
+        bar.addWidget(_labeled("LR:", self._lr))
         bar.addWidget(self._fine_tune)
         bar.addWidget(self._freeze)
         bar.addWidget(self._train_btn)
+        bar.addWidget(self._adv_toggle)
+        bar.addWidget(self._open_model_btn)
         v.addWidget(bar_host)
 
-        # Advanced row.
+        # Advanced row — hidden until the user opens the disclosure.
         adv_host, adv = _flow_row()
+        self._adv_host = adv_host
         self._device_combo = QComboBox()
         self._device_combo.addItem("Auto", userData=None)
         self._device_combo.addItem("CPU", userData="cpu")
@@ -763,17 +807,13 @@ class LabelTrainPanel(QWidget):
             "(auto-disabled on tiny datasets)."
         )
         self._seed = QSpinBox(); self._seed.setRange(0, 2**31 - 1); self._seed.setValue(42)
-        adv.addWidget(QLabel("Device:")); adv.addWidget(self._device_combo)
-        adv.addWidget(QLabel("Batch:")); adv.addWidget(self._batch)
-        adv.addWidget(QLabel("Patience:")); adv.addWidget(self._patience)
-        adv.addWidget(QLabel("Val:")); adv.addWidget(self._val_frac)
-        adv.addWidget(QLabel("Test:")); adv.addWidget(self._test_frac)
-        adv.addWidget(QLabel("Seed:")); adv.addWidget(self._seed)
-        self._open_model_btn = QPushButton("Open model folder")
-        self._open_model_btn.setObjectName("ghost")
-        self._open_model_btn.clicked.connect(self._open_model_folder)
-        self._open_model_btn.setEnabled(False)
-        adv.addWidget(self._open_model_btn)
+        adv.addWidget(_labeled("Device:", self._device_combo))
+        adv.addWidget(_labeled("Batch:", self._batch))
+        adv.addWidget(_labeled("Patience:", self._patience))
+        adv.addWidget(_labeled("Val:", self._val_frac))
+        adv.addWidget(_labeled("Test:", self._test_frac))
+        adv.addWidget(_labeled("Seed:", self._seed))
+        adv_host.setVisible(False)
         v.addWidget(adv_host)
 
         self._train_progress = QProgressBar()
@@ -790,28 +830,11 @@ class LabelTrainPanel(QWidget):
 
         return box
 
-    # ── model picker ──────────────────────────────────────────────────
+    def _toggle_advanced(self, on: bool) -> None:
+        self._adv_host.setVisible(on)
+        self._adv_toggle.setText("Advanced ▾" if on else "Advanced ▸")
 
-    def _list_trained_models(self) -> list[tuple[Path, Optional[float]]]:
-        """(<trained_dir>, best_val_acc) for every model under ~/.modelprep/models."""
-        root = _trained_models_root()
-        out: list[tuple[Path, Optional[float]]] = []
-        if not root.exists():
-            return out
-        import json
-        for d in sorted(root.glob("*"), reverse=True):
-            best = d / "best_model.pth"
-            if not best.exists():
-                continue
-            acc = None
-            cfg = d / "training_config.json"
-            if cfg.exists():
-                try:
-                    acc = json.loads(cfg.read_text()).get("best_val_acc")
-                except Exception:  # noqa: BLE001
-                    acc = None
-            out.append((d, acc))
-        return out
+    # ── model picker ──────────────────────────────────────────────────
 
     def _populate_model_combo(self, select_path: Optional[str] = None) -> None:
         prev = select_path if select_path is not None else self._model_combo.currentData()
@@ -820,11 +843,8 @@ class LabelTrainPanel(QWidget):
         self._model_combo.addItem("none (random order)", userData=None)
         for name, path in list_preset_models().items():
             self._model_combo.addItem(f"preset: {name}", userData=str(path))
-        for d, acc in self._list_trained_models():
-            label = f"trained: {d.name}"
-            if acc is not None:
-                label += f" (acc {acc:.2f})"
-            self._model_combo.addItem(label, userData=str(d / "best_model.pth"))
+        for m in list_trained_models():
+            self._model_combo.addItem(f"trained: {m.label()}", userData=str(m.weights))
         self._model_combo.addItem("Browse .pth…", userData="__browse__")
         # Restore a sensible selection.
         if prev and prev != "__browse__":
@@ -882,7 +902,7 @@ class LabelTrainPanel(QWidget):
 
         self._load_btn.setEnabled(False)
         self._review_btn.setEnabled(False)
-        self._save_btn.setEnabled(False)
+        self._save_action.setEnabled(False)
         self._save_next_btn.setEnabled(False)
         self._progress.setValue(0)
         what = "predictions to review" if review else "cells"
@@ -936,7 +956,7 @@ class LabelTrainPanel(QWidget):
 
         if not self._pool:
             self._populate_grid_from_page()
-            self._save_btn.setEnabled(False)
+            self._save_action.setEnabled(False)
             self._save_next_btn.setEnabled(False)
             self._status.setText(
                 "No more unseen cells. Use 'Reset session' to revisit skipped cells."
@@ -944,7 +964,7 @@ class LabelTrainPanel(QWidget):
             return
 
         self._populate_grid_from_page()
-        self._save_btn.setEnabled(True)
+        self._save_action.setEnabled(True)
         self._save_next_btn.setEnabled(True)
         self._update_page_status()
         if self._review_mode:
@@ -1063,7 +1083,7 @@ class LabelTrainPanel(QWidget):
         page_size = self._page_size.value()
         if self._page_index * page_size >= len(self._pool):
             self._populate_grid_from_page()
-            self._save_btn.setEnabled(False)
+            self._save_action.setEnabled(False)
             self._save_next_btn.setEnabled(False)
             self._next_btn.setEnabled(False)
             self._status.setText(
@@ -1236,7 +1256,7 @@ class LabelTrainPanel(QWidget):
             QMessageBox.warning(self.train_section, "No source", "Pick an HDF5 first.")
             return
         self._stop_worker(self._train_worker)
-        out_dir = _trained_models_root() / f"trained_{int(time.time())}"
+        out_dir = new_run_dir(self._model_name)
 
         pretrained = self._current_model_path() if self._fine_tune.isChecked() else None
         device = self._device_combo.currentData()
@@ -1264,6 +1284,7 @@ class LabelTrainPanel(QWidget):
             device=device,
             freeze_backbone=self._freeze.isChecked(),
             pretrained=pretrained,
+            model_name=self._model_name,
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.finished.connect(self._on_train_finished)
