@@ -2,7 +2,7 @@ name: Release
 
 # Driven by release-please. Conventional commits on `main` (`feat:`,
 # `fix:`, `BREAKING CHANGE:`) accumulate into a single open "release"
-# PR that bumps src/mycoprep/__init__.py + pyproject.toml. Merging that
+# PR that bumps src/mycomorph/__init__.py + pyproject.toml. Merging that
 # PR cuts a new GitHub Release; this workflow then builds the Windows
 # PyInstaller bundle and uploads it to the release.
 
@@ -53,22 +53,22 @@ jobs:
         run: |
           $tag = "${{ needs.release-please.outputs.tag_name }}"
           $tagVersion = $tag.TrimStart('v')
-          $pkgVersion = (python -c "import mycoprep; print(mycoprep.__version__)").Trim()
+          $pkgVersion = (python -c "import mycomorph; print(mycomorph.__version__)").Trim()
           if ($tagVersion -ne $pkgVersion) {
-            Write-Error "Tag '$tag' (=> '$tagVersion') does not match mycoprep.__version__ ('$pkgVersion')."
+            Write-Error "Tag '$tag' (=> '$tagVersion') does not match mycomorph.__version__ ('$pkgVersion')."
             exit 1
           }
           Write-Host "Tag $tag matches package version $pkgVersion"
 
       - name: Build PyInstaller bundle
-        run: pyinstaller packaging/mycoprep.spec
+        run: pyinstaller packaging/mycomorph.spec
 
       - name: Zip bundle
         shell: pwsh
         run: |
-          Compress-Archive -Path "dist/MycoPrep/*" -DestinationPath "dist/MycoPrep-windows.zip" -Force
+          Compress-Archive -Path "dist/MycoMorph/*" -DestinationPath "dist/MycoMorph-windows.zip" -Force
 
       - name: Upload asset to Release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/MycoPrep-windows.zip --clobber
+        run: gh release upload "${{ needs.release-please.outputs.tag_name }}" dist/MycoMorph-windows.zip --clobber
