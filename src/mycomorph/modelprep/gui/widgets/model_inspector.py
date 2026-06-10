@@ -66,9 +66,12 @@ class ModelInspector(QWidget):
             from matplotlib.figure import Figure
             self._fig = Figure(figsize=(4.6, 2.0), tight_layout=True, facecolor="#ffffff")
             self._canvas = FigureCanvasQTAgg(self._fig)
-            self._canvas.setSizePolicy(QSizePolicy.Policy.Fixed, QSizePolicy.Policy.Fixed)
+            # Resizable (max 660) so the train card doesn't force a wide minimum
+            # width on the whole window.
+            self._canvas.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
             self._canvas.setFixedHeight(220)
-            self._canvas.setFixedWidth(660)
+            self._canvas.setMinimumWidth(260)
+            self._canvas.setMaximumWidth(660)
             root.addWidget(self._canvas, alignment=Qt.AlignmentFlag.AlignLeft)
         except Exception:  # noqa: BLE001
             self._canvas = None

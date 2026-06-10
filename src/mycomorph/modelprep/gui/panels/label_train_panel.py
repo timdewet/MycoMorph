@@ -61,8 +61,20 @@ from ...core.labels_store import (
 )
 from ..palette import COLORS, LABEL_COLORS
 from ..ui import tokens
+from ..ui.flow_layout import FlowLayout
 from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
+
+
+def _flow_row(spacing: int = 6) -> tuple[QWidget, FlowLayout]:
+    """A host widget carrying a wrapping FlowLayout, sized height-for-width so
+    the containing column can narrow freely."""
+    host = QWidget()
+    layout = FlowLayout(host, hspacing=spacing, vspacing=spacing)
+    sp = host.sizePolicy()
+    sp.setHeightForWidth(True)
+    host.setSizePolicy(sp)
+    return host, layout
 
 
 # Where GUI-trained models land (kept in sync with _start_training).
@@ -557,9 +569,14 @@ class LabelTrainPanel(QWidget):
         v.setContentsMargins(12, 18, 12, 12)
         v.setSpacing(6)
 
-        bar = QHBoxLayout()
+        bar_host, bar = _flow_row()
 
         self._model_combo = QComboBox()
+        self._model_combo.setMaximumWidth(280)
+        self._model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        self._model_combo.setMinimumContentsLength(14)
         self._populate_model_combo()
         self._model_combo.activated.connect(self._on_model_combo_activated)
 
@@ -642,10 +659,10 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(self._next_btn)
         bar.addWidget(self._save_next_btn)
         bar.addWidget(self._reset_btn)
-        v.addLayout(bar)
+        v.addWidget(bar_host)
 
         # Secondary row: folder actions.
-        actions = QHBoxLayout()
+        actions_host, actions = _flow_row()
         self._open_labels_btn = QPushButton("Open labels folder")
         self._open_labels_btn.setObjectName("ghost")
         self._open_labels_btn.clicked.connect(self._open_labels_folder)
@@ -656,9 +673,8 @@ class LabelTrainPanel(QWidget):
         self._balance_label.setObjectName("caption")
         actions.addWidget(self._open_labels_btn)
         actions.addWidget(self._export_btn)
-        actions.addStretch(1)
         actions.addWidget(self._balance_label)
-        v.addLayout(actions)
+        v.addWidget(actions_host)
 
         self._info_label = QLabel("(no source — pick an HDF5)")
         self._info_label.setObjectName("muted")
@@ -703,9 +719,10 @@ class LabelTrainPanel(QWidget):
 
         self._stats_label = QLabel("")
         self._stats_label.setObjectName("muted")
+        self._stats_label.setWordWrap(True)
         v.addWidget(self._stats_label)
 
-        bar = QHBoxLayout()
+        bar_host, bar = _flow_row()
         self._epochs = QSpinBox(); self._epochs.setRange(1, 500); self._epochs.setValue(40)
         self._lr = QDoubleSpinBox()
         self._lr.setRange(1e-6, 1.0); self._lr.setDecimals(6)
@@ -725,12 +742,11 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(QLabel("LR:"));     bar.addWidget(self._lr)
         bar.addWidget(self._fine_tune)
         bar.addWidget(self._freeze)
-        bar.addStretch(1)
         bar.addWidget(self._train_btn)
-        v.addLayout(bar)
+        v.addWidget(bar_host)
 
         # Advanced row.
-        adv = QHBoxLayout()
+        adv_host, adv = _flow_row()
         self._device_combo = QComboBox()
         self._device_combo.addItem("Auto", userData=None)
         self._device_combo.addItem("CPU", userData="cpu")
@@ -753,13 +769,12 @@ class LabelTrainPanel(QWidget):
         adv.addWidget(QLabel("Val:")); adv.addWidget(self._val_frac)
         adv.addWidget(QLabel("Test:")); adv.addWidget(self._test_frac)
         adv.addWidget(QLabel("Seed:")); adv.addWidget(self._seed)
-        adv.addStretch(1)
         self._open_model_btn = QPushButton("Open model folder")
         self._open_model_btn.setObjectName("ghost")
         self._open_model_btn.clicked.connect(self._open_model_folder)
         self._open_model_btn.setEnabled(False)
         adv.addWidget(self._open_model_btn)
-        v.addLayout(adv)
+        v.addWidget(adv_host)
 
         self._train_progress = QProgressBar()
         self._train_progress.setRange(0, 1000); self._train_progress.setValue(0)
