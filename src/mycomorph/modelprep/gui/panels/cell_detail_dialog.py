@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QPushButton,
+    QSizePolicy,
     QSlider,
     QVBoxLayout,
     QWidget,
@@ -109,9 +110,14 @@ class CellDetailView(QDialog):
         self._img_key: Optional[tuple] = None  # (idx, mode, window_px) shown
         self._req_id = 0
         self._inflight: list[_ContextWorker] = []
+        self._src_rgb = None  # last rendered image, kept so resize can rescale it
 
         self.setWindowTitle("Cell inspector")
         self.setModal(True)
+        # Start roughly square around IMAGE_PX with room for the side panel; the
+        # image grows as the user enlarges the window.
+        self.resize(self.IMAGE_PX + 360, self.IMAGE_PX + 120)
+        self.setMinimumSize(560, 440)
         self._build_ui()
         self._sync_view()
 
@@ -122,18 +128,20 @@ class CellDetailView(QDialog):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(12)
 
-        # Left: the large image + a status line.
+        # Left: the large image + a status line. The image expands to fill the
+        # window so making it larger gives a bigger view.
         left = QVBoxLayout()
         left.setSpacing(6)
         self._image = QLabel()
-        self._image.setFixedSize(self.IMAGE_PX, self.IMAGE_PX)
+        self._image.setMinimumSize(256, 256)
+        self._image.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self._image.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        left.addWidget(self._image)
+        left.addWidget(self._image, stretch=1)
         self._view_status = QLabel("")
         self._view_status.setStyleSheet(f"color: {COLORS['muted_text']};")
         self._view_status.setWordWrap(True)
         left.addWidget(self._view_status)
-        root.addLayout(left)
+        root.addLayout(left, stretch=1)
 
         # Right: metadata + controls.
         side = QVBoxLayout()
@@ -218,7 +226,7 @@ class CellDetailView(QDialog):
         hint.setWordWrap(True)
         side.addWidget(hint)
 
-        root.addLayout(side, stretch=1)
+        root.addLayout(side)
 
     # ── view sync ──────────────────────────────────────────────────────
 
@@ -271,8 +279,7 @@ class CellDetailView(QDialog):
         if request_id != self._req_id:
             return  # superseded by newer navigation/zoom
         if isinstance(ctx, FovContext):
-            rgb = to_outlined_rgb(ctx.image, ctx.outline)
-            self._image.setPixmap(self._pixmap_from_rgb(rgb))
+            self._set_image_rgb(to_outlined_rgb(ctx.image, ctx.outline))
             self._view_status.setText(
                 f"Original image · FOV {ctx.fov_index} · {ctx.window_px}px window"
             )
@@ -288,20 +295,37 @@ class CellDetailView(QDialog):
     def _show_crop(self, record: CropRecord) -> None:
         phase = record.full_crop[self._phase_idx]
         mask = record.full_crop[self._mask_idx] > 0.5
-        rgb = to_outlined_rgb(phase, outline_of(mask))
-        self._image.setPixmap(self._pixmap_from_rgb(rgb))
+        self._set_image_rgb(to_outlined_rgb(phase, outline_of(mask)))
         if self._mode == "crop":
             self._view_status.setText("Isolated crop (HDF5)")
 
-    def _pixmap_from_rgb(self, rgb) -> QPixmap:
+    def _set_image_rgb(self, rgb) -> None:
+        """Cache the source image and render it at the current label size."""
+        self._src_rgb = rgb
+        self._apply_pixmap()
+
+    def _apply_pixmap(self) -> None:
+        """Scale the cached source image to fit the image label (square,
+        aspect-preserved). Called on every render and on window resize."""
+        if self._src_rgb is None:
+            return
+        rgb = self._src_rgb
         h, w = rgb.shape[:2]
         qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
-        return QPixmap.fromImage(qimg).scaled(
-            self.IMAGE_PX - 16,
-            self.IMAGE_PX - 16,
-            Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+        avail = self._image.size()
+        side = max(64, min(avail.width(), avail.height()) - 16)
+        self._image.setPixmap(
+            QPixmap.fromImage(qimg).scaled(
+                side,
+                side,
+                Qt.AspectRatioMode.KeepAspectRatio,
+                Qt.TransformationMode.SmoothTransformation,
+            )
         )
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        self._apply_pixmap()
 
     def _meta_html(self, record: CropRecord, score: float) -> str:
         rows = [
