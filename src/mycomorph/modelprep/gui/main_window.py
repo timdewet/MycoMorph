@@ -33,6 +33,7 @@ from PyQt6.QtWidgets import (
 from ._resources import resource_root
 from ..core.device import device_label, gpu_available
 from .panels.label_train_panel import LabelTrainPanel
+from .panels.models_panel import ModelsPanel
 from .panels.source_panel import SourcePanel
 from .ui import tokens
 from .ui.elevation import apply_shadow
@@ -46,9 +47,10 @@ SETTINGS_FILE = Path.home() / ".modelprep" / "settings.json"
 # status dots or group dividers, since ModelPrep has no per-stage run state to
 # surface there (label/train carry their own progress bars).
 NAV_ENTRIES = [
-    NavEntry("source", "Source",      "folder", pipeline=False),
-    NavEntry("label",  "Label cells", "label",  pipeline=False),
-    NavEntry("train",  "Fine-tune",   "model",  pipeline=False),
+    NavEntry("source", "Source",      "folder",   pipeline=False),
+    NavEntry("label",  "Label cells", "label",    pipeline=False),
+    NavEntry("train",  "Fine-tune",   "model",    pipeline=False),
+    NavEntry("models", "Models",      "analysis", pipeline=False),
 ]
 
 
@@ -73,10 +75,13 @@ class MainWindow(QMainWindow):
 
         self.source_panel = SourcePanel()
         self.label_train_panel = LabelTrainPanel()
+        self.models_panel = ModelsPanel()
 
         # Wire signals before chrome so callbacks can reach widgets.
         self.source_panel.sourceChanged.connect(self._on_source_changed)
         self.source_panel.modelNameChanged.connect(self._on_model_name_changed)
+        self.models_panel.useModelRequested.connect(self._on_use_model)
+        self.models_panel.modelsChanged.connect(self._on_models_changed)
 
         self._build_chrome()
         self._apply_card_shadows()
@@ -127,6 +132,7 @@ class MainWindow(QMainWindow):
         self._stack.addWidget(self._wrap_scroll(self.source_panel))
         self._stack.addWidget(self._wrap_fill(self.label_train_panel.label_section))
         self._stack.addWidget(self._wrap_scroll(self.label_train_panel.train_section))
+        self._stack.addWidget(self._wrap_fill(self.models_panel))
 
         # Body: sidebar | divider | stack.
         body = QWidget()
@@ -249,9 +255,28 @@ class MainWindow(QMainWindow):
         if entry.key == "source":
             # Pick up names of models trained since this page was last shown.
             self.source_panel.refresh_models()
+        elif entry.key == "models":
+            # Pick up runs trained since this page was last shown.
+            self.models_panel.refresh()
         self._breadcrumb.setText(
             f"Step {idx + 1} of {len(NAV_ENTRIES)} · {entry.label}"
         )
+
+    # ── models tab ──────────────────────────────────────────────────────────
+
+    def _on_use_model(self, weights: Path) -> None:
+        """Models tab → make this model active and jump to Label cells."""
+        self.label_train_panel.select_model(weights)
+        try:
+            label_idx = next(i for i, e in enumerate(NAV_ENTRIES) if e.key == "label")
+        except StopIteration:
+            return
+        self._sidebar.set_current(label_idx)
+
+    def _on_models_changed(self) -> None:
+        """A run was deleted — drop it from the model pickers too."""
+        self.label_train_panel.refresh_models()
+        self.source_panel.refresh_models()
 
     def _on_source_changed(
         self, h5_path: Optional[Path], labels_dir: Optional[Path]

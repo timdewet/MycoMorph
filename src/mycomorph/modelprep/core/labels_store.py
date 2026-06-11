@@ -10,7 +10,12 @@ Layout (chosen to never mutate the HDF5):
 
 CSV columns:
     cell_uid, label_idx, label_name, area_px, labeled_at, labeler,
-    session_id, source_h5, model_at_label, confidence_good_at_label
+    session_id, source_h5, model_at_label, confidence_good_at_label, split
+
+``split`` is "train" (default) or "test". Test rows form a frozen hold-out set:
+they are never trained on (``to_training_dataset`` skips them) and are the fixed
+evaluation set (``to_eval_dataset``). Files written before ``split`` existed are
+migrated in place on the next write (see ``_ensure_csv_schema``).
 """
 
 from __future__ import annotations
@@ -29,13 +34,17 @@ from typing import Iterable, Optional
 import numpy as np
 
 
-LABELS_SCHEMA_VERSION = "1.0"
+LABELS_SCHEMA_VERSION = "1.1"
 LABELS_FILENAME = "labels.csv"
 MANIFEST_FILENAME = "manifest.json"
 DEFAULT_LABELS_DIRNAME = "modelprep_labels"
 
 LABEL_NAMES = ("good", "bad")
 LABEL_TO_IDX = {n: i for i, n in enumerate(LABEL_NAMES)}
+
+SPLIT_TRAIN = "train"
+SPLIT_TEST = "test"
+SPLITS = (SPLIT_TRAIN, SPLIT_TEST)
 
 
 CSV_COLUMNS = (
@@ -49,6 +58,7 @@ CSV_COLUMNS = (
     "source_h5",
     "model_at_label",
     "confidence_good_at_label",
+    "split",
 )
 
 
@@ -64,6 +74,7 @@ class LabelRow:
     source_h5: str = ""
     model_at_label: str = "none"
     confidence_good_at_label: float = float("nan")
+    split: str = SPLIT_TRAIN
 
     def as_row(self) -> list:
         return [getattr(self, col) for col in CSV_COLUMNS]
@@ -229,6 +240,7 @@ class LabelsStore:
                         source_h5=r.get("source_h5", ""),
                         model_at_label=r.get("model_at_label", "none"),
                         confidence_good_at_label=_safe_float(r.get("confidence_good_at_label")),
+                        split=(r.get("split") or SPLIT_TRAIN),
                     ))
                 except (KeyError, ValueError):
                     n_skipped += 1
@@ -247,13 +259,26 @@ class LabelsStore:
     def labeled_uids(self) -> set[str]:
         return set(self.load().latest_by_uid().keys())
 
-    def class_counts(self) -> dict[str, int]:
+    def class_counts(self, split: Optional[str] = None) -> dict[str, int]:
+        """good/bad counts, optionally restricted to one split ("train"|"test")."""
         latest = self.load().latest_by_uid()
         counts = {n: 0 for n in LABEL_NAMES}
         for row in latest.values():
+            if split is not None and row.split != split:
+                continue
             if row.label_name in counts:
                 counts[row.label_name] += 1
         return counts
+
+    def split_counts(self) -> dict[str, dict[str, int]]:
+        """Per-split good/bad counts: ``{"train": {...}, "test": {...}}``."""
+        latest = self.load().latest_by_uid()
+        out = {s: {n: 0 for n in LABEL_NAMES} for s in SPLITS}
+        for row in latest.values():
+            bucket = out.get(row.split if row.split in out else SPLIT_TRAIN)
+            if row.label_name in bucket:
+                bucket[row.label_name] += 1
+        return out
 
     # ── write ───────────────────────────────────────────────────────────
 
@@ -274,6 +299,40 @@ class LabelsStore:
         except Exception:  # noqa: BLE001
             pass
 
+    def _ensure_csv_schema(self) -> None:
+        """One-time, in-place migration: if ``labels.csv`` predates a column
+        (e.g. ``split``), rewrite it with the current header and back-fill
+        defaults. No-op when the file is absent or already current.
+
+        Without this, appending current-schema rows under an old, shorter
+        header would misalign columns on the next read.
+        """
+        if not self.csv_path.exists():
+            return
+        with open(self.csv_path, newline="") as f:
+            reader = csv.reader(f)
+            try:
+                header = next(reader)
+            except StopIteration:
+                return  # empty file — append_batch will write a fresh header
+            if list(header) == list(CSV_COLUMNS):
+                return
+            old_rows = list(csv.DictReader(f, fieldnames=header))
+
+        defaults = {col: "" for col in CSV_COLUMNS}
+        defaults["split"] = SPLIT_TRAIN
+        defaults["model_at_label"] = "none"
+        tmp = self.csv_path.with_suffix(".csv.tmp")
+        with open(tmp, "w", newline="") as f:
+            writer = csv.writer(f)
+            writer.writerow(CSV_COLUMNS)
+            for r in old_rows:
+                writer.writerow([(r.get(col) if r.get(col) not in (None, "") else defaults[col])
+                                 for col in CSV_COLUMNS])
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.csv_path)
+
     def append_batch(self, rows: Iterable[LabelRow]) -> int:
         """Append rows to ``labels.csv`` (creating it with a header if empty).
 
@@ -286,6 +345,7 @@ class LabelsStore:
         if not rows:
             return 0
         self.dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_csv_schema()
 
         with open(self.csv_path, "a", newline="") as f:
             self._lock(f)
@@ -338,18 +398,40 @@ class LabelsStore:
         self,
         reader,
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
-        """Return ``(crops, labels, cell_uids_used)`` ready for ``train()``.
+        """Return ``(crops, labels, cell_uids_used)`` for the **train** split,
+        ready for ``train()``. Hold-out test rows are excluded.
 
-        Cells whose ``cell_uid`` is in labels but not in the HDF5 are skipped
-        (with a count returned in the third element). The latest row per uid
-        wins.
+        Cells whose ``cell_uid`` is in labels but not in the HDF5 are skipped.
+        The latest row per uid wins.
         """
+        return self._to_dataset(reader, split=SPLIT_TRAIN, require=True)
+
+    def to_eval_dataset(
+        self,
+        reader,
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
+        """Return ``(crops, labels, cell_uids_used)`` for the frozen **test**
+        split, or empty arrays when no hold-out set has been labelled."""
+        return self._to_dataset(reader, split=SPLIT_TEST, require=False)
+
+    def _to_dataset(
+        self,
+        reader,
+        split: str,
+        require: bool,
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         latest = self.load().latest_by_uid()
-        if not latest:
-            raise ValueError(
-                f"No labels found in {self.csv_path}. "
-                f"Run `modelprep-cli label` first."
+        rows = {uid: row for uid, row in latest.items() if row.split == split}
+        if not rows:
+            if require:
+                raise ValueError(
+                    f"No '{split}' labels found in {self.csv_path}. "
+                    f"Run `modelprep-cli label` first."
+                )
+            empty_crops = np.empty(
+                (0, 3, reader.classifier_size, reader.classifier_size), dtype=np.float32
             )
+            return empty_crops, np.empty((0,), dtype=np.int64), []
 
         h5_uid_to_idx: dict[str, int] = {
             uid: i for i, uid in enumerate(reader.cell_uids)
@@ -358,7 +440,7 @@ class LabelsStore:
         keep_labels: list[int] = []
         keep_uids: list[str] = []
         skipped: list[str] = []
-        for uid, row in latest.items():
+        for uid, row in rows.items():
             idx = h5_uid_to_idx.get(uid)
             if idx is None:
                 skipped.append(uid)
@@ -369,7 +451,7 @@ class LabelsStore:
 
         if not keep_indices:
             raise ValueError(
-                f"None of the {len(latest)} labelled cells could be found in "
+                f"None of the {len(rows)} '{split}' labelled cells could be found in "
                 f"{reader.path.name}. Did you point at the right HDF5?"
             )
 

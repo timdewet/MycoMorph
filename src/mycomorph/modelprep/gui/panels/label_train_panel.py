@@ -55,11 +55,16 @@ from ...core.crops_h5 import CropRecord, HDF5CropsReader
 from ...core.fov_context import FovContextProvider
 from ...core.labels_store import (
     LABEL_TO_IDX,
+    SPLIT_TEST,
+    SPLIT_TRAIN,
     LabelRow,
     LabelsStore,
     default_labels_dir_for,
     make_session_id,
 )
+
+# Default target size for a balanced hold-out test set (≈ half per class).
+TEST_SET_TARGET = 1000
 from ..palette import COLORS, LABEL_COLORS
 from ..ui import tokens
 from ..ui.flow_layout import FlowLayout
@@ -117,6 +122,7 @@ class _ActiveLearningWorker(QThread):
         review: bool = False,
         uncertain_only: bool = False,
         confidence_threshold: float = 0.85,
+        select: str = "uncertain",
     ) -> None:
         super().__init__()
         self.h5_path = h5_path
@@ -127,6 +133,10 @@ class _ActiveLearningWorker(QThread):
         self.review = review
         self.uncertain_only = uncertain_only
         self.confidence_threshold = confidence_threshold
+        # Ranking strategy: "uncertain" (active learning, least-confident first),
+        # "good" (highest P(good) first — surfaces the rare class for a balanced
+        # hold-out set), or "random" (representative sampling, no model needed).
+        self.select = select
         self._cancel = False
 
     def cancel(self) -> None:
@@ -174,7 +184,7 @@ class _ActiveLearningWorker(QThread):
                 self.finished.emit([], "No unseen cells in this HDF5.")
                 return
 
-            if self.model_path is None:
+            if self.model_path is None or self.select == "random":
                 rng = np.random.default_rng(42)
                 rng.shuffle(unseen_idx)
                 picked = unseen_idx[: self.n_target]
@@ -197,29 +207,37 @@ class _ActiveLearningWorker(QThread):
                         hi / len(unseen_idx),
                         f"Scoring cells: {hi}/{len(unseen_idx)}",
                     )
-                # max-class confidence per cell (== how sure the model is).
-                maxconf = np.maximum(scores_all, 1.0 - scores_all)
-                if self.uncertain_only:
-                    keep = np.flatnonzero(maxconf < self.confidence_threshold)
-                    if keep.size == 0:
-                        self.finished.emit(
-                            [], f"No cells below confidence {self.confidence_threshold:.2f}. "
-                                f"Raise the threshold or turn off 'uncertain only'.")
-                        return
-                    sub_idx = unseen_idx[keep]
-                    sub_scores = scores_all[keep]
-                    sub_conf = maxconf[keep]
+                if self.select == "good":
+                    # Highest P(good) first — surfaces the rare 'good' class so a
+                    # balanced hold-out set fills without labelling thousands of
+                    # mostly-'bad' cells. (Human label remains ground truth.)
+                    rank = np.argsort(-scores_all)
+                    picked = unseen_idx[rank][: self.n_target]
+                    scores = scores_all[rank][: self.n_target]
                 else:
-                    sub_idx, sub_scores, sub_conf = unseen_idx, scores_all, maxconf
-                # Least-confident first (identical to |0.5 - P(good)| ascending).
-                rank = np.argsort(sub_conf)
-                ranked_idx = sub_idx[rank]
-                ranked_scores = sub_scores[rank]
-                if self.diversify and not self.review:
-                    picked, scores = self._diversified(reader, ranked_idx, ranked_scores)
-                else:
-                    picked = ranked_idx[: self.n_target]
-                    scores = ranked_scores[: self.n_target]
+                    # max-class confidence per cell (== how sure the model is).
+                    maxconf = np.maximum(scores_all, 1.0 - scores_all)
+                    if self.uncertain_only:
+                        keep = np.flatnonzero(maxconf < self.confidence_threshold)
+                        if keep.size == 0:
+                            self.finished.emit(
+                                [], f"No cells below confidence {self.confidence_threshold:.2f}. "
+                                    f"Raise the threshold or turn off 'uncertain only'.")
+                            return
+                        sub_idx = unseen_idx[keep]
+                        sub_scores = scores_all[keep]
+                        sub_conf = maxconf[keep]
+                    else:
+                        sub_idx, sub_scores, sub_conf = unseen_idx, scores_all, maxconf
+                    # Least-confident first (identical to |0.5 - P(good)| ascending).
+                    rank = np.argsort(sub_conf)
+                    ranked_idx = sub_idx[rank]
+                    ranked_scores = sub_scores[rank]
+                    if self.diversify and not self.review:
+                        picked, scores = self._diversified(reader, ranked_idx, ranked_scores)
+                    else:
+                        picked = ranked_idx[: self.n_target]
+                        scores = ranked_scores[: self.n_target]
 
             if self._cancel:
                 self.finished.emit([], "Cancelled.")
@@ -382,6 +400,7 @@ class _TrainWorker(QThread):
         freeze_backbone: bool,
         pretrained: Optional[Path],
         model_name: str = "",
+        use_holdout: bool = True,
     ) -> None:
         super().__init__()
         self.h5_path = h5_path
@@ -398,6 +417,10 @@ class _TrainWorker(QThread):
         self.freeze_backbone = freeze_backbone
         self.pretrained = pretrained
         self.model_name = model_name
+        # When True (and a test split exists) evaluate on the frozen hold-out;
+        # otherwise fall back to an internal split of the train cells. Either
+        # way, test-tagged cells are never trained on.
+        self.use_holdout = use_holdout
 
     def run(self) -> None:
         try:
@@ -409,11 +432,22 @@ class _TrainWorker(QThread):
             store = LabelsStore(self.labels_dir)
             try:
                 crops, labels, used_uids = store.to_training_dataset(reader)
+                # Frozen hold-out test set (empty arrays when none labelled).
+                # Only consulted when the user opted to evaluate on it; test
+                # cells are excluded from training either way.
+                if self.use_holdout:
+                    eval_crops, eval_labels, eval_uids = store.to_eval_dataset(reader)
+                else:
+                    eval_crops = np.empty((0,), dtype=np.float32)
+                    eval_labels = np.empty((0,), dtype=np.int64)
+                    eval_uids = []
             finally:
                 reader.close()
 
             class_counts = {CLASS_NAMES[i]: int((labels == i).sum())
                             for i in range(NUM_CLASSES)}
+            test_class_counts = {CLASS_NAMES[i]: int((eval_labels == i).sum())
+                                 for i in range(NUM_CLASSES)}
             provenance = {
                 "model_name": self.model_name or self.output_dir.name,
                 "source_h5": self.h5_path.name,
@@ -421,6 +455,8 @@ class _TrainWorker(QThread):
                 "n_labelled": int(len(used_uids)),
                 "used_uids_sha256": cell_uids_sha256(used_uids),
                 "class_counts": class_counts,
+                "n_holdout": int(len(eval_uids)),
+                "holdout_class_counts": test_class_counts,
                 "labels_schema_version": LABELS_SCHEMA_VERSION,
             }
 
@@ -428,6 +464,8 @@ class _TrainWorker(QThread):
             summary = run_train(
                 crops=crops,
                 labels=labels,
+                eval_crops=eval_crops if len(eval_labels) else None,
+                eval_labels=eval_labels if len(eval_labels) else None,
                 output_dir=self.output_dir,
                 epochs=self.epochs,
                 batch_size=self.batch_size,
@@ -473,6 +511,7 @@ class LabelTrainPanel(QWidget):
         self._focused_pos = 0
         self._cols = 8
         self._review_mode = False  # showing model predictions to accept/flip
+        self._test_mode = False     # labelling into the frozen hold-out test set
         self._session_id: str = make_session_id()
         self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._session_seen_uids: set[str] = set()
@@ -599,11 +638,14 @@ class LabelTrainPanel(QWidget):
         bar_host, bar = _flow_row()
 
         self._model_combo = QComboBox()
-        self._model_combo.setMaximumWidth(280)
+        self._model_combo.setMaximumWidth(480)
         self._model_combo.setSizeAdjustPolicy(
             QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
         )
-        self._model_combo.setMinimumContentsLength(14)
+        # Wide enough for "trained: <name>_<timestamp>"; the tooltip shows the
+        # full text whenever it's still elided on a narrow window.
+        self._model_combo.setMinimumContentsLength(36)
+        self._model_combo.currentTextChanged.connect(self._model_combo.setToolTip)
         self._populate_model_combo()
         self._model_combo.activated.connect(self._on_model_combo_activated)
 
@@ -651,6 +693,25 @@ class LabelTrainPanel(QWidget):
         )
         self._review_btn.clicked.connect(lambda: self._load_pool(review=True))
 
+        # Hold-out test set controls.
+        self._test_mode_chk = QCheckBox("Hold-out TEST set")
+        self._test_mode_chk.setToolTip(
+            "Label into a frozen hold-out test set instead of the training set. "
+            "These cells are never trained on; they're the fixed yardstick used "
+            "to compare models across labelling rounds. Build it once."
+        )
+        self._test_mode_chk.toggled.connect(self._on_test_mode_toggled)
+
+        self._prioritise_good = QCheckBox("Prioritise good")
+        self._prioritise_good.setToolTip(
+            "When building the test set, show the model's most-likely-'good' "
+            "cells first so the rare class fills quickly (you still label each "
+            "cell's true class). Needs a model. Off = uniform random sample.\n"
+            "Note: prioritising couples the set to the model — a random pass too "
+            "keeps it representative; AUC/AP/balanced-acc are reported regardless."
+        )
+        self._prioritise_good.setEnabled(False)
+
         # Row 1 — get cells.
         bar.addWidget(_labeled("Model:", self._model_combo))
         bar.addWidget(_labeled("Pool:", self._pool_size))
@@ -658,9 +719,20 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(self._diversify)
         bar.addWidget(self._uncertain_only)
         bar.addWidget(self._conf_thresh)
+        bar.addWidget(self._test_mode_chk)
+        bar.addWidget(self._prioritise_good)
         bar.addWidget(self._load_btn)
         bar.addWidget(self._review_btn)
         v.addWidget(bar_host)
+
+        # Prominent banner shown only while labelling the hold-out test set.
+        self._test_banner = QLabel(
+            "● Building HELD-OUT TEST SET — these labels are frozen and never "
+            "trained on. Turn off “Hold-out TEST set” to go back to training labels."
+        )
+        self._test_banner.setWordWrap(True)
+        self._test_banner.setVisible(False)
+        v.addWidget(self._test_banner)
 
         # Bottom action bar (added to the layout below the grid, at the end of
         # this method — where you land after labelling a page). Pagination + the
@@ -764,6 +836,14 @@ class LabelTrainPanel(QWidget):
             "Train only the classifier head (freeze the conv layers). Often "
             "better when fine-tuning from a preset on a small label set."
         )
+        self._use_holdout = QCheckBox("Evaluate on hold-out test set")
+        self._use_holdout.setChecked(True)
+        self._use_holdout.setToolTip(
+            "On: report metrics on the frozen hold-out test set — comparable "
+            "across labelling rounds. Off: split the training labels internally "
+            "for train/val/test (the old behaviour). Either way, test-tagged "
+            "cells are never trained on. Disabled until a hold-out set exists."
+        )
         self._train_btn = QPushButton("Start training")
         self._train_btn.setObjectName("primary")
         self._train_btn.clicked.connect(self._start_training)
@@ -783,6 +863,7 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(_labeled("LR:", self._lr))
         bar.addWidget(self._fine_tune)
         bar.addWidget(self._freeze)
+        bar.addWidget(self._use_holdout)
         bar.addWidget(self._train_btn)
         bar.addWidget(self._adv_toggle)
         bar.addWidget(self._open_model_btn)
@@ -852,6 +933,25 @@ class LabelTrainPanel(QWidget):
             if idx >= 0:
                 self._model_combo.setCurrentIndex(idx)
         self._model_combo.blockSignals(False)
+        # Signals were blocked, so refresh the full-name tooltip ourselves.
+        self._model_combo.setToolTip(self._model_combo.currentText())
+
+    def refresh_models(self) -> None:
+        """Public: re-enumerate trained models in the picker (e.g. after a
+        model is deleted from the Models tab)."""
+        self._populate_model_combo()
+
+    def select_model(self, path) -> None:
+        """Public: make ``path`` (a ``.pth``) the active model in the picker —
+        used by the Models tab's 'Use for labelling'."""
+        path = str(path)
+        self._populate_model_combo()
+        idx = self._model_combo.findData(path)
+        if idx < 0:  # not a known preset/trained entry — add as a custom one
+            self._model_combo.insertItem(1, f"custom: {Path(path).name}", userData=path)
+            idx = 1
+        self._model_combo.setCurrentIndex(idx)
+        self._model_combo.setToolTip(self._model_combo.currentText())
 
     def _on_model_combo_activated(self, idx: int) -> None:
         if self._model_combo.itemData(idx) != "__browse__":
@@ -874,19 +974,48 @@ class LabelTrainPanel(QWidget):
 
     # ── events: label flow ────────────────────────────────────────────
 
+    def _on_test_mode_toggled(self, checked: bool) -> None:
+        self._test_mode = checked
+        self._prioritise_good.setEnabled(checked)
+        self._test_banner.setVisible(checked)
+        self._review_btn.setEnabled(not checked)  # review is a training tool
+        if checked:
+            p = tokens.active()
+            self._test_banner.setStyleSheet(
+                f"color: {p.warning}; border: 1px solid {p.warning}; "
+                f"border-radius: 4px; padding: 4px 8px; font-weight: 600;"
+            )
+        self._refresh_dataset_stats()
+
     def _load_pool(self, review: bool = False) -> None:
         if self._reader is None or self._h5_path is None or self._store is None:
             QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
             return
         model_path = self._current_model_path()
         uncertain_only = self._uncertain_only.isChecked()
-        if (review or uncertain_only) and model_path is None:
+        if not self._test_mode and (review or uncertain_only) and model_path is None:
             QMessageBox.warning(
                 self.label_section, "No model",
                 "Pick a model first — Review and 'uncertain only' need a model "
                 "to score cells.")
             return
-        # Don't blow away an unsaved page when switching into review.
+
+        # Pick the ranking strategy. Test-set building samples randomly (or, with
+        # a model + 'Prioritise good', surfaces likely-'good' cells first);
+        # otherwise it's normal uncertainty-based active learning.
+        if self._test_mode:
+            review = False
+            if self._prioritise_good.isChecked() and model_path is not None:
+                select = "good"
+            else:
+                select = "random"
+                if self._prioritise_good.isChecked():
+                    self._status.setText("No model selected — sampling the test set "
+                                         "randomly instead of prioritising 'good'.")
+        else:
+            select = "uncertain"
+
+        # Don't blow away an unsaved page when switching modes.
         if self._pool and self.has_unsaved_labels():
             self._save_batch(silent_if_empty=True)
         self._stop_worker(self._al_worker)
@@ -894,7 +1023,8 @@ class LabelTrainPanel(QWidget):
 
         # Review audits the model on cells not yet seen this session — including
         # already-labelled ones, so earlier mistakes can be corrected. Normal
-        # labelling also skips cells already saved on disk.
+        # labelling (and test-set building) skips every cell already labelled on
+        # disk, so train and test splits can never overlap.
         if review:
             seen_uids = set(self._session_seen_uids)
         else:
@@ -905,7 +1035,8 @@ class LabelTrainPanel(QWidget):
         self._save_action.setEnabled(False)
         self._save_next_btn.setEnabled(False)
         self._progress.setValue(0)
-        what = "predictions to review" if review else "cells"
+        what = ("test-set cells" if self._test_mode
+                else "predictions to review" if review else "cells")
         self._status.setText(
             f"Loading up to {self._pool_size.value()} {what} "
             f"(skipping {len(seen_uids)} seen)…"
@@ -920,6 +1051,7 @@ class LabelTrainPanel(QWidget):
             review=review,
             uncertain_only=uncertain_only,
             confidence_threshold=self._conf_thresh.value(),
+            select=select,
         )
         self._al_worker.progress.connect(self._on_al_progress)
         self._al_worker.finished.connect(self._on_al_finished)
@@ -1150,6 +1282,7 @@ class LabelTrainPanel(QWidget):
 
         model_path = self._current_model_path()
         model_at_label = str(model_path) if model_path else "none"
+        split = SPLIT_TEST if self._test_mode else SPLIT_TRAIN
         rows: list[LabelRow] = []
         for pool_idx, lbl_name in to_save:
             rec, score = self._pool[pool_idx]
@@ -1166,6 +1299,7 @@ class LabelTrainPanel(QWidget):
                 source_h5=self._h5_path.name if self._h5_path else "",
                 model_at_label=model_at_label,
                 confidence_good_at_label=conf,
+                split=split,
             ))
         n_saved = self._store.append_batch(rows)
         self._session_label_count += n_saved
@@ -1215,22 +1349,35 @@ class LabelTrainPanel(QWidget):
         if self._store is None:
             self._balance_label.setText("")
             return
-        counts = self._store.class_counts()
+        active = SPLIT_TEST if self._test_mode else SPLIT_TRAIN
+        counts = self._store.class_counts(active)
         g, b = counts.get("good", 0), counts.get("bad", 0)
         self._capture_current_page()
         pend_g = sum(1 for idx, v in self._page_labels.items()
                      if v == "good" and self._saved_labels.get(idx) != "good")
         pend_b = sum(1 for idx, v in self._page_labels.items()
                      if v == "bad" and self._saved_labels.get(idx) != "bad")
-        txt = f"Saved: good {g} · bad {b} (total {g + b})"
+        name = "Test set" if self._test_mode else "Saved"
+        txt = f"{name}: good {g} · bad {b} (total {g + b})"
         if pend_g or pend_b:
             txt += f"  ·  +page good {pend_g} / bad {pend_b}"
-        total = g + b
-        minority = min(g, b)
-        warn = total >= 10 and minority / total < 0.2
-        color = tokens.active().warning if warn else tokens.active().text_subtle
-        if warn:
-            txt += "  ⚠ class imbalance — label more of the rarer class"
+        if self._test_mode:
+            half = TEST_SET_TARGET // 2
+            need_g, need_b = max(0, half - g), max(0, half - b)
+            if need_g or need_b:
+                txt += f"  ·  target ~{half}/{half} — still need good {need_g}, bad {need_b}"
+                if need_g > need_b:
+                    txt += "  → tip: pick a model + 'Prioritise good'"
+            else:
+                txt += f"  ·  ✓ reached ~{half}/{half}"
+            color = tokens.active().text_subtle
+        else:
+            total = g + b
+            minority = min(g, b)
+            warn = total >= 10 and minority / total < 0.2
+            color = tokens.active().warning if warn else tokens.active().text_subtle
+            if warn:
+                txt += "  ⚠ class imbalance — label more of the rarer class"
         self._balance_label.setStyleSheet(f"color: {color};")
         self._balance_label.setText(txt)
 
@@ -1240,15 +1387,27 @@ class LabelTrainPanel(QWidget):
         if self._store is None:
             self._stats_label.setText("(no source — pick an HDF5)")
             self._train_btn.setEnabled(False)
+            self._use_holdout.setEnabled(False)
+            self._use_holdout.setText("Evaluate on hold-out test set")
             self._refresh_balance()
             return
-        counts = self._store.class_counts()
-        total = counts.get("good", 0) + counts.get("bad", 0)
+        sc = self._store.split_counts()
+        tr, te = sc[SPLIT_TRAIN], sc[SPLIT_TEST]
+        tr_total = tr["good"] + tr["bad"]
+        te_total = te["good"] + te["bad"]
+        test_part = (f"  ·  hold-out test: {te_total} (good={te['good']} bad={te['bad']})"
+                     if te_total else "")
         self._stats_label.setText(
-            f"{total} labeled crops · good={counts.get('good', 0)} "
-            f"bad={counts.get('bad', 0)}   ·   {self._store.csv_path}"
+            f"train: {tr_total} (good={tr['good']} bad={tr['bad']}){test_part}"
+            f"   ·   {self._store.csv_path}"
         )
-        self._train_btn.setEnabled(total >= 20)
+        self._train_btn.setEnabled(tr_total >= 20)
+        # The hold-out toggle only means something once a test set exists.
+        self._use_holdout.setEnabled(te_total > 0)
+        self._use_holdout.setText(
+            f"Evaluate on hold-out test set ({te_total})" if te_total
+            else "Evaluate on hold-out test set (none yet)"
+        )
         self._refresh_balance()
 
     def _start_training(self) -> None:
@@ -1285,6 +1444,7 @@ class LabelTrainPanel(QWidget):
             freeze_backbone=self._freeze.isChecked(),
             pretrained=pretrained,
             model_name=self._model_name,
+            use_holdout=self._use_holdout.isChecked() and self._use_holdout.isEnabled(),
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.finished.connect(self._on_train_finished)
@@ -1308,6 +1468,8 @@ class LabelTrainPanel(QWidget):
         model_path = summary.get("model_path", "(unknown)")
         split = summary.get("eval_split", "val")
         eval_acc = summary.get("eval_acc")
+        bal_acc = summary.get("balanced_acc")
+        baseline = summary.get("majority_baseline")
         best_acc = summary.get("best_val_acc", 0.0)
         auc = summary.get("roc_auc")
         ap = summary.get("average_precision")
@@ -1316,29 +1478,40 @@ class LabelTrainPanel(QWidget):
         n_train = summary.get("n_train", 0)
         n_val = summary.get("n_val", 0)
         n_test = summary.get("n_test", 0)
+        n_holdout = summary.get("n_holdout", 0)
 
-        parts = [f"Done · best val acc {best_acc:.3f}"]
+        # On a frozen hold-out, lead with that number (the honest, comparable
+        # one); otherwise lead with the validation accuracy as before.
+        label = {"holdout": "hold-out", "test": "test", "val": "val"}.get(split, split)
+        parts = []
         if eval_acc is not None and eval_acc == eval_acc:
-            label = "test" if split == "test" else "val"
             parts.append(f"{label} acc {eval_acc:.3f}")
+        if bal_acc is not None and bal_acc == bal_acc:
+            parts.append(f"balanced {bal_acc:.3f}")
+        if baseline is not None and baseline == baseline:
+            parts.append(f"baseline {baseline:.3f}")
         if auc is not None and auc == auc:
             parts.append(f"AUC {auc:.3f}")
         if ap is not None and ap == ap:
             parts.append(f"AP {ap:.3f}")
+        parts.append(f"best val {best_acc:.3f}")
         parts.append(f"thr {thr:.2f}")
         if conf:
             parts.append(f"conf tn={conf['tn']} fp={conf['fp']} fn={conf['fn']} tp={conf['tp']}")
-        parts.append(f"(train {n_train} / val {n_val}" + (f" / test {n_test}" if n_test else "") + ")")
-        msg = " · ".join(parts)
+        sizes = f"(train {n_train} / val {n_val}"
+        sizes += f" / hold-out {n_holdout})" if n_holdout else (f" / test {n_test})" if n_test else ")")
+        parts.append(sizes)
+        msg = "Done · " + " · ".join(parts)
 
         warning = ""
-        if split != "test":
-            warning = ("  ⚠ no held-out test set (small dataset) — metrics are "
-                       "validation, i.e. optimistic. Label more cells.")
+        if split == "val":
+            warning = ("  ⚠ no held-out test set — metrics are validation, i.e. "
+                       "optimistic. Build a hold-out test set (toggle above) for a "
+                       "comparable number across rounds.")
         elif (auc is not None and auc == auc and auc <= 0.6) or best_acc <= 0.55:
             warning = ("  ⚠ near chance — the model didn't learn anything "
                        "generalisable. Label many more cells, then retrain.")
-        elif n_train + n_val + n_test < 100:
+        elif n_train + n_val + n_test + n_holdout < 100:
             warning = "  ⚠ small dataset — results are noisy. Label more and retrain."
         self._train_status.setText(msg + warning + f"  →  {model_path}")
 

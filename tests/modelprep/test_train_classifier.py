@@ -71,6 +71,26 @@ def test_train_cpu_smoke(tmp_path):
         assert (tmp_path / fname).exists(), f"missing artefact: {fname}"
     assert summary["eval_split"] == "test"
     assert "decision_threshold" in summary and "confusion" in summary
+    # Prevalence-independent companions are always reported.
+    assert "balanced_acc" in summary and "majority_baseline" in summary
+
+
+def test_train_with_external_holdout(tmp_path):
+    crops, labels = _synthetic(24, 24, seed=1)
+    eval_crops, eval_labels = _synthetic(8, 8, seed=2)
+    summary = train(
+        crops=crops, labels=labels,
+        eval_crops=eval_crops, eval_labels=eval_labels,
+        output_dir=tmp_path, epochs=2, device="cpu", seed=0,
+    )
+    # The frozen hold-out is used for final metrics; no internal test carve-out.
+    assert summary["eval_split"] == "holdout"
+    assert summary["n_test"] == 0
+    assert summary["n_holdout"] == 16
+    assert summary["balanced_acc"] == summary["balanced_acc"]  # not NaN
+    import json
+    cfg = json.loads((tmp_path / "training_config.json").read_text())
+    assert cfg["eval_split"] == "holdout" and cfg["n_holdout"] == 16
 
 
 def test_train_reproducible(tmp_path):

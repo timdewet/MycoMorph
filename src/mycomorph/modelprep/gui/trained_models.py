@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -60,6 +60,7 @@ class TrainedModel:
     created: str              # human timestamp string, "" if unknown
     best_val_acc: Optional[float]
     eval_acc: Optional[float]
+    config: dict = field(default_factory=dict)  # full training_config.json
 
     @property
     def weights(self) -> Path:
@@ -103,6 +104,7 @@ def list_trained_models() -> list[TrainedModel]:
             created=created,
             best_val_acc=cfg.get("best_val_acc"),
             eval_acc=cfg.get("eval_acc"),
+            config=cfg,
         ))
     return out
 

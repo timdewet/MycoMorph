@@ -7,7 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from modelprep.core.labels_store import LabelRow, LabelsStore
+import csv
+
+from modelprep.core.labels_store import (
+    SPLIT_TEST,
+    SPLIT_TRAIN,
+    LabelRow,
+    LabelsStore,
+)
 
 
 def _row(uid: str, name: str, **overrides) -> LabelRow:
@@ -97,3 +104,109 @@ def test_to_training_dataset_round_trip(tmp_path: Path, synthetic_h5):
     assert crops.shape == (4, 3, 64, 64)
     assert sorted(labels.tolist()) == [0, 0, 1, 1]
     assert set(uids) == {"cell_0000", "cell_0005", "cell_0010", "cell_0015"}
+
+
+# ── hold-out test split ──────────────────────────────────────────────────────
+
+def test_split_round_trips_and_counts(tmp_path: Path, synthetic_h5):
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(
+        source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0",
+    )
+    store.append_batch([
+        _row("cell_0000", "good"),                       # default split = train
+        _row("cell_0001", "bad", split=SPLIT_TRAIN),
+        _row("cell_0002", "good", split=SPLIT_TEST),
+        _row("cell_0003", "bad", split=SPLIT_TEST),
+    ])
+    latest = store.load().latest_by_uid()
+    assert latest["cell_0000"].split == SPLIT_TRAIN
+    assert latest["cell_0002"].split == SPLIT_TEST
+
+    assert store.class_counts(SPLIT_TRAIN) == {"good": 1, "bad": 1}
+    assert store.class_counts(SPLIT_TEST) == {"good": 1, "bad": 1}
+    assert store.class_counts() == {"good": 2, "bad": 2}  # both splits
+    assert store.split_counts() == {
+        "train": {"good": 1, "bad": 1},
+        "test": {"good": 1, "bad": 1},
+    }
+
+
+def test_train_and_eval_datasets_are_disjoint(tmp_path: Path, synthetic_h5):
+    from modelprep.core.crops_h5 import HDF5CropsReader
+
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(
+        source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0",
+    )
+    store.append_batch([
+        _row("cell_0000", "good", split=SPLIT_TRAIN),
+        _row("cell_0001", "bad", split=SPLIT_TRAIN),
+        _row("cell_0002", "good", split=SPLIT_TEST),
+        _row("cell_0003", "bad", split=SPLIT_TEST),
+    ])
+    reader = HDF5CropsReader(synthetic_h5)
+    try:
+        _, tr_labels, tr_uids = store.to_training_dataset(reader)
+        ev_crops, ev_labels, ev_uids = store.to_eval_dataset(reader)
+    finally:
+        reader.close()
+
+    assert set(tr_uids) == {"cell_0000", "cell_0001"}
+    assert set(ev_uids) == {"cell_0002", "cell_0003"}
+    assert set(tr_uids).isdisjoint(ev_uids)
+    assert ev_crops.shape == (2, 3, 64, 64)
+    assert sorted(ev_labels.tolist()) == [0, 1]
+
+
+def test_eval_dataset_empty_without_test_rows(tmp_path: Path, synthetic_h5):
+    from modelprep.core.crops_h5 import HDF5CropsReader
+
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(
+        source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0",
+    )
+    store.append_batch([_row("cell_0000", "good")])  # train only
+    reader = HDF5CropsReader(synthetic_h5)
+    try:
+        crops, labels, uids = store.to_eval_dataset(reader)
+    finally:
+        reader.close()
+    assert len(labels) == 0 and len(uids) == 0
+    assert crops.shape[0] == 0
+
+
+def test_legacy_csv_without_split_migrates_in_place(tmp_path: Path):
+    """A labels.csv written before the 'split' column upgrades on the next
+    append: header gains 'split', old rows become 'train', new row keeps its
+    split, and nothing is lost."""
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    csv_path = labels_dir / "labels.csv"
+    old_cols = [
+        "cell_uid", "label_idx", "label_name", "area_px", "labeled_at",
+        "labeler", "session_id", "source_h5", "model_at_label",
+        "confidence_good_at_label",
+    ]
+    with open(csv_path, "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(old_cols)
+        w.writerow(["cell_A", 0, "good", 100, "2026-01-01", "t", "s", "h5", "none", 0.9])
+        w.writerow(["cell_B", 1, "bad", 50, "2026-01-01", "t", "s", "h5", "none", 0.1])
+
+    store = LabelsStore(labels_dir)
+    store.append_batch([_row("cell_C", "good", split=SPLIT_TEST)])
+
+    with open(csv_path, newline="") as f:
+        header = next(csv.reader(f))
+    assert "split" in header
+
+    latest = store.load().latest_by_uid()
+    assert latest["cell_A"].split == SPLIT_TRAIN  # back-filled
+    assert latest["cell_B"].split == SPLIT_TRAIN
+    assert latest["cell_C"].split == SPLIT_TEST
+    assert latest["cell_A"].label_name == "good"  # data preserved
+    assert store.split_counts() == {
+        "train": {"good": 1, "bad": 1},
+        "test": {"good": 1, "bad": 0},
+    }

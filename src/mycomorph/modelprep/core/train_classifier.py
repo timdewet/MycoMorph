@@ -295,6 +295,8 @@ def train(
     data_dir=None,
     crops=None,
     labels=None,
+    eval_crops=None,
+    eval_labels=None,
     output_dir,
     epochs=80,
     batch_size=32,
@@ -324,6 +326,13 @@ def train(
     held-out test set. On small datasets it falls back to a two-way split and
     says so (``eval_split`` in the returned summary). ``test_fraction=0``
     forces the old two-way behaviour.
+
+    Pass ``eval_crops`` + ``eval_labels`` to supply a **frozen external
+    hold-out** (e.g. ``LabelsStore.to_eval_dataset()``). When present, the
+    ``crops`` are split only two-way (train/val — no internal test carve-out),
+    and the final metrics are reported on the external set (``eval_split =
+    "holdout"``). The caller must ensure the hold-out shares no cell with
+    ``crops``; the ``split`` column in ``labels.csv`` guarantees this.
 
     ``provenance`` (optional dict — e.g. source_h5, used_uids hash, label
     counts) is recorded verbatim in ``training_config.json``.
@@ -368,6 +377,11 @@ def train(
         crops = np.asarray(crops, dtype=np.float32)
         labels = np.asarray(labels, dtype=np.int64)
 
+    have_external_eval = eval_crops is not None and eval_labels is not None and len(eval_labels) > 0
+    if have_external_eval:
+        eval_crops = np.asarray(eval_crops, dtype=np.float32)
+        eval_labels = np.asarray(eval_labels, dtype=np.int64)
+
     n_samples = len(labels)
     in_channels = crops.shape[1]
 
@@ -396,9 +410,15 @@ def train(
         log.info("WARNING: very few labeled cells — results will be unreliable.")
 
     # ── Train/val/test split (stratified, three-way when feasible) ─────────
+    # With an external hold-out, split only two-way (train/val) and evaluate on
+    # the frozen set instead of carving an internal test split.
+    internal_test_fraction = 0.0 if have_external_eval else test_fraction
     train_idx, val_idx, test_idx, split_note = _make_splits(
-        labels, val_fraction, test_fraction, seed,
+        labels, val_fraction, internal_test_fraction, seed,
     )
+    if have_external_eval:
+        split_note = (f"2-way train/val split (val={val_fraction:.0%}); "
+                      f"metrics on external hold-out (n={len(eval_labels)})")
     log.info(f"  Split: train={len(train_idx)}  val={len(val_idx)}  "
           f"test={len(test_idx)}  · {split_note}")
     if progress_cb is not None:
@@ -419,6 +439,12 @@ def train(
         test_ds = CellCropDataset(crops[test_idx], labels[test_idx], val_transform)
         test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False,
                                  num_workers=0)
+
+    holdout_loader = None
+    if have_external_eval:
+        holdout_ds = CellCropDataset(eval_crops, eval_labels, val_transform)
+        holdout_loader = DataLoader(holdout_ds, batch_size=batch_size, shuffle=False,
+                                    num_workers=0)
 
     # ── Model, loss, optimizer ────────────────────────────────────────────
     model = _build_model(in_channels, NUM_CLASSES).to(device)
@@ -556,7 +582,10 @@ def train(
                   if NUM_CLASSES == 2 and val_probs.shape[1] >= 2 else None)
     decision_threshold = val_curves["optimal_threshold"] if val_curves else 0.5
 
-    if test_loader is not None:
+    if holdout_loader is not None:
+        eval_split = "holdout"
+        eval_true, eval_preds, eval_probs = _evaluate(model, holdout_loader, device)
+    elif test_loader is not None:
         eval_split = "test"
         eval_true, eval_preds, eval_probs = _evaluate(model, test_loader, device)
     else:
@@ -564,6 +593,17 @@ def train(
         eval_true, eval_preds, eval_probs = val_true, _val_preds, val_probs
 
     eval_acc = float((eval_preds == eval_true).mean()) if len(eval_true) else float("nan")
+    # Prevalence-independent companions to raw accuracy: balanced accuracy (mean
+    # per-class recall) and the majority-class baseline. Under class imbalance
+    # these are what make the headline number interpretable.
+    if len(eval_true):
+        from sklearn.metrics import balanced_accuracy_score
+        balanced_acc = float(balanced_accuracy_score(eval_true, eval_preds))
+        _, _eval_counts = np.unique(eval_true, return_counts=True)
+        majority_baseline = float(_eval_counts.max() / _eval_counts.sum())
+    else:
+        balanced_acc = float("nan")
+        majority_baseline = float("nan")
     eval_curves = (_binary_curves(eval_true, eval_probs[:, 1])
                    if NUM_CLASSES == 2 and eval_probs.shape[1] >= 2 else None)
     roc_auc = eval_curves["roc"]["auc"] if eval_curves else float("nan")
@@ -586,6 +626,8 @@ def train(
         cm = confusion_matrix(eval_true, eval_preds, labels=[0, 1])
         tn, fp, fn, tp = (int(v) for v in cm.ravel())
         confusion = {"tn": tn, "fp": fp, "fn": fn, "tp": tp}
+    log.info(f"  {eval_split}: acc={eval_acc:.3f}  balanced_acc={balanced_acc:.3f}  "
+             f"(majority baseline={majority_baseline:.3f})")
     if eval_curves is not None:
         log.info(f"  {eval_split}: ROC AUC={roc_auc:.3f}  AP={ap:.3f}  "
               f"(decision threshold from val={decision_threshold:.3f})")
@@ -598,12 +640,15 @@ def train(
         "n_train": int(len(train_idx)),
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
+        "n_holdout": int(len(eval_labels)) if have_external_eval else 0,
         "eval_split": eval_split,
         "split_note": split_note,
         "class_counts": class_counts,
         "best_val_acc": float(best_val_acc),
         "best_epoch": best_epoch,
         "eval_acc": eval_acc,
+        "balanced_acc": balanced_acc,
+        "majority_baseline": majority_baseline,
         "roc_auc": roc_auc,
         "average_precision": ap,
         "decision_threshold": float(decision_threshold),
@@ -652,9 +697,12 @@ def train(
         "n_train": int(len(train_idx)),
         "n_val": int(len(val_idx)),
         "n_test": int(len(test_idx)),
+        "n_holdout": int(len(eval_labels)) if have_external_eval else 0,
         "eval_split": eval_split,
         "split_note": split_note,
         "eval_acc": eval_acc,
+        "balanced_acc": balanced_acc,
+        "majority_baseline": majority_baseline,
         "roc_auc": roc_auc,
         "average_precision": ap,
         "decision_threshold": float(decision_threshold),
