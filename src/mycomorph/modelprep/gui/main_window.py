@@ -282,6 +282,12 @@ class MainWindow(QMainWindow):
         self, h5_path: Optional[Path], labels_dir: Optional[Path]
     ) -> None:
         self.label_train_panel.set_source(h5_path, labels_dir)
+        # The Models tab's learning-curve tool draws train/hold-out cells from
+        # the active dataset's labels.
+        labels = labels_dir
+        if h5_path is not None and labels is None:
+            labels = self.label_train_panel._labels_dir
+        self.models_panel.set_source(h5_path, labels)
         self._save_settings()
 
     def _on_model_name_changed(self, name: str) -> None:
@@ -342,4 +348,5 @@ class MainWindow(QMainWindow):
                 self.label_train_panel.save_pending()
         self._save_settings()
         self.label_train_panel.shutdown()
+        self.models_panel.shutdown()
         super().closeEvent(event)

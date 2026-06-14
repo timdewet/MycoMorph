@@ -273,6 +273,7 @@ class _CellThumb(QPushButton):
     expandRequested = pyqtSignal()
     classifyKey = pyqtSignal(str)      # "good" | "bad" | "unlabeled"
     navKey = pyqtSignal(int, int)      # (dx, dy)
+    labelChanged = pyqtSignal()        # this thumb's label changed (any cause)
 
     def __init__(
         self,
@@ -368,11 +369,13 @@ class _CellThumb(QPushButton):
         order = ["unlabeled", "good", "bad"]
         self.label = order[(order.index(self.label) + 1) % len(order)]
         self._render()
+        self.labelChanged.emit()
 
     def set_label(self, value: str) -> None:
         if value in LABEL_COLORS:
             self.label = value
             self._render()
+            self.labelChanged.emit()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -755,6 +758,14 @@ class LabelTrainPanel(QWidget):
         reset_action = QAction("Reset session", self)
         reset_action.triggered.connect(self._reset_session)
         more_menu.addAction(reset_action)
+        more_menu.addSeparator()
+        self._consistency_action = QAction("Consistency check…", self)
+        self._consistency_action.setToolTip(
+            "Re-label a blind sample of your own cells to measure self-agreement "
+            "— the practical ceiling on model accuracy."
+        )
+        self._consistency_action.triggered.connect(self._open_consistency_check)
+        more_menu.addAction(self._consistency_action)
         more_menu.addSeparator()
         open_action = QAction("Open labels folder", self)
         open_action.triggered.connect(self._open_labels_folder)
@@ -1314,6 +1325,19 @@ class LabelTrainPanel(QWidget):
         return n_saved
 
     # ── folder actions ─────────────────────────────────────────────────
+
+    def _open_consistency_check(self) -> None:
+        if self._h5_path is None or self._labels_dir is None or self._store is None:
+            QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
+            return
+        counts = self._store.class_counts()
+        if counts.get("good", 0) + counts.get("bad", 0) < 10:
+            QMessageBox.information(self.label_section, "Not enough labels",
+                                   "Label more cells before running a consistency check.")
+            return
+        # Lazy import avoids a circular import (the dialog reuses _CellThumb).
+        from .consistency_dialog import ConsistencyCheckDialog
+        ConsistencyCheckDialog(self._h5_path, self._labels_dir, parent=self.label_section).exec()
 
     def _open_labels_folder(self) -> None:
         if self._labels_dir and Path(self._labels_dir).exists():
