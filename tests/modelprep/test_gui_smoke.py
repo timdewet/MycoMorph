@@ -103,6 +103,46 @@ def test_models_panel_lists_sorts_and_deletes(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_models_panel_shows_feature_runs(tmp_path, monkeypatch):
+    app = _app()
+    import json
+    import modelprep.gui.trained_models as tm
+    import modelprep.gui.panels.models_panel as mp
+    from modelprep.gui.panels.models_panel import _COL
+
+    root = tmp_path / "models"
+    root.mkdir()
+    monkeypatch.setattr(tm, "trained_models_root", lambda: root)
+    monkeypatch.setattr(mp, "trained_models_root", lambda: root)
+
+    cnn = root / "demo_2026-06-14_10-00-00"
+    cnn.mkdir()
+    (cnn / "best_model.pth").write_bytes(b"x")
+    (cnn / "training_config.json").write_text(json.dumps(dict(
+        eval_split="holdout", roc_auc=0.83, balanced_acc=0.75, average_precision=0.87,
+        n_train=2552, n_holdout=1100, class_counts={"good": 1170, "bad": 1382},
+        provenance={"model_name": "demo"})))
+    feat = root / "demo-features_2026-06-14_10-00-00"
+    feat.mkdir()
+    (feat / "feature_model.joblib").write_bytes(b"x")
+    (feat / "training_config.json").write_text(json.dumps(dict(
+        model_type="features", eval_split="holdout", roc_auc=0.854, balanced_acc=0.773,
+        average_precision=0.887, n_train=2552, n_holdout=1100,
+        class_counts={"good": 1170, "bad": 1382}, provenance={"model_name": "demo"})))
+
+    panel = mp.ModelsPanel()
+    types = {panel._table.item(r, _COL["Type"]).text() for r in range(panel._table.rowCount())}
+    assert types == {"CNN", "features"}
+
+    # Selecting the feature row disables "Use for labelling".
+    for r in range(panel._table.rowCount()):
+        if panel._table.item(r, _COL["Type"]).text() == "features":
+            panel._table.selectRow(r)
+            break
+    assert not panel._use_btn.isEnabled()
+    app.processEvents()
+
+
 def test_models_panel_learning_curve_gated_on_holdout(tmp_path):
     app = _app()
     import modelprep.gui.panels.models_panel as mp

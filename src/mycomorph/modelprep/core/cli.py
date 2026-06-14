@@ -444,6 +444,55 @@ def train(
     typer.echo(f"  config:          {output / 'training_config.json'}")
 
 
+@app.command(name="feature-model")
+def feature_model(
+    h5: Path = typer.Option(..., "--h5", "-i", exists=True),
+    labels_dir: Optional[Path] = typer.Option(None, "--labels-dir"),
+    no_fragment: bool = typer.Option(
+        False, "--no-fragment",
+        help="Skip the crossing-fragment cues (use only the morphometric table).",
+    ),
+    no_context: bool = typer.Option(
+        False, "--no-context",
+        help="Skip the FOV-context features (neighbour density etc.).",
+    ),
+    no_focus: bool = typer.Option(
+        False, "--no-focus",
+        help="Skip the crop-based focus/sharpness features.",
+    ),
+) -> None:
+    """Train a feature-based classifier (morphometrics + fragment + FOV-context
+    + focus cues) and report hold-out metrics — comparable to the CNN."""
+    from .feature_classifier import load_feature_matrix, train_feature_classifier
+
+    ld = labels_dir or default_labels_dir_for(h5)
+    try:
+        matrix = load_feature_matrix(h5, ld, with_fragment=not no_fragment,
+                                     with_context=not no_context,
+                                     with_focus=not no_focus)
+        summary = train_feature_classifier(matrix)
+    except (FileNotFoundError, ValueError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=2)
+
+    typer.echo("\nFeature-based model — held-out metrics")
+    typer.echo("=" * 44)
+    extras = [tag for tag, on in (("fragment", summary["with_fragment"]),
+                                  ("context", summary["with_context"]),
+                                  ("focus", summary["with_focus"])) if on]
+    typer.echo(f"  train / hold-out:  {summary['n_train']} / {summary['n_test']} cells · "
+               f"{summary['n_features']} features"
+               f"{' (+ ' + ' + '.join(extras) + ' cues)' if extras else ''}")
+    typer.echo(f"  balanced accuracy: {summary['balanced_acc']:.3f}")
+    typer.echo(f"  accuracy:          {summary['eval_acc']:.3f}")
+    typer.echo(f"  ROC AUC:           {summary['roc_auc']:.3f}    AP: {summary['average_precision']:.3f}")
+    c = summary["confusion"]
+    typer.echo(f"  confusion:         tn={c['tn']} fp={c['fp']} fn={c['fn']} tp={c['tp']}")
+    typer.echo("\n  top features (permutation importance on hold-out):")
+    for name, mean, std in summary["top_importances"]:
+        typer.echo(f"    {name:28s} {mean:+.4f} ± {std:.4f}")
+
+
 def main() -> None:
     app()
 

@@ -61,9 +61,13 @@ class TrainedModel:
     best_val_acc: Optional[float]
     eval_acc: Optional[float]
     config: dict = field(default_factory=dict)  # full training_config.json
+    model_type: str = "cnn"   # "cnn" (.pth) | "features" (.joblib)
 
     @property
     def weights(self) -> Path:
+        """Path to the model artefact (a CNN checkpoint or a feature model)."""
+        if self.model_type == "features":
+            return self.dir / "feature_model.joblib"
         return self.dir / "best_model.pth"
 
     def label(self) -> str:
@@ -93,7 +97,9 @@ def list_trained_models() -> list[TrainedModel]:
         return []
     out: list[TrainedModel] = []
     for d in sorted(root.glob("*"), reverse=True):
-        if not (d / "best_model.pth").exists():
+        has_cnn = (d / "best_model.pth").exists()
+        has_features = (d / "feature_model.joblib").exists()
+        if not (has_cnn or has_features):
             continue
         cfg = _read_config(d)
         prov = cfg.get("provenance") or {}
@@ -105,6 +111,7 @@ def list_trained_models() -> list[TrainedModel]:
             best_val_acc=cfg.get("best_val_acc"),
             eval_acc=cfg.get("eval_acc"),
             config=cfg,
+            model_type=str(cfg.get("model_type", "cnn")),
         ))
     return out
 

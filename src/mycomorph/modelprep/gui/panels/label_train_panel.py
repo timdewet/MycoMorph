@@ -483,10 +483,34 @@ class _TrainWorker(QThread):
                 provenance=provenance,
                 progress_cb=lambda f, m: self.progress.emit(f, m),
             )
+            summary = summary or {}
+            # Also train the feature-based model (morphometrics + FOV-context +
+            # focus + fragment cues) on the same labels/hold-out, for comparison.
+            # Non-fatal: a missing features table or hold-out just skips it.
+            self.progress.emit(1.0, "Training finished. Fitting feature model…")
+            summary["feature_model"], summary["feature_skip"] = self._train_feature_model(provenance)
             self.progress.emit(1.0, "Training finished.")
-            self.finished.emit(summary or {}, "")
+            self.finished.emit(summary, "")
         except Exception as e:
             self.finished.emit({}, str(e))
+
+    def _train_feature_model(self, provenance: dict):
+        """Returns (summary, skip_reason). Either may be None."""
+        from ..trained_models import _split_dir_name
+        from ...core.feature_classifier import train_and_save
+
+        name, ts = _split_dir_name(self.output_dir.name)
+        feature_dir = self.output_dir.parent / (
+            f"{name}-features_{ts}" if ts else f"{self.output_dir.name}-features")
+        try:
+            return train_and_save(self.h5_path, self.labels_dir, feature_dir,
+                                  seed=self.seed, provenance=provenance), None
+        except FileNotFoundError:
+            return None, "no morphometric features table next to the HDF5"
+        except ValueError as e:
+            return None, str(e)
+        except Exception as e:  # noqa: BLE001 — never fail the CNN run over this
+            return None, f"feature model error: {e}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1537,7 +1561,20 @@ class LabelTrainPanel(QWidget):
                        "generalisable. Label many more cells, then retrain.")
         elif n_train + n_val + n_test + n_holdout < 100:
             warning = "  ⚠ small dataset — results are noisy. Label more and retrain."
-        self._train_status.setText(msg + warning + f"  →  {model_path}")
+
+        # Second line: the feature-based model trained alongside on the same set.
+        fm = summary.get("feature_model")
+        if fm:
+            fparts = [f"balanced {fm['balanced_acc']:.3f}", f"AUC {fm['roc_auc']:.3f}",
+                      f"AP {fm['average_precision']:.3f}"]
+            cnn_auc = auc if (auc is not None and auc == auc) else None
+            delta = (f"  (vs CNN AUC {cnn_auc:.3f})" if cnn_auc is not None else "")
+            feature_line = "\nFeature model · " + " · ".join(fparts) + delta
+        elif summary.get("feature_skip"):
+            feature_line = f"\nFeature model skipped — {summary['feature_skip']}."
+        else:
+            feature_line = ""
+        self._train_status.setText(msg + warning + f"  →  {model_path}" + feature_line)
 
         # Surface the curves + metrics inline.
         try:

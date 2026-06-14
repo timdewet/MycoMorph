@@ -45,7 +45,7 @@ from ..widgets.model_inspector import ModelInspector
 
 # Column order. Numeric columns get numeric-aware sort items.
 _COLUMNS = [
-    "Name", "Created", "Eval on", "Acc", "Balanced", "AUC", "AP",
+    "Name", "Type", "Created", "Eval on", "Acc", "Balanced", "AUC", "AP",
     "Baseline", "Thr", "Train", "Test/hold-out", "good/bad",
 ]
 _COL = {name: i for i, name in enumerate(_COLUMNS)}
@@ -332,6 +332,7 @@ class ModelsPanel(QWidget):
 
         cells = {
             "Name": name_item,
+            "Type": _text_cell("features" if m.model_type == "features" else "CNN"),
             "Created": _text_cell(m.created or "—"),
             "Eval on": _text_cell(str(cfg.get("eval_split", "—"))),
             "Acc": _num_cell(cfg.get("eval_acc")),
@@ -386,8 +387,15 @@ class ModelsPanel(QWidget):
 
     def _on_selection_changed(self) -> None:
         m = self._selected_model()
-        for btn in (self._use_btn, self._open_btn, self._delete_btn):
+        for btn in (self._open_btn, self._delete_btn):
             btn.setEnabled(m is not None)
+        # Active learning scores crops with a CNN, so a tabular feature model
+        # can't be used as the labelling model.
+        is_cnn = m is not None and m.model_type != "features"
+        self._use_btn.setEnabled(is_cnn)
+        self._use_btn.setToolTip(
+            "" if is_cnn else "Feature models can't drive the crop-based labeller."
+        )
         self._inspector.set_model(m.weights if m else None)
 
     def _use_selected(self) -> None:

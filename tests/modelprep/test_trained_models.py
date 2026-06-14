@@ -44,3 +44,21 @@ def test_list_skips_dirs_without_weights(tmp_path, monkeypatch):
     d.mkdir()
     (d / "training_config.json").write_text(json.dumps({"roc_auc": 0.5}))
     assert list_trained_models() == []
+
+
+def test_list_recognises_feature_runs(tmp_path, monkeypatch):
+    root = tmp_path / "models"
+    root.mkdir()
+    monkeypatch.setattr(tm, "trained_models_root", lambda: root)
+
+    _make_run(root, "demo", "2026-06-14_10-00-00", roc_auc=0.83)  # CNN: best_model.pth
+    # Feature run: only a joblib artefact (no .pth) — exercises the OR condition.
+    feat = root / "demo-features_2026-06-14_10-00-00"
+    feat.mkdir()
+    (feat / "feature_model.joblib").write_bytes(b"x")
+    (feat / "training_config.json").write_text(json.dumps({"model_type": "features", "roc_auc": 0.85}))
+
+    by_type = {m.model_type: m for m in list_trained_models()}
+    assert set(by_type) == {"cnn", "features"}
+    assert by_type["features"].weights.name == "feature_model.joblib"
+    assert by_type["cnn"].weights.name == "best_model.pth"
