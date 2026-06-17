@@ -681,6 +681,338 @@ class ExtractStage:
         return outputs
 
 
+class FluorescentNormalisationStage:
+    """Per-FOV fluorescent-channel normalisation.
+
+    Reads segmented / classified hyperstacks, replaces fluor channels with
+    their normalised versions (top-hat, Gaussian low-pass, BaSiC flat-field,
+    Richardson-Lucy, BM3D, or compositions), and passes phase + mask
+    channels through unchanged.
+
+    Output: ``04b_fluorescent_normalisation/<well>.tif`` with the same
+    channel order and ImageJ metadata as the input. Writes float32; the
+    mask channel is preserved as float (0.0 / 1.0).
+
+    The "fluor = all channels except phase + last (mask) channel" rule
+    relies on the convention used by Segment / Classify outputs (mask
+    appended last). Don't run this stage on raw input TIFFs.
+    """
+
+    name = "Fluorescent Normalisation"
+    handles_own_reuse = True
+
+    def enabled(self, ctx) -> bool:
+        return bool(getattr(ctx, "do_fluorescent_normalisation", False))
+
+    def validate(self, ctx) -> list[str]:
+        if not self.enabled(ctx):
+            return []
+        if (not ctx.classify_dir.exists()
+                and not ctx.segment_dir.exists()
+                and not getattr(ctx, "do_segment", False)
+                and not getattr(ctx, "do_classify", False)):
+            return [
+                f"Fluorescent Normalisation needs TIFFs in "
+                f"{ctx.classify_dir} or {ctx.segment_dir}, but neither exists."
+            ]
+        method = ctx.fluorescent_normalisation_opts.method
+        from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
+        if method not in NORMALISER_REGISTRY:
+            return [
+                f"Unknown normalisation method {method!r}. "
+                f"Available: {sorted(NORMALISER_REGISTRY)}"
+            ]
+        return []
+
+    def output_dir(self, ctx) -> Path:
+        return ctx.fluorescent_normalisation_dir
+
+    def run(self, ctx, progress_cb: ProgressCB) -> list[Path]:
+        import numpy as np
+        import tifffile
+        from mycomorph.core.foci.normalise import (
+            NormaliserOpts,
+            build as build_normaliser,
+            requires_run_level_fit,
+        )
+        from mycomorph.core.label_cells import load_hyperstack
+
+        # Prefer classify output (quality-filtered cells); fall back to segment.
+        inputs: list[Path] = []
+        if ctx.classify_dir.exists():
+            inputs = _iter_tiffs(ctx.classify_dir)
+        if not inputs and ctx.segment_dir.exists():
+            inputs = _iter_tiffs(ctx.segment_dir)
+        if not inputs:
+            raise RuntimeError(
+                "Fluorescent Normalisation has no segmented input TIFFs. "
+                "Run Segment (and optionally Classify) first."
+            )
+
+        focus_suffix = ctx.focus_opts.filename_suffix or ""
+        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        inputs = _filter_to_layout(inputs, expected, progress_cb)
+        if not inputs:
+            raise RuntimeError(
+                "Fluorescent Normalisation: no input TIFFs match the current layout."
+            )
+
+        opts = ctx.fluorescent_normalisation_opts
+        method = opts.method
+        norm_opts = NormaliserOpts(
+            tophat_radius_px=opts.tophat_radius_px,
+            gaussian_lp_sigma=opts.gaussian_lp_sigma,
+            rl_iterations=opts.rl_iterations,
+            rl_psf_sigma=opts.rl_psf_sigma,
+            bm3d_sigma=opts.bm3d_sigma,
+        )
+        needs_run_fit = requires_run_level_fit(method)
+
+        ctx.fluorescent_normalisation_dir.mkdir(parents=True, exist_ok=True)
+        outputs: list[Path] = []
+        n = len(inputs)
+        n_skipped = 0
+        for i, tiff in enumerate(inputs):
+            out = ctx.fluorescent_normalisation_dir / tiff.name
+            if ctx.reuse_existing and out.exists():
+                progress_cb(
+                    (i + 1) / n,
+                    f"[{i+1}/{n}] Reused {tiff.name}",
+                )
+                outputs.append(out)
+                n_skipped += 1
+                continue
+
+            data, metadata = load_hyperstack(tiff)
+            n_fov, n_channels, _, _ = data.shape
+
+            mask_channel = n_channels - 1
+            phase_channel = (
+                ctx.phase_channel if ctx.phase_channel is not None else 0
+            )
+            requested = opts.apply_to_channels
+            fluor_indices = [
+                c for c in range(n_channels)
+                if c != mask_channel and c != phase_channel
+                and (requested is None or c in requested)
+            ]
+            if not fluor_indices:
+                progress_cb(
+                    (i + 1) / n,
+                    f"[{i+1}/{n}] {tiff.name}: no fluor channels — copying through",
+                )
+
+            # One normaliser per fluor channel; BaSiC's flat-field is
+            # channel-specific so the instances cannot be shared.
+            per_channel_norm = {
+                c: build_normaliser(method, norm_opts)
+                for c in fluor_indices
+            }
+            if needs_run_fit:
+                for c, normaliser in per_channel_norm.items():
+                    stack = data[:, c, :, :].astype(np.float32, copy=False)
+                    normaliser.fit(stack)
+
+            out_data = data.astype(np.float32, copy=True)
+            for fov_idx in range(n_fov):
+                for c in fluor_indices:
+                    img = data[fov_idx, c, :, :]
+                    out_data[fov_idx, c, :, :] = per_channel_norm[c].apply(img)
+                progress_cb(
+                    (i + (fov_idx + 1) / max(n_fov, 1)) / n,
+                    f"[{i+1}/{n}] {tiff.name} FOV {fov_idx+1}/{n_fov} "
+                    f"({method}, channels {fluor_indices})",
+                )
+
+            imagej_meta = {
+                "axes": "ZCYX",
+                "channels": n_channels,
+                "slices": n_fov,
+                "hyperstack": True,
+                "mode": "composite",
+            }
+            for k in ("Labels", "unit", "spacing"):
+                if k in metadata:
+                    imagej_meta[k] = metadata[k]
+
+            tifffile.imwrite(
+                str(out), out_data,
+                imagej=True, metadata=imagej_meta,
+            )
+            outputs.append(out)
+
+        progress_cb(
+            1.0,
+            f"Fluorescent Normalisation: {len(outputs)} TIFFs"
+            + (f" ({n_skipped} reused)" if n_skipped else "")
+            + f" → {ctx.fluorescent_normalisation_dir.name}",
+        )
+        return outputs
+
+
+class FociDetectionStage:
+    """Run one or more detectors per FOV × per fluor channel on the
+    normalised hyperstacks. Output: long-form parquet per well with
+    feature columns for downstream threshold / classifier filtering.
+
+    Schema: ``well, fov, channel_index, channel_name, detector,
+    normalisation, cell_id, focus_id, y, x, sigma, intensity, snr_annulus,
+    gaussian_r2, hessian_symmetry, patch_snr, cell_p90, cell_p95,
+    cell_median, cell_std, prominence_p90, prominence_median``.
+    """
+
+    name = "Foci Detection"
+    handles_own_reuse = True
+
+    def enabled(self, ctx) -> bool:
+        return bool(getattr(ctx, "do_foci_detection", False))
+
+    def validate(self, ctx) -> list[str]:
+        if not self.enabled(ctx):
+            return []
+        if (not ctx.fluorescent_normalisation_dir.exists()
+                and not getattr(ctx, "do_fluorescent_normalisation", False)):
+            return [
+                f"Foci Detection needs TIFFs in "
+                f"{ctx.fluorescent_normalisation_dir}. Run Fluorescent "
+                f"Normalisation first (use 'none' method for pass-through)."
+            ]
+        keys = ctx.foci_detection_opts.detector_keys
+        if not keys:
+            return ["Foci Detection: select at least one detector."]
+        from mycomorph.core.foci.detectors import REGISTRY
+        unknown = [k for k in keys if k not in REGISTRY]
+        if unknown:
+            return [
+                f"Unknown detector key(s): {unknown}. "
+                f"Available: {sorted(REGISTRY)}"
+            ]
+        return []
+
+    def output_dir(self, ctx) -> Path:
+        return ctx.foci_detection_dir
+
+    def run(self, ctx, progress_cb: ProgressCB) -> list[Path]:
+        import pandas as pd
+        from mycomorph.core.foci.detectors import REGISTRY as DETECTOR_REGISTRY
+        from mycomorph.core.foci.features import features_dataframe
+        from mycomorph.core.label_cells import (
+            get_labeled_mask_from_fov,
+            load_hyperstack,
+        )
+
+        if not ctx.fluorescent_normalisation_dir.exists():
+            raise RuntimeError(
+                "Foci Detection: input dir "
+                f"{ctx.fluorescent_normalisation_dir} does not exist. "
+                "Run Fluorescent Normalisation first."
+            )
+        inputs = _iter_tiffs(ctx.fluorescent_normalisation_dir)
+        focus_suffix = ctx.focus_opts.filename_suffix or ""
+        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        inputs = _filter_to_layout(inputs, expected, progress_cb)
+        if not inputs:
+            raise RuntimeError(
+                "Foci Detection: no input TIFFs in "
+                f"{ctx.fluorescent_normalisation_dir} match the current layout."
+            )
+
+        opts = ctx.foci_detection_opts
+        detector_keys = list(opts.detector_keys)
+        det_opts = opts.detector_opts
+        normalisation_method = ctx.fluorescent_normalisation_opts.method
+
+        ctx.foci_detection_dir.mkdir(parents=True, exist_ok=True)
+        outputs: list[Path] = []
+        n = len(inputs)
+        n_skipped = 0
+        for i, tiff in enumerate(inputs):
+            out = ctx.foci_detection_dir / (tiff.stem + ".parquet")
+            if ctx.reuse_existing and out.exists():
+                progress_cb(
+                    (i + 1) / n,
+                    f"[{i+1}/{n}] Reused {tiff.name}",
+                )
+                outputs.append(out)
+                n_skipped += 1
+                continue
+
+            data, _metadata = load_hyperstack(tiff)
+            n_fov, n_channels, _, _ = data.shape
+
+            mask_channel = n_channels - 1
+            phase_channel = (
+                ctx.phase_channel if ctx.phase_channel is not None else 0
+            )
+            requested = opts.apply_to_channels
+            fluor_indices = [
+                c for c in range(n_channels)
+                if c != mask_channel and c != phase_channel
+                and (requested is None or c in requested)
+            ]
+            if not fluor_indices:
+                progress_cb(
+                    (i + 1) / n,
+                    f"[{i+1}/{n}] {tiff.name}: no fluor channels — skipping",
+                )
+                continue
+
+            well_stem = tiff.stem
+            total_units = max(n_fov * len(fluor_indices) * len(detector_keys), 1)
+            unit = 0
+            rows: list[pd.DataFrame] = []
+            for fov_idx in range(n_fov):
+                labeled_mask, _ = get_labeled_mask_from_fov(
+                    data[fov_idx], mask_channel,
+                )
+                for c in fluor_indices:
+                    image = data[fov_idx, c, :, :]
+                    channel_name = ""
+                    if ctx.channel_labels and c < len(ctx.channel_labels):
+                        channel_name = str(ctx.channel_labels[c])
+                    for det_key in detector_keys:
+                        detector = DETECTOR_REGISTRY[det_key]()
+                        foci = detector.detect(image, labeled_mask, det_opts)
+                        # Stable focus_id per (well, fov, channel, detector).
+                        for fid, f in enumerate(foci):
+                            f.focus_id = fid
+                        df = features_dataframe(
+                            image, labeled_mask, foci,
+                            detector=det_key,
+                            well=well_stem,
+                            fov_index=fov_idx,
+                            channel=channel_name,
+                        )
+                        if not df.empty:
+                            df["fov"] = int(fov_idx)
+                            df["channel_index"] = int(c)
+                            df["channel_name"] = channel_name
+                            df["normalisation"] = normalisation_method
+                            df["cell_id"] = df["cell_label"].astype(int)
+                            df["focus_id"] = [int(f.focus_id) for f in foci]
+                            rows.append(df)
+                        unit += 1
+                        progress_cb(
+                            (i + unit / total_units) / n,
+                            f"[{i+1}/{n}] {tiff.name} FOV {fov_idx+1}/{n_fov} "
+                            f"ch {c} det {det_key}: {len(foci)} foci",
+                        )
+
+            df_all = (
+                pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
+            )
+            df_all.to_parquet(out, index=False)
+            outputs.append(out)
+
+        progress_cb(
+            1.0,
+            f"Foci Detection: {len(outputs)} parquet(s)"
+            + (f" ({n_skipped} reused)" if n_skipped else "")
+            + f" → {ctx.foci_detection_dir.name}",
+        )
+        return outputs
+
+
 class EmbeddingsStage:
     """Optional stage: train/fine-tune autoencoder and extract CNN embeddings."""
 
@@ -975,5 +1307,7 @@ ALL_STAGES: list[Stage] = [
     SegmentStage(),
     ClassifyStage(),
     ExtractStage(),
+    FluorescentNormalisationStage(),
+    FociDetectionStage(),
     EmbeddingsStage(),
 ]

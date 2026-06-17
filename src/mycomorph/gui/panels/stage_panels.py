@@ -5,6 +5,10 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Callable, Optional
 
+import numpy as np
+import pandas as pd
+import pyqtgraph as pg
+
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtWidgets import (
     QCheckBox,
@@ -12,11 +16,17 @@ from PyQt6.QtWidgets import (
     QDoubleSpinBox,
     QFileDialog,
     QFormLayout,
+    QGridLayout,
+    QGroupBox,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
+    QMessageBox,
     QPushButton,
     QSpinBox,
+    QVBoxLayout,
     QWidget,
 )
 
@@ -27,9 +37,26 @@ from mycomorph.core.api import (
     SegmentOpts,
     resolve_classifier_preset,
 )
+from mycomorph.core.foci import DetectorOpts
+from mycomorph.core.foci.detectors import (
+    BACTERIAL_SPECIFIC_KEYS,
+    CLASSICAL_BASELINE_KEYS,
+    DEEP_LEARNING_KEYS,
+    DIM_SIGNAL_KEYS,
+)
+from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
 
+from ..pipeline.context import (
+    FluorescentNormalisationOpts,
+    FociDetectionOpts,
+)
 from ..ui import icons, tokens
 from ..ui.labeled_slider import LabeledSlider
+from ..widgets.foci_filter_io import (
+    FILTER_FEATURES,
+    compute_pass_mask,
+    save_foci_filter,
+)
 
 
 def _with_helper(widget: QWidget, helper: str) -> QWidget:
@@ -571,3 +598,952 @@ class SegmentClassifyPanel(QWidget):
 
     def set_detected_pixels_per_um(self, value):
         self.segment_panel.set_detected_pixels_per_um(value)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Foci-detection panels
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class _ChannelIndexSelect(QWidget):
+    """Compact multi-select listing fluorescence channels by ``index: name``.
+
+    Channel names are populated lazily via ``set_channels``; the selection
+    persists as the *original* channel index (so toggling which channel is
+    phase doesn't reshuffle saved selections). The phase channel is hidden
+    from the list — these panels only operate on fluorescence.
+    """
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self._list = QListWidget()
+        self._list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
+        self._list.setMaximumHeight(110)
+        layout.addWidget(self._list)
+        self._channels: list[str] = []
+        self._exclude: set[int] = set()
+        # ``_index_at_row[row]`` → original channel index for the item at
+        # that visible row. Lets selected_indices() return the user-stable
+        # original indices even though phase rows are filtered out.
+        self._index_at_row: list[int] = []
+        self._pending_selection: list[int] | None = None
+
+    def set_channels(
+        self,
+        names: list[str],
+        exclude_indices: list[int] | None = None,
+    ) -> None:
+        self._channels = list(names)
+        self._exclude = set(exclude_indices or [])
+        prev_idx = self.selected_indices() or self._pending_selection
+        self._list.clear()
+        self._index_at_row = []
+        for i, name in enumerate(self._channels):
+            if i in self._exclude:
+                continue
+            item = QListWidgetItem(f"{i}: {name}")
+            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable)
+            self._list.addItem(item)
+            self._index_at_row.append(i)
+        if prev_idx:
+            self.set_selected_indices(list(prev_idx))
+            self._pending_selection = None
+
+    def selected_indices(self) -> list[int]:
+        return [
+            self._index_at_row[self._list.row(item)]
+            for item in self._list.selectedItems()
+        ]
+
+    def set_selected_indices(self, indices: list[int]) -> None:
+        if self._list.count() == 0:
+            self._pending_selection = list(indices)
+            return
+        self._list.clearSelection()
+        for orig_idx in indices:
+            try:
+                row = self._index_at_row.index(int(orig_idx))
+            except ValueError:
+                continue
+            self._list.item(row).setSelected(True)
+
+
+class _DetectorKeySelect(QWidget):
+    """Single-select of one detector REGISTRY key, grouped by family.
+
+    Normalisation is now a separate upstream stage (Fluorescent
+    Normalisation), so the panel only surfaces *pure* detectors —
+    bundled "normalise + detect" variants (e.g. ``tophat_dog``,
+    ``decon_bm3d_wavelet``) would double-apply normalisation when the
+    upstream stage already handled it. They stay in the library for the
+    benchmark notebook but aren't exposed here.
+
+    Non-selectable header rows segment the list into "classical
+    baselines", "dim signal", "bacterial-specific", "deep learning".
+    """
+
+    _GROUPS: list[tuple[str, list[str]]] = [
+        ("Classical baselines",    CLASSICAL_BASELINE_KEYS),
+        ("Dim signal",             DIM_SIGNAL_KEYS),
+        ("Bacterial-specific",     BACTERIAL_SPECIFIC_KEYS),
+        ("Deep learning",          DEEP_LEARNING_KEYS),
+    ]
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self._list = QListWidget()
+        self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self._list.setMaximumHeight(180)
+        layout.addWidget(self._list)
+        self._key_rows: dict[str, int] = {}
+        self._build_items()
+
+    def _build_items(self) -> None:
+        self._list.clear()
+        self._key_rows.clear()
+        for header, keys in self._GROUPS:
+            hdr = QListWidgetItem(f"— {header} —")
+            hdr.setFlags(Qt.ItemFlag.NoItemFlags)
+            hdr.setForeground(Qt.GlobalColor.gray)
+            self._list.addItem(hdr)
+            for key in keys:
+                item = QListWidgetItem(key)
+                self._list.addItem(item)
+                self._key_rows[key] = self._list.row(item)
+
+    def selected_key(self) -> str | None:
+        items = self._list.selectedItems()
+        if not items:
+            return None
+        item = items[0]
+        if not (item.flags() & Qt.ItemFlag.ItemIsSelectable):
+            return None
+        return item.text()
+
+    def set_selected_key(self, key: str | None) -> None:
+        self._list.clearSelection()
+        if key is None:
+            return
+        row = self._key_rows.get(key)
+        if row is not None:
+            self._list.item(row).setSelected(True)
+
+
+class FluorescentNormalisationPanel(QWidget):
+    """Options for the Fluorescent Normalisation stage.
+
+    A method combobox plus per-method parameter widgets that show / hide
+    based on the selected normaliser. ``apply_to_channels`` lets the user
+    restrict normalisation to a subset of fluorescence channels (empty
+    selection → every channel that isn't phase or mask).
+    """
+
+    optionsChanged = pyqtSignal()
+
+    # Method key → list of param-widget keys to show. Anything not in the
+    # list is hidden for that method.
+    _METHOD_PARAMS: dict[str, list[str]] = {
+        "none":            [],
+        "tophat":          ["tophat_radius_px"],
+        "gaussian_lp":     ["gaussian_lp_sigma"],
+        "richardson_lucy": ["rl_iterations", "rl_psf_sigma"],
+        "bm3d":            ["bm3d_sigma"],
+        "decon_bm3d":      ["rl_iterations", "rl_psf_sigma", "bm3d_sigma"],
+        "basic":           [],
+    }
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._loading = False
+        self._channel_names: list[str] = []
+        self._phase_channel: int | None = None
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(tokens.S3)
+
+        box = QGroupBox("Fluorescent Normalisation options")
+        form = QFormLayout(box)
+        form.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
+        form.setHorizontalSpacing(tokens.S4)
+        form.setVerticalSpacing(tokens.S3)
+        root.addWidget(box)
+        root.addStretch(1)
+
+        self.method = QComboBox()
+        for key in NORMALISER_REGISTRY:
+            self.method.addItem(key)
+        # Default to top-hat — fast and effective for most fluor channels.
+        idx = self.method.findText("tophat")
+        if idx >= 0:
+            self.method.setCurrentIndex(idx)
+        form.addRow("Method:", _with_helper(
+            self.method,
+            "Per-FOV normaliser applied to fluorescent channels before "
+            "foci detection. `none` passes images through unchanged.",
+        ))
+
+        # Top-hat: structuring-element radius in pixels.
+        self.tophat_radius_px = QSpinBox()
+        self.tophat_radius_px.setRange(1, 100)
+        self.tophat_radius_px.setValue(5)
+        self._row_tophat = QLabel("Top-hat radius (px):")
+        form.addRow(self._row_tophat, self.tophat_radius_px)
+
+        # Gaussian low-pass: sigma + auto checkbox.
+        self.gaussian_lp_sigma = QDoubleSpinBox()
+        self.gaussian_lp_sigma.setRange(0.1, 200.0)
+        self.gaussian_lp_sigma.setDecimals(2)
+        self.gaussian_lp_sigma.setValue(20.0)
+        self.gaussian_lp_auto = QCheckBox("auto (min_dim / 8)")
+        self.gaussian_lp_auto.setChecked(True)
+        lp_row = QHBoxLayout()
+        lp_row.setContentsMargins(0, 0, 0, 0)
+        lp_row.addWidget(self.gaussian_lp_sigma)
+        lp_row.addWidget(self.gaussian_lp_auto)
+        lp_row.addStretch(1)
+        self._lp_wrap = QWidget()
+        self._lp_wrap.setLayout(lp_row)
+        self._row_gauss = QLabel("Low-pass σ:")
+        form.addRow(self._row_gauss, self._lp_wrap)
+
+        # Richardson-Lucy params: iterations + PSF sigma.
+        self.rl_iterations = QSpinBox()
+        self.rl_iterations.setRange(1, 500)
+        self.rl_iterations.setValue(30)
+        self._row_rl_iter = QLabel("Richardson–Lucy iterations:")
+        form.addRow(self._row_rl_iter, self.rl_iterations)
+
+        self.rl_psf_sigma = QDoubleSpinBox()
+        self.rl_psf_sigma.setRange(0.1, 10.0)
+        self.rl_psf_sigma.setDecimals(2)
+        self.rl_psf_sigma.setSingleStep(0.1)
+        self.rl_psf_sigma.setValue(1.5)
+        self._row_rl_psf = QLabel("Richardson–Lucy PSF σ (px):")
+        form.addRow(self._row_rl_psf, self.rl_psf_sigma)
+
+        # BM3D sigma + auto checkbox.
+        self.bm3d_sigma = QDoubleSpinBox()
+        self.bm3d_sigma.setRange(0.0, 65535.0)
+        self.bm3d_sigma.setDecimals(2)
+        self.bm3d_sigma.setValue(0.0)
+        self.bm3d_auto = QCheckBox("auto (MAD estimate)")
+        self.bm3d_auto.setChecked(True)
+        bm3d_row = QHBoxLayout()
+        bm3d_row.setContentsMargins(0, 0, 0, 0)
+        bm3d_row.addWidget(self.bm3d_sigma)
+        bm3d_row.addWidget(self.bm3d_auto)
+        bm3d_row.addStretch(1)
+        self._bm3d_wrap = QWidget()
+        self._bm3d_wrap.setLayout(bm3d_row)
+        self._row_bm3d = QLabel("BM3D σ:")
+        form.addRow(self._row_bm3d, self._bm3d_wrap)
+
+        self.channels = _ChannelIndexSelect()
+        form.addRow("Apply to channels:", _with_helper(
+            self.channels,
+            "Empty → every channel that isn't phase or mask.",
+        ))
+
+        # All params present on the form — track widget pairs so we can
+        # show/hide whole rows by method.
+        self._param_rows: dict[str, tuple[QWidget, QWidget]] = {
+            "tophat_radius_px":  (self._row_tophat,  self.tophat_radius_px),
+            "gaussian_lp_sigma": (self._row_gauss,   self._lp_wrap),
+            "rl_iterations":     (self._row_rl_iter, self.rl_iterations),
+            "rl_psf_sigma":      (self._row_rl_psf,  self.rl_psf_sigma),
+            "bm3d_sigma":        (self._row_bm3d,    self._bm3d_wrap),
+        }
+
+        self.method.currentTextChanged.connect(self._refresh_param_visibility)
+        self.gaussian_lp_auto.toggled.connect(
+            lambda on: self.gaussian_lp_sigma.setEnabled(not on)
+        )
+        self.bm3d_auto.toggled.connect(
+            lambda on: self.bm3d_sigma.setEnabled(not on)
+        )
+        self.gaussian_lp_sigma.setEnabled(not self.gaussian_lp_auto.isChecked())
+        self.bm3d_sigma.setEnabled(not self.bm3d_auto.isChecked())
+        self._refresh_param_visibility(self.method.currentText())
+
+        for w in (self.method,):
+            w.currentIndexChanged.connect(self._emit_options_changed)
+        for w in (
+            self.tophat_radius_px, self.rl_iterations,
+        ):
+            w.valueChanged.connect(self._emit_options_changed)
+        for w in (
+            self.gaussian_lp_sigma, self.rl_psf_sigma, self.bm3d_sigma,
+        ):
+            w.valueChanged.connect(self._emit_options_changed)
+        for w in (self.gaussian_lp_auto, self.bm3d_auto):
+            w.toggled.connect(self._emit_options_changed)
+        self.channels._list.itemSelectionChanged.connect(self._emit_options_changed)
+
+    def _emit_options_changed(self, *_args) -> None:
+        if not self._loading:
+            self.optionsChanged.emit()
+
+    def _refresh_param_visibility(self, method: str) -> None:
+        visible_keys = set(self._METHOD_PARAMS.get(method, []))
+        for key, (label, widget) in self._param_rows.items():
+            on = key in visible_keys
+            label.setVisible(on)
+            widget.setVisible(on)
+
+    # ── external wiring ─────────────────────────────────────────────
+    def set_channels(self, names: list[str]) -> None:
+        self._channel_names = list(names)
+        self._refresh_channel_list()
+
+    def set_phase_channel(self, phase: int | None) -> None:
+        self._phase_channel = phase if isinstance(phase, int) else None
+        self._refresh_channel_list()
+
+    def _refresh_channel_list(self) -> None:
+        exclude: list[int] = []
+        if isinstance(self._phase_channel, int):
+            exclude.append(self._phase_channel)
+        self.channels.set_channels(self._channel_names, exclude_indices=exclude)
+
+    # ── opts / persistence ──────────────────────────────────────────
+    def opts(self) -> FluorescentNormalisationOpts:
+        selected = self.channels.selected_indices()
+        return FluorescentNormalisationOpts(
+            method=self.method.currentText(),
+            tophat_radius_px=int(self.tophat_radius_px.value()),
+            gaussian_lp_sigma=(
+                None if self.gaussian_lp_auto.isChecked()
+                else float(self.gaussian_lp_sigma.value())
+            ),
+            rl_iterations=int(self.rl_iterations.value()),
+            rl_psf_sigma=float(self.rl_psf_sigma.value()),
+            bm3d_sigma=(
+                None if self.bm3d_auto.isChecked()
+                else float(self.bm3d_sigma.value())
+            ),
+            apply_to_channels=selected or None,
+        )
+
+    def state(self) -> dict:
+        return {
+            "method": self.method.currentText(),
+            "tophat_radius_px": int(self.tophat_radius_px.value()),
+            "gaussian_lp_sigma": float(self.gaussian_lp_sigma.value()),
+            "gaussian_lp_auto": self.gaussian_lp_auto.isChecked(),
+            "rl_iterations": int(self.rl_iterations.value()),
+            "rl_psf_sigma": float(self.rl_psf_sigma.value()),
+            "bm3d_sigma": float(self.bm3d_sigma.value()),
+            "bm3d_auto": self.bm3d_auto.isChecked(),
+            "apply_to_channels": self.channels.selected_indices(),
+        }
+
+    def restore_state(self, s: dict) -> None:
+        if not isinstance(s, dict):
+            return
+        self._loading = True
+        try:
+            if "method" in s:
+                i = self.method.findText(str(s["method"]))
+                if i >= 0:
+                    self.method.setCurrentIndex(i)
+            if "tophat_radius_px" in s:
+                self.tophat_radius_px.setValue(int(s["tophat_radius_px"]))
+            if "gaussian_lp_sigma" in s:
+                self.gaussian_lp_sigma.setValue(float(s["gaussian_lp_sigma"]))
+            if "gaussian_lp_auto" in s:
+                self.gaussian_lp_auto.setChecked(bool(s["gaussian_lp_auto"]))
+            if "rl_iterations" in s:
+                self.rl_iterations.setValue(int(s["rl_iterations"]))
+            if "rl_psf_sigma" in s:
+                self.rl_psf_sigma.setValue(float(s["rl_psf_sigma"]))
+            if "bm3d_sigma" in s:
+                self.bm3d_sigma.setValue(float(s["bm3d_sigma"]))
+            if "bm3d_auto" in s:
+                self.bm3d_auto.setChecked(bool(s["bm3d_auto"]))
+            if "apply_to_channels" in s:
+                self.channels.set_selected_indices(
+                    list(s["apply_to_channels"] or [])
+                )
+            self._refresh_param_visibility(self.method.currentText())
+            self.gaussian_lp_sigma.setEnabled(
+                not self.gaussian_lp_auto.isChecked()
+            )
+            self.bm3d_sigma.setEnabled(not self.bm3d_auto.isChecked())
+        finally:
+            self._loading = False
+
+
+class FociDetectionPanel(QWidget):
+    """Options for the Foci Detection stage.
+
+    Multi-select list of detector keys (grouped by family) plus shared
+    DetectorOpts knobs (sigma range, threshold, SNR floor) and a channel
+    multi-select. The "Label foci…" button opens the FociLabelDialog when
+    a Foci-Detection run has already produced parquet output.
+    """
+
+    optionsChanged = pyqtSignal()
+    labelRequested = pyqtSignal()
+    # Fires when the user drags any of the inline histogram threshold
+    # lines. The host wires this to the live-preview controller's
+    # ``apply_thresholds_only`` hot path so the scatter re-filters
+    # without triggering a detector re-run.
+    thresholdsChanged = pyqtSignal()
+    # Fires when the user toggles the "Show foci on preview" checkbox.
+    # Wired in MainWindow to LivePreviewPanel.set_foci_overlay_visible
+    # so the scatter can flip on/off without re-detection.
+    fociVisibilityChanged = pyqtSignal(bool)
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._loading = False
+        self._channel_names: list[str] = []
+        self._phase_channel: int | None = None
+        # Output directory + run id — populated by MainWindow when the
+        # user picks them in the Input panel. Used by the inline "Save
+        # filter" action; both default to ``None`` so the button stays
+        # disabled until a destination is known.
+        self._output_dir = None
+        self._run_id = ""
+        # Cached features DataFrame for the *current* FOV, pushed in by
+        # the live-preview controller. Drives the inline histograms.
+        self._foci_df: pd.DataFrame | None = None
+        # Per-feature widgets created lazily in the histogram section.
+        self._hist_plots: dict[str, pg.PlotWidget] = {}
+        self._hist_lines: dict[str, pg.InfiniteLine] = {}
+        self._hist_bars: dict[str, pg.BarGraphItem] = {}
+
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(tokens.S3)
+
+        det_box = QGroupBox("Detector")
+        det_layout = QVBoxLayout(det_box)
+        det_layout.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
+        det_layout.setSpacing(tokens.S3)
+        self.detectors = _DetectorKeySelect()
+        det_layout.addWidget(self.detectors)
+        cap = QLabel(
+            "Pick one detector. `wavelet` is a strong default for dim signal; "
+            "`dog` / `log` are faster baselines. Normalisation has already "
+            "been applied upstream by the Fluorescent Normalisation stage."
+        )
+        cap.setObjectName("caption")
+        cap.setStyleSheet(
+            f"color: {tokens.active().text_subtle}; "
+            f"font-size: {tokens.FS_CAPTION}px;"
+        )
+        cap.setWordWrap(True)
+        det_layout.addWidget(cap)
+        root.addWidget(det_box)
+
+        opt_box = QGroupBox("Detector parameters (shared)")
+        form = QFormLayout(opt_box)
+        form.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
+        form.setHorizontalSpacing(tokens.S4)
+        form.setVerticalSpacing(tokens.S3)
+        root.addWidget(opt_box)
+
+        defaults = DetectorOpts()
+
+        self.min_sigma = QDoubleSpinBox()
+        self.min_sigma.setRange(0.1, 20.0)
+        self.min_sigma.setDecimals(2)
+        self.min_sigma.setSingleStep(0.1)
+        self.min_sigma.setValue(defaults.min_sigma)
+        form.addRow("min σ (px):", self.min_sigma)
+
+        self.max_sigma = QDoubleSpinBox()
+        self.max_sigma.setRange(0.1, 50.0)
+        self.max_sigma.setDecimals(2)
+        self.max_sigma.setSingleStep(0.1)
+        self.max_sigma.setValue(defaults.max_sigma)
+        form.addRow("max σ (px):", self.max_sigma)
+
+        self.threshold = QDoubleSpinBox()
+        self.threshold.setRange(0.0, 1.0)
+        self.threshold.setDecimals(4)
+        self.threshold.setSingleStep(0.001)
+        self.threshold.setValue(defaults.threshold)
+        form.addRow("Threshold:", _with_helper(
+            self.threshold,
+            "Relative intensity threshold on the normalised image (0–1). "
+            "Lower → more permissive (more false positives, easier to filter).",
+        ))
+
+        self.snr_min = QDoubleSpinBox()
+        self.snr_min.setRange(0.0, 100.0)
+        self.snr_min.setDecimals(2)
+        self.snr_min.setSingleStep(0.1)
+        self.snr_min.setValue(defaults.snr_min)
+        form.addRow("SNR floor:", _with_helper(
+            self.snr_min,
+            "Discard candidates whose peak / local-bg-std falls below this. "
+            "Permissive detection + downstream filtering is the recommended flow.",
+        ))
+
+        self.refine = QCheckBox("Sub-pixel Gaussian refinement")
+        self.refine.setChecked(defaults.refine)
+        form.addRow("", self.refine)
+
+        ch_box = QGroupBox("Channels")
+        ch_layout = QVBoxLayout(ch_box)
+        ch_layout.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
+        self.channels = _ChannelIndexSelect()
+        ch_layout.addWidget(self.channels)
+        ch_cap = QLabel(
+            "Empty → every channel that isn't phase or mask."
+        )
+        ch_cap.setObjectName("caption")
+        ch_cap.setStyleSheet(
+            f"color: {tokens.active().text_subtle}; "
+            f"font-size: {tokens.FS_CAPTION}px;"
+        )
+        ch_cap.setWordWrap(True)
+        ch_layout.addWidget(ch_cap)
+        root.addWidget(ch_box)
+
+        # Visibility toggle — lets the user flick the scatter on/off so
+        # they can eyeball the underlying image without re-running.
+        self.show_foci_check = QCheckBox("Show foci on preview")
+        self.show_foci_check.setChecked(True)
+        self.show_foci_check.setToolTip(
+            "Hide the foci scatter overlay on the live preview without "
+            "clearing the detection results. Useful for comparing the "
+            "detection to the raw image."
+        )
+        self.show_foci_check.toggled.connect(self.fociVisibilityChanged.emit)
+        root.addWidget(self.show_foci_check)
+
+        # Apply row — re-detection only fires when the user clicks
+        # Apply (or when a new FOV / sample is selected). Detector
+        # parameter typing alone does NOT trigger the live preview.
+        apply_row = QHBoxLayout()
+        apply_row.setSpacing(tokens.S3)
+        self.apply_status = QLabel("")
+        self.apply_status.setObjectName("muted")
+        apply_row.addWidget(self.apply_status, stretch=1)
+        self.apply_btn = QPushButton("Apply")
+        self.apply_btn.setObjectName("primary")
+        self.apply_btn.setToolTip(
+            "Re-run foci detection on the current FOV using the values "
+            "above. Detector / channel / parameter edits don't take "
+            "effect on the live preview until you click here."
+        )
+        self.apply_btn.setEnabled(False)
+        self.apply_btn.clicked.connect(self._on_apply_clicked)
+        apply_row.addWidget(self.apply_btn)
+        root.addLayout(apply_row)
+
+        # ─── Inline foci filter (histograms + draggable thresholds) ───
+        # Lives in the panel so users can iterate on detector + threshold
+        # together: foci detected on the current preview FOV are pushed
+        # in here by the live-preview controller, the histograms re-bin,
+        # and threshold drags filter the scatter overlay without
+        # re-detection (see thresholdsChanged signal).
+        self.filter_box = QGroupBox("Filter foci (live, by feature)")
+        filter_layout = QVBoxLayout(self.filter_box)
+        filter_layout.setContentsMargins(
+            tokens.S4, tokens.S5, tokens.S4, tokens.S4,
+        )
+        filter_layout.setSpacing(tokens.S3)
+        self.filter_status = QLabel(
+            "Open the Foci Detection live preview to populate."
+        )
+        self.filter_status.setObjectName("muted")
+        self.filter_status.setWordWrap(True)
+        filter_layout.addWidget(self.filter_status)
+        hist_grid_host = QWidget()
+        self._hist_grid = QGridLayout(hist_grid_host)
+        self._hist_grid.setContentsMargins(0, 0, 0, 0)
+        self._hist_grid.setSpacing(tokens.S2)
+        filter_layout.addWidget(hist_grid_host)
+        self._build_histograms()
+
+        # Save / reset row at the bottom of the filter section.
+        save_row = QHBoxLayout()
+        save_row.setSpacing(tokens.S3)
+        self.reset_filter_btn = QPushButton("Reset thresholds")
+        self.reset_filter_btn.clicked.connect(self._on_reset_thresholds)
+        save_row.addWidget(self.reset_filter_btn)
+        save_row.addStretch(1)
+        self.save_filter_btn = QPushButton("Save filter…")
+        self.save_filter_btn.setIcon(icons.icon("check", role="text"))
+        self.save_filter_btn.setEnabled(False)
+        self.save_filter_btn.setToolTip(
+            "Write the threshold set to 05_foci_filters/ and apply it to "
+            "every parquet in 04c_foci_detection/, landing the filtered "
+            "subsets at 04d_foci_filtered/. Disabled until you've run "
+            "the Foci Detection stage at least once."
+        )
+        self.save_filter_btn.clicked.connect(self._on_save_filter)
+        save_row.addWidget(self.save_filter_btn)
+        filter_layout.addLayout(save_row)
+        root.addWidget(self.filter_box)
+
+        # "Label foci…" button — enabled by the host once 04c exists.
+        actions_row = QHBoxLayout()
+        actions_row.setSpacing(tokens.S3)
+        self.label_button = QPushButton("Label foci…")
+        self.label_button.setIcon(icons.icon("label", role="text"))
+        self.label_button.setEnabled(False)
+        self.label_button.setToolTip(
+            "Open the Foci Label dialog. Disabled until you've run the "
+            "Foci Detection stage at least once."
+        )
+        self.label_button.clicked.connect(self.labelRequested.emit)
+        actions_row.addWidget(self.label_button)
+        actions_row.addStretch(1)
+        root.addLayout(actions_row)
+
+        root.addStretch(1)
+
+        # Seed with the same default as FociDetectionOpts — done BEFORE
+        # wiring the dirty-tracking signals below so the initial
+        # selection doesn't light up Apply on launch.
+        self.detectors.set_selected_key("wavelet")
+
+        # Detector-options changes are NOT auto-applied — re-detection is
+        # expensive (BM3D / wavelet on a 1k×1k FOV is sluggish). Track a
+        # "dirty" flag instead and let the user click Apply to commit.
+        # Each option widget bumps the flag; the Apply button consumes it.
+        self._dirty_opts = False
+        self.detectors._list.itemSelectionChanged.connect(
+            self._mark_opts_dirty
+        )
+        for w in (self.min_sigma, self.max_sigma, self.threshold, self.snr_min):
+            w.valueChanged.connect(self._mark_opts_dirty)
+        self.refine.toggled.connect(self._mark_opts_dirty)
+        self.channels._list.itemSelectionChanged.connect(
+            self._mark_opts_dirty
+        )
+
+    def _emit_options_changed(self, *_args) -> None:
+        if not self._loading:
+            self.optionsChanged.emit()
+
+    def _mark_opts_dirty(self, *_args) -> None:
+        """Flag that the user has edited a detector option without
+        applying. The Apply button enables and a small caption appears.
+        ``_loading`` blocks this during restore so initial widget
+        population doesn't make the panel look dirty on launch.
+        """
+        if self._loading:
+            return
+        self._dirty_opts = True
+        self.apply_btn.setEnabled(True)
+        self.apply_status.setText("Unapplied changes")
+
+    def _on_apply_clicked(self) -> None:
+        """Commit the pending detector / channel / parameter edits to
+        the live preview by emitting the usual ``optionsChanged`` signal.
+        """
+        self._dirty_opts = False
+        self.apply_btn.setEnabled(False)
+        self.apply_status.setText("")
+        # Same fan-in as the old auto-emit path: optionsChanged is what
+        # the live-preview controller listens to.
+        self.optionsChanged.emit()
+
+    # ── external wiring ─────────────────────────────────────────────
+    def set_channels(self, names: list[str]) -> None:
+        self._channel_names = list(names)
+        self._refresh_channel_list()
+
+    def set_phase_channel(self, phase: int | None) -> None:
+        self._phase_channel = phase if isinstance(phase, int) else None
+        self._refresh_channel_list()
+
+    def _refresh_channel_list(self) -> None:
+        exclude: list[int] = []
+        if isinstance(self._phase_channel, int):
+            exclude.append(self._phase_channel)
+        # Populating the channel list emits itemSelectionChanged on
+        # both clear() and the subsequent re-selection. That's a
+        # programmatic event, not a user edit — guard the dirty flag
+        # so the Apply button doesn't light up on app launch / CZI swap.
+        prev_loading = self._loading
+        self._loading = True
+        try:
+            self.channels.set_channels(
+                self._channel_names, exclude_indices=exclude,
+            )
+        finally:
+            self._loading = prev_loading
+
+    def set_label_button_enabled(self, enabled: bool) -> None:
+        """Toggle the Label-foci + Save-filter buttons. Called by
+        MainWindow when the output directory's 04c_foci_detection/
+        folder changes state — both actions consume the same parquets,
+        so they enable / disable in lockstep.
+        """
+        self.label_button.setEnabled(bool(enabled))
+        self.save_filter_btn.setEnabled(bool(enabled))
+
+    def set_output_context(self, output_dir, run_id: str = "") -> None:
+        """Receive the run's output dir + run-id from MainWindow so the
+        Save filter action knows where to write."""
+        self._output_dir = output_dir
+        self._run_id = run_id or ""
+
+    # ── Inline filter histograms ────────────────────────────────────
+
+    def _build_histograms(self) -> None:
+        """Lay out one small log-y histogram per filter feature in a
+        2-column grid. Each plot owns a draggable InfiniteLine that
+        becomes the per-feature minimum threshold.
+        """
+        # Try theme-aware background; fall back to a dark grey.
+        try:
+            bg = tokens.active().bg
+        except Exception:  # noqa: BLE001
+            bg = "#222"
+        cols = 2
+        for idx, (col, label, logy) in enumerate(FILTER_FEATURES):
+            row, gcol = divmod(idx, cols)
+            plot = pg.PlotWidget(title=label)
+            plot.setMinimumHeight(110)
+            plot.setBackground(bg)
+            plot.showGrid(x=True, y=True, alpha=0.25)
+            if logy:
+                plot.setLogMode(x=False, y=True)
+            # Empty bars to start — populated when set_foci_features fires.
+            bars = pg.BarGraphItem(
+                x=[], height=[], width=1.0,
+                brush=pg.mkBrush(80, 140, 220, 220),
+                pen=pg.mkPen((0, 0, 0, 0)),
+            )
+            plot.addItem(bars)
+            line = pg.InfiniteLine(
+                pos=0.0,
+                angle=90,
+                movable=True,
+                pen=pg.mkPen((230, 70, 70, 230), width=2,
+                             style=Qt.PenStyle.DashLine),
+                hoverPen=pg.mkPen((255, 120, 120, 240), width=2),
+            )
+            line.sigPositionChanged.connect(self._on_threshold_changed)
+            plot.addItem(line)
+            self._hist_plots[col] = plot
+            self._hist_bars[col] = bars
+            self._hist_lines[col] = line
+            self._hist_grid.addWidget(plot, row, gcol)
+
+    def _on_threshold_changed(self, *_args) -> None:
+        if self._loading:
+            return
+        self._refresh_filter_status()
+        self.thresholdsChanged.emit()
+
+    def _on_reset_thresholds(self) -> None:
+        self._loading = True
+        try:
+            for col, line in self._hist_lines.items():
+                df = self._foci_df
+                if df is not None and col in df.columns and not df.empty:
+                    vals = df[col].to_numpy(dtype=np.float64, copy=False)
+                    finite = vals[np.isfinite(vals)]
+                    line.setValue(float(finite.min()) if finite.size else 0.0)
+                else:
+                    line.setValue(0.0)
+        finally:
+            self._loading = False
+        self._refresh_filter_status()
+        self.thresholdsChanged.emit()
+
+    def thresholds(self) -> dict[str, float]:
+        """Current minimum threshold per feature."""
+        return {
+            col: float(line.value())
+            for col, line in self._hist_lines.items()
+        }
+
+    def foci_visible(self) -> bool:
+        """Whether the live-preview scatter overlay should be drawn.
+        Toggled by the "Show foci on preview" checkbox."""
+        return bool(self.show_foci_check.isChecked())
+
+    def set_foci_features(self, df: "pd.DataFrame | None") -> None:
+        """Push the live-detected foci's features DataFrame in. Re-bins
+        the histograms; threshold positions are preserved across FOVs so
+        the user's choices stay sticky while they navigate.
+        """
+        if df is not None and isinstance(df, pd.DataFrame) and not df.empty:
+            self._foci_df = df
+        else:
+            self._foci_df = None
+        if self._foci_df is None:
+            self._clear_histograms()
+            self.filter_status.setText(
+                "No foci on the current FOV — adjust detector options "
+                "or pick a different FOV in the live preview."
+            )
+            return
+        n_bins = 40
+        for col, _label, _logy in FILTER_FEATURES:
+            bars = self._hist_bars.get(col)
+            if bars is None:
+                continue
+            if col not in self._foci_df.columns:
+                bars.setOpts(x=[], height=[], width=1.0)
+                continue
+            vals = self._foci_df[col].to_numpy(dtype=np.float64, copy=False)
+            finite = vals[np.isfinite(vals)]
+            if finite.size == 0:
+                bars.setOpts(x=[], height=[], width=1.0)
+                continue
+            lo = float(finite.min())
+            hi = float(finite.max())
+            if hi <= lo:
+                hi = lo + 1.0
+            counts, edges = np.histogram(
+                finite, bins=n_bins, range=(lo, hi),
+            )
+            centers = 0.5 * (edges[:-1] + edges[1:])
+            widths = edges[1:] - edges[:-1]
+            bars.setOpts(
+                x=centers,
+                height=counts.astype(np.float64),
+                width=widths,
+            )
+            # Clamp the threshold line to within the current data range
+            # (otherwise it can be off-screen after switching FOVs).
+            line = self._hist_lines.get(col)
+            if line is not None and line.value() < lo:
+                line.setValue(lo)
+        self._refresh_filter_status()
+
+    def _clear_histograms(self) -> None:
+        for bars in self._hist_bars.values():
+            bars.setOpts(x=[], height=[], width=1.0)
+
+    def _refresh_filter_status(self) -> None:
+        df = self._foci_df
+        if df is None or df.empty:
+            self.filter_status.setText(
+                "No foci on the current FOV — adjust detector options "
+                "or pick a different FOV in the live preview."
+            )
+            return
+        thr = self.thresholds()
+        n_pass = int(compute_pass_mask(df, thr).sum())
+        n_total = int(len(df))
+        pct = (100.0 * n_pass / n_total) if n_total else 0.0
+        self.filter_status.setText(
+            f"{n_pass} / {n_total} foci pass this FOV ({pct:.1f}%)"
+        )
+
+    def _on_save_filter(self) -> None:
+        if self._output_dir is None:
+            QMessageBox.warning(
+                self, "No output directory",
+                "Select an output directory in the Input panel first.",
+            )
+            return
+        try:
+            result = save_foci_filter(
+                output_dir=self._output_dir,
+                run_id=self._run_id,
+                thresholds=self.thresholds(),
+            )
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(
+                self, "Save failed",
+                f"Could not write filter outputs:\n{e}",
+            )
+            return
+        if result.n_input == 0:
+            QMessageBox.information(
+                self, "Filter saved (JSON only)",
+                "Wrote the thresholds to "
+                f"{result.json_path.name}.\n\n"
+                "No 04c_foci_detection/ parquets to apply the filter "
+                "to yet — run the Foci Detection stage to produce the "
+                "filtered parquets under 04d_foci_filtered/.",
+            )
+        else:
+            QMessageBox.information(
+                self, "Filter saved",
+                f"Wrote {result.n_pass:,} / {result.n_input:,} foci "
+                f"across {len(result.filtered_parquets)} well(s).\n\n"
+                f"Filter JSON: {result.json_path.name}\n"
+                f"Filtered parquets: 04d_foci_filtered/",
+            )
+
+    # ── opts / persistence ──────────────────────────────────────────
+    def opts(self) -> FociDetectionOpts:
+        det_opts = DetectorOpts(
+            min_sigma=float(self.min_sigma.value()),
+            max_sigma=float(self.max_sigma.value()),
+            threshold=float(self.threshold.value()),
+            snr_min=float(self.snr_min.value()),
+            refine=self.refine.isChecked(),
+        )
+        selected = self.channels.selected_indices()
+        # Single-detector now; keep the dataclass shape as ``list[str]`` so
+        # the parquet schema (one row per focus, with a ``detector`` column)
+        # doesn't have to special-case the v1 single-key path.
+        key = self.detectors.selected_key()
+        detector_keys = [key] if key else []
+        return FociDetectionOpts(
+            detector_keys=detector_keys,
+            detector_opts=det_opts,
+            apply_to_channels=selected or None,
+        )
+
+    def state(self) -> dict:
+        return {
+            "detector_key": self.detectors.selected_key(),
+            "min_sigma": float(self.min_sigma.value()),
+            "max_sigma": float(self.max_sigma.value()),
+            "threshold": float(self.threshold.value()),
+            "snr_min": float(self.snr_min.value()),
+            "refine": self.refine.isChecked(),
+            "apply_to_channels": self.channels.selected_indices(),
+            "show_foci": bool(self.show_foci_check.isChecked()),
+        }
+
+    def restore_state(self, s: dict) -> None:
+        if not isinstance(s, dict):
+            return
+        self._loading = True
+        try:
+            # Accept both ``detector_key`` (new) and ``detector_keys``
+            # (legacy QSettings from before the single-select switch).
+            # Fall back to ``wavelet`` if the saved key is no longer in
+            # the visible list (e.g. saved during the bundled-normaliser
+            # era when ``decon_bm3d_wavelet`` was the default).
+            saved_key: str | None = None
+            if "detector_key" in s:
+                saved_key = s.get("detector_key") or None
+            elif "detector_keys" in s:
+                keys = list(s["detector_keys"] or [])
+                saved_key = keys[0] if keys else None
+            if saved_key is not None and saved_key not in self.detectors._key_rows:
+                saved_key = "wavelet"
+            if saved_key is not None or "detector_key" in s or "detector_keys" in s:
+                self.detectors.set_selected_key(saved_key)
+            if "min_sigma" in s:
+                self.min_sigma.setValue(float(s["min_sigma"]))
+            if "max_sigma" in s:
+                self.max_sigma.setValue(float(s["max_sigma"]))
+            if "threshold" in s:
+                self.threshold.setValue(float(s["threshold"]))
+            if "snr_min" in s:
+                self.snr_min.setValue(float(s["snr_min"]))
+            if "refine" in s:
+                self.refine.setChecked(bool(s["refine"]))
+            if "apply_to_channels" in s:
+                self.channels.set_selected_indices(
+                    list(s["apply_to_channels"] or [])
+                )
+            if "show_foci" in s:
+                self.show_foci_check.setChecked(bool(s["show_foci"]))
+        finally:
+            self._loading = False

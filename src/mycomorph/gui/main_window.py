@@ -34,7 +34,12 @@ from .panels.input_panel import InputMode, InputPanel
 from .panels.label_train_panel import LabelTrainPanel
 from .panels.layout_panel import LayoutPanel
 from .panels.run_panel import RunPanel
-from .panels.stage_panels import FocusPanel, SegmentClassifyPanel
+from .panels.stage_panels import (
+    FluorescentNormalisationPanel,
+    FociDetectionPanel,
+    FocusPanel,
+    SegmentClassifyPanel,
+)
 from .pipeline.context import BulkRunContext, RunContext
 from .pipeline.layout import PlateLayout
 from .pipeline.runner import BulkPipelineRunner, PipelineRunner
@@ -78,6 +83,9 @@ NAV_ENTRIES = [
              indent=True, subheader="Image Processing"),
     NavEntry("segment",    "Segment & Classify", "segment", indent=True),
     NavEntry("features",   "Features",           "features", indent=True),
+    NavEntry("fluor_norm", "Fluorescent Normalisation", "fluor_norm",
+             indent=True),
+    NavEntry("foci_det",   "Foci Detection",     "foci_det", indent=True),
     NavEntry("embeddings", "Embeddings",         "embeddings"),
     NavEntry("run",        "Run",                "run"),
     NavEntry("analysis",   "Analysis",           "analysis", pipeline=False),
@@ -142,6 +150,8 @@ class MainWindow(QMainWindow):
         self.focus_panel = FocusPanel()
         self.segclass_panel = SegmentClassifyPanel()
         self.features_panel = FeaturesPanel()
+        self.fluor_norm_panel = FluorescentNormalisationPanel()
+        self.foci_det_panel = FociDetectionPanel()
         self.embeddings_panel = EmbeddingsPanel()
         self.run_panel = RunPanel()
         self.analysis_panel = AnalysisPanel()
@@ -233,12 +243,35 @@ class MainWindow(QMainWindow):
             features_opts=self.features_panel.opts,
             phase_channel=lambda: self.input_panel.phase_channel,
             channel_labels=lambda: self.input_panel.channel_labels,
+            fluor_norm_opts=self.fluor_norm_panel.opts,
+            foci_det_opts=self.foci_det_panel.opts,
+            foci_thresholds=self.foci_det_panel.thresholds,
+            foci_visible=self.foci_det_panel.foci_visible,
         )
-        # Re-render on any option change in the four stage panels.
+        # Re-render on any option change in the six stage panels.
         self.focus_panel.optionsChanged.connect(self.live_preview.trigger_render)
         self.segment_panel.optionsChanged.connect(self.live_preview.trigger_render)
         self.classify_panel.optionsChanged.connect(self.live_preview.trigger_render)
         self.features_panel.optionsChanged.connect(self.live_preview.trigger_render)
+        self.fluor_norm_panel.optionsChanged.connect(self.live_preview.trigger_render)
+        self.foci_det_panel.optionsChanged.connect(self.live_preview.trigger_render)
+        # Threshold drags hit the fast-path: re-filter cached foci, no
+        # detector re-run.
+        self.foci_det_panel.thresholdsChanged.connect(
+            self.live_preview.apply_thresholds_only,
+        )
+        # "Show foci on preview" toggle — pure view flip, no re-render.
+        self.foci_det_panel.fociVisibilityChanged.connect(
+            self.live_preview.set_foci_overlay_visible,
+        )
+        # Live preview pushes the detected foci's features into the
+        # inline panel histograms whenever it runs a detection pass.
+        self.live_preview.fociFeaturesAvailable.connect(
+            self.foci_det_panel.set_foci_features,
+        )
+
+        # FociDetectionPanel's "Label foci…" button opens the label dialog.
+        self.foci_det_panel.labelRequested.connect(self._open_foci_label_dialog)
 
     # ------------------------------------------------------------------ chrome
 
@@ -293,6 +326,8 @@ class MainWindow(QMainWindow):
             self.focus_panel,
             self.segclass_panel,
             self.features_panel,
+            self.fluor_norm_panel,
+            self.foci_det_panel,
             self.embeddings_panel,
             self.run_panel,
             self.analysis_panel,
@@ -559,6 +594,8 @@ class MainWindow(QMainWindow):
             s.setValue("segment_panel", json.dumps(self.segment_panel.state()))
             s.setValue("classify_panel", json.dumps(self.classify_panel.state()))
             s.setValue("features_panel", json.dumps(self.features_panel.state()))
+            s.setValue("fluor_norm_panel", json.dumps(self.fluor_norm_panel.state()))
+            s.setValue("foci_det_panel", json.dumps(self.foci_det_panel.state()))
             s.setValue("embeddings_panel", json.dumps(self.embeddings_panel.state()))
             s.setValue("run_panel", json.dumps(self.run_panel.state()))
             s.setValue("live_preview", json.dumps(self.live_preview.state()))
@@ -598,6 +635,8 @@ class MainWindow(QMainWindow):
             ("segment_panel",  self.segment_panel),
             ("classify_panel", self.classify_panel),
             ("features_panel", self.features_panel),
+            ("fluor_norm_panel", self.fluor_norm_panel),
+            ("foci_det_panel", self.foci_det_panel),
             ("embeddings_panel", self.embeddings_panel),
             ("run_panel",      self.run_panel),
         ):
@@ -729,7 +768,7 @@ class MainWindow(QMainWindow):
             self._stack.widget(plate_idx).setEnabled(plate_visible)
 
         # Image-processing tabs: hidden whenever we're training from library.
-        for key in ("focus", "segment", "features"):
+        for key in ("focus", "segment", "features", "fluor_norm", "foci_det"):
             self._sidebar.set_visible(key, not train_mode)
             i = self._sidebar.index_of(key)
             if 0 <= i < self._stack.count():
@@ -783,6 +822,12 @@ class MainWindow(QMainWindow):
         self.live_preview.set_phase_channel(ch)
         labels = self.input_panel.channel_labels or []
         self.features_panel.set_channels(list(labels))
+        self.fluor_norm_panel.set_channels(list(labels))
+        self.foci_det_panel.set_channels(list(labels))
+        # Foci panels operate on fluorescence only — hide the phase row.
+        phase_idx = ch if isinstance(ch, int) else None
+        self.fluor_norm_panel.set_phase_channel(phase_idx)
+        self.foci_det_panel.set_phase_channel(phase_idx)
 
     def _on_czi_selected(self, czi_path) -> None:
         try:
@@ -806,9 +851,15 @@ class MainWindow(QMainWindow):
         # And the layout context, so samples can be labelled by
         # well / condition / reporter rather than raw filename.
         self._refresh_preview_layouts()
+        # Push the output dir + run id into the FociDetectionPanel so
+        # the inline "Save filter" action knows where to write.
+        self.foci_det_panel.set_output_context(
+            out, out.name if out is not None else "",
+        )
         if out is None:
             self.live_preview.set_search_dirs([])
             self.label_train_panel.set_segment_dir(None)
+            self.foci_det_panel.set_label_button_enabled(False)
             return
         candidates = [
             out / "01_split_and_focused",
@@ -818,6 +869,37 @@ class MainWindow(QMainWindow):
         self.live_preview.set_search_dirs([d for d in candidates if d.exists()])
         seg_dir = out / "02_segment"
         self.label_train_panel.set_segment_dir(seg_dir if seg_dir.exists() else None)
+        # Enable the foci-label button if Foci Detection has produced output.
+        foci_dir = out / "04c_foci_detection"
+        has_foci = foci_dir.exists() and any(foci_dir.glob("*.parquet"))
+        self.foci_det_panel.set_label_button_enabled(has_foci)
+
+    def _open_foci_label_dialog(self) -> None:
+        """Open the modal foci-labelling dialog rooted at the current output dir."""
+        out = self.input_panel.output_dir
+        if out is None:
+            QMessageBox.warning(
+                self, "No output directory",
+                "Select an output directory in the Input panel first.",
+            )
+            return
+        foci_dir = out / "04c_foci_detection"
+        if not foci_dir.exists() or not any(foci_dir.glob("*.parquet")):
+            QMessageBox.warning(
+                self, "Nothing to label",
+                f"No foci-detection parquets at {foci_dir}. "
+                "Run the Foci Detection stage first.",
+            )
+            return
+        from .widgets.foci_label_dialog import FociLabelDialog
+        dlg = FociLabelDialog(
+            output_dir=out,
+            channel_labels=list(self.input_panel.channel_labels or []),
+            run_id=out.name,
+            parent=self,
+        )
+        dlg.exec()
+
 
     def _refresh_preview_layouts(self) -> None:
         """Hand the live preview the current plate / bulk layout DataFrames.
@@ -944,6 +1026,10 @@ class MainWindow(QMainWindow):
         # Outputs now exist on disk for stages that just ran — re-evaluate so
         # any newly-produced output sets its sidebar dot green.
         self._recompute_stage_readiness()
+        # Foci Detection may have just produced parquets; refresh the
+        # Label-foci button enable state so the user can label without
+        # having to re-pick the output directory.
+        self._refresh_preview_dirs()
         # The Features stage may have just registered a new run in the
         # feature library — refresh the Analysis page's interactive plot
         # so it reflects the new data on next visit (or right now if the
@@ -1014,11 +1100,17 @@ class MainWindow(QMainWindow):
                 do_segment=enables["Segment"],
                 do_classify=enables["Classify"],
                 do_features=enables.get("Features", False),
+                do_fluorescent_normalisation=enables.get(
+                    "Fluorescent Normalisation", False
+                ),
+                do_foci_detection=enables.get("Foci Detection", False),
                 do_embeddings=enables.get("Embeddings", False),
                 focus_opts=self.focus_panel.opts(),
                 segment_opts=self.segment_panel.opts(),
                 classify_opts=self.classify_panel.opts(),
                 features_opts=features_opts,
+                fluorescent_normalisation_opts=self.fluor_norm_panel.opts(),
+                foci_detection_opts=self.foci_det_panel.opts(),
                 embeddings_opts=self.embeddings_panel.opts(),
                 phase_channel=self.input_panel.phase_channel,
                 channel_labels=self.input_panel.channel_labels,
@@ -1042,11 +1134,17 @@ class MainWindow(QMainWindow):
                 do_segment=enables["Segment"],
                 do_classify=enables["Classify"],
                 do_features=enables.get("Features", False),
+                do_fluorescent_normalisation=enables.get(
+                    "Fluorescent Normalisation", False
+                ),
+                do_foci_detection=enables.get("Foci Detection", False),
                 do_embeddings=enables.get("Embeddings", False),
                 focus_opts=self.focus_panel.opts(),
                 segment_opts=self.segment_panel.opts(),
                 classify_opts=self.classify_panel.opts(),
                 features_opts=features_opts,
+                fluorescent_normalisation_opts=self.fluor_norm_panel.opts(),
+                foci_detection_opts=self.foci_det_panel.opts(),
                 embeddings_opts=self.embeddings_panel.opts(),
                 phase_channel=self.input_panel.phase_channel,
                 channel_labels=self.input_panel.channel_labels,

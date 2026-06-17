@@ -8,11 +8,15 @@ Layers, bottom → top:
         managed by the parent panel.
 - z=10  segmentation boundary overlay (RGBA, colored by classifier
         decision when available; plain red otherwise).
+- z=15  per-detector foci scatter layers — one ``pg.ScatterPlotItem``
+        each, identified by ``name`` (typically the detector key) and a
+        unique color. Reused across renders via :meth:`set_foci_layer_data`.
 - z=20+ per-object pg.TextItem labels at centroid_x/centroid_y.
 
-Channel layers, the boundary overlay, and the label layer are reused
-across renders (we never add/remove pyqtgraph items, only ``setImage`` /
-``setText`` / ``setPos``) so re-renders don't churn the scene graph.
+Channel layers, the boundary overlay, foci scatter layers, and the label
+layer are reused across renders (we never add/remove pyqtgraph items,
+only ``setImage`` / ``setData`` / ``setText`` / ``setPos``) so re-renders
+don't churn the scene graph.
 """
 
 from __future__ import annotations
@@ -85,6 +89,10 @@ class MultiOverlayCanvas(QWidget):
         self._phase_shape: tuple[int, int] | None = None
         self._channel_layers: list[pg.ImageItem] = []   # z=1+
         self._label_items: list[pg.TextItem] = []       # z=20+
+        # Foci scatter overlays — one ``pg.ScatterPlotItem`` per named
+        # layer. Created lazily via :meth:`add_foci_layer`, then reused
+        # across renders by swapping data through :meth:`set_foci_layer_data`.
+        self._foci_layers: dict[str, pg.ScatterPlotItem] = {}
         self._image_initialised = False
 
         # ROI handle (lazy: created on first show). Lives on top of all
@@ -118,12 +126,13 @@ class MultiOverlayCanvas(QWidget):
     # ----------------------------------------------------------------- API
 
     def clear(self) -> None:
-        """Wipe phase, channels, mask, and labels."""
+        """Wipe phase, channels, mask, foci scatter, and labels."""
         # ImageView's setImage doesn't accept None; just hide via empty array.
         self._image_view.clear()
         for it in self._channel_layers:
             it.clear()
         self._overlay_item.clear()
+        self.clear_foci_layers()
         self._set_label_count(0)
         self._phase_shape = None
         self._image_initialised = False
@@ -282,6 +291,79 @@ class MultiOverlayCanvas(QWidget):
             item.setPos(txt.x - br.width() / 2.0,
                         txt.y - br.height() / 2.0)
             item.setVisible(True)
+
+    # ----------------------------------------------------------------- foci
+
+    def add_foci_layer(
+        self,
+        name: str,
+        color: tuple[int, int, int, int] = (255, 255, 0, 230),
+    ) -> None:
+        """Register a foci scatter layer keyed by ``name`` (e.g. a detector
+        key). Repeated calls with the same ``name`` update the brush
+        rather than creating a duplicate layer — that lets the caller
+        re-colour an existing layer (e.g. when the channel labels change)
+        without churning the scene graph. The pen is always a thin black
+        outline for contrast against any background.
+        """
+        brush = pg.mkBrush(*color)
+        scatter = self._foci_layers.get(name)
+        if scatter is not None:
+            scatter.setBrush(brush)
+            return
+        scatter = pg.ScatterPlotItem(
+            pxMode=True,
+            size=10,
+            pen=pg.mkPen((0, 0, 0, 220), width=1),
+            brush=brush,
+        )
+        scatter.setZValue(15)
+        self._image_view.view.addItem(scatter)
+        self._foci_layers[name] = scatter
+
+    def set_foci_layer_data(
+        self,
+        name: str,
+        xs,
+        ys,
+        sizes=None,
+    ) -> None:
+        """Push the points of a previously-added foci layer.
+
+        ``xs`` / ``ys`` are sequences of image-space coordinates;
+        ``sizes`` (optional) is a sequence of per-point pixel diameters.
+        Lengths must match. If the layer hasn't been registered, this is
+        a silent no-op so callers don't have to defensively check.
+        """
+        scatter = self._foci_layers.get(name)
+        if scatter is None:
+            return
+        n = len(xs)
+        if sizes is None:
+            sizes = [10] * n
+        # Use setData with parallel arrays — fewer dict allocations
+        # than the spot-of-dicts form when redrawing on every option change.
+        scatter.setData(x=list(xs), y=list(ys), size=list(sizes))
+
+    def set_foci_layer_visible(self, name: str, visible: bool) -> None:
+        """Show / hide an existing foci layer. No-op if unknown name."""
+        scatter = self._foci_layers.get(name)
+        if scatter is None:
+            return
+        scatter.setVisible(bool(visible))
+
+    def set_all_foci_layers_visible(self, visible: bool) -> None:
+        """Show / hide every registered foci layer in one call. Used by
+        the panel's overlay-visibility toggle so the user can flick foci
+        on / off without re-running detection."""
+        for scatter in self._foci_layers.values():
+            scatter.setVisible(bool(visible))
+
+    def clear_foci_layers(self) -> None:
+        """Wipe data on every registered foci layer (keeps the items so
+        they don't have to be re-added on the next render)."""
+        for scatter in self._foci_layers.values():
+            scatter.setData(x=[], y=[])
 
     # ----------------------------------------------------------------- helpers
 
@@ -469,3 +551,15 @@ def color_for_channel_name(name: str) -> str:
     if any(k in n for k in ("cy5", "alexa647", "647")):
         return "magenta"
     return "white"
+
+
+def rgb_for_channel_name(name: str) -> tuple[int, int, int]:
+    """RGB triple for a channel name, matching the channel-image LUT.
+
+    Composed of :func:`color_for_channel_name` + the canvas's internal
+    palette. Used by the foci-detection live preview so scatter dots
+    inherit the channel's display colour.
+    """
+    return _NAMED_RGB.get(
+        color_for_channel_name(name), _NAMED_RGB["white"],
+    )
