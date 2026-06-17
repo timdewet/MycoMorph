@@ -3,9 +3,9 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mycoprep"
+name = "mycomorph"
 version = "0.2.0"
-description = "MycoPrep: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
+description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -39,15 +39,24 @@ profiling = [
     # pure-Python and installs from PyPI as a wheel everywhere.
     "harmonypy>=0.0.9,<0.0.10",
 ]
+# Optional dependencies for the Fluorescent Normalisation and Foci Detection
+# pipeline stages. Each heavy detector / normaliser lazy-imports its package,
+# so installing only the subset you need (e.g. just ``bm3d``) works too.
+foci = [
+    "bm3d",                                          # BM3D denoising
+    "trackpy",                                       # radial-symmetry detector
+    "basicpy",                                       # BaSiC flat-field correction
+    "spotiflow ; python_version<'3.13'",             # deep-learning detector; no 3.13 wheels yet
+]
 test = ["pytest>=8", "pytest-qt>=4"]
 
 [project.scripts]
-mycoprep = "mycoprep.gui.app:main"
-mycoprep-cli = "mycoprep.core.cli:app"
-mycoprep-focus = "mycoprep.core.focus.cli:app"
+mycomorph = "mycomorph.gui.app:main"
+mycomorph-cli = "mycomorph.core.cli:app"
+mycomorph-focus = "mycomorph.core.focus.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mycoprep.core" = ["models/*.pth"]
+"mycomorph.core" = ["models/*.pth"]

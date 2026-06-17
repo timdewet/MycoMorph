@@ -12,7 +12,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from mycoprep.core.extract.representation_eval import (
+from mycomorph.core.extract.representation_eval import (
     SCOPE_ALL,
     SCOPE_CROSS_GENE,
     SCOPE_REPLICATE,
@@ -318,7 +318,7 @@ def test_harmony_orientation_helper_round_trip():
     regardless of the installed harmonypy version (0.0.x transposes;
     2.x doesn't)."""
     try:
-        from mycoprep.core.extract.qc_plots import _run_harmony_oriented
+        from mycomorph.core.extract.qc_plots import _run_harmony_oriented
     except ImportError:
         return  # qc_plots optional-deps not installed — skip
     try:

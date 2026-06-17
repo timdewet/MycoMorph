@@ -41,4 +41,4 @@ jobs:
 
       - name: Import smoke
         run: |
-          python -c "import mycoprep; import mycoprep.core; import mycoprep.gui; print(mycoprep.__version__)"
+          python -c "import mycomorph; import mycomorph.core; import mycomorph.gui; print(mycomorph.__version__)"
