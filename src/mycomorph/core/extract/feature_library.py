@@ -29,16 +29,26 @@ from typing import Optional
 import pandas as pd
 
 _NEW_DEFAULT_DIR = Path.home() / ".mycomorph" / "morphology_library"
-_OLD_DEFAULT_DIR = Path.home() / ".mycomorph" / "feature_library"
+# Legacy locations, newest first. The ``.mycoprep`` paths predate the
+# MycoPrep -> MycoMorph rename; the ``feature_library`` names predate the
+# feature_library -> morphology_library rename. Any of these is migrated to
+# ``_NEW_DEFAULT_DIR`` on first use.
+_LEGACY_DEFAULT_DIRS = (
+    Path.home() / ".mycomorph" / "feature_library",
+    Path.home() / ".mycoprep" / "morphology_library",
+    Path.home() / ".mycoprep" / "feature_library",
+)
 
 
 def _resolve_default_library_dir() -> Path:
-    """Use the new default path, migrating from the old one if needed."""
+    """Use the new default path, migrating from a legacy one if needed."""
     if _NEW_DEFAULT_DIR.exists():
         return _NEW_DEFAULT_DIR
-    if _OLD_DEFAULT_DIR.exists():
-        _OLD_DEFAULT_DIR.rename(_NEW_DEFAULT_DIR)
-        return _NEW_DEFAULT_DIR
+    for legacy in _LEGACY_DEFAULT_DIRS:
+        if legacy.exists():
+            _NEW_DEFAULT_DIR.parent.mkdir(parents=True, exist_ok=True)
+            legacy.rename(_NEW_DEFAULT_DIR)
+            return _NEW_DEFAULT_DIR
     return _NEW_DEFAULT_DIR
 
 
