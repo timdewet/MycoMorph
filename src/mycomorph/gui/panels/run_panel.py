@@ -27,7 +27,10 @@ from ..ui import icons, tokens
 from ..ui.stepper import StepState, Stepper
 from ..widgets.log_view import LogView
 
-STAGE_NAMES = ["Split", "Focus", "Segment", "Classify", "Features", "Embeddings"]
+STAGE_NAMES = [
+    "Split", "Focus", "Segment", "Classify", "Features",
+    "Fluorescent Normalisation", "Foci Detection", "Embeddings",
+]
 
 
 class RunPanel(QWidget):
@@ -54,8 +57,14 @@ class RunPanel(QWidget):
         # Split is suppressed when Focus is also enabled (Focus subsumes it).
         self._planned_stages: list[str] | None = None
         self.checks: dict[str, QCheckBox] = {}
-        # Features and Embeddings are opt-in heavy stages; default OFF.
-        _default_off = {"Features", "Embeddings"}
+        # Features, the two foci stages, and Embeddings are opt-in heavy
+        # stages; default OFF.
+        _default_off = {
+            "Features",
+            "Fluorescent Normalisation",
+            "Foci Detection",
+            "Embeddings",
+        }
         for name in STAGE_NAMES:
             cb = QCheckBox(name)
             cb.setChecked(name not in _default_off)

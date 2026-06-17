@@ -81,7 +81,7 @@ LABEL_NICE_NAMES = {
 
 
 # Tab keys this panel knows how to render for. Anything else → hidden.
-RENDER_TAB_KEYS = ("focus", "segment", "features")
+RENDER_TAB_KEYS = ("focus", "segment", "features", "fluor_norm", "foci_det")
 
 
 @dataclass
@@ -372,6 +372,12 @@ class LivePreviewPanel(QWidget):
 
     # ----------------------------------------------------------------- API
 
+    # Foci-feature data emitted whenever the controller runs a detection
+    # pass on the foci_det tab. MainWindow connects this to the
+    # FociDetectionPanel's ``set_foci_features`` so the inline histograms
+    # re-bin live as the user navigates FOVs.
+    fociFeaturesAvailable = pyqtSignal(object)
+
     def wire_pipeline(
         self,
         focus_opts: Callable[[], Any],
@@ -380,6 +386,10 @@ class LivePreviewPanel(QWidget):
         features_opts: Callable[[], Any],
         phase_channel: Callable[[], int],
         channel_labels: Callable[[], Optional[list[str]]] = lambda: None,
+        fluor_norm_opts: Callable[[], Any] = lambda: None,
+        foci_det_opts: Callable[[], Any] = lambda: None,
+        foci_thresholds: Callable[[], dict] = lambda: {},
+        foci_visible: Callable[[], bool] = lambda: True,
     ) -> None:
         """Install the live opts providers + spin up the render controller.
 
@@ -387,6 +397,10 @@ class LivePreviewPanel(QWidget):
         the controller can read live opts from them whenever the user
         moves a slider. The classify provider can return ``None`` for
         "rules-only / no model"; the panel handles that gracefully.
+
+        ``fluor_norm_opts`` and ``foci_det_opts`` are optional — when not
+        provided, the corresponding live-preview tabs render the raw
+        focus / segment output with no transformation or foci overlays.
         """
         opts = OptsProviders(
             focus_opts=focus_opts,
@@ -396,6 +410,10 @@ class LivePreviewPanel(QWidget):
             phase_channel=phase_channel,
             channel_labels=channel_labels,
             roi=self._current_roi,
+            fluor_norm_opts=fluor_norm_opts,
+            foci_det_opts=foci_det_opts,
+            foci_thresholds=foci_thresholds,
+            foci_visible=foci_visible,
         )
         canvas = CanvasSink(
             set_phase=self._canvas.set_phase,
@@ -406,6 +424,13 @@ class LivePreviewPanel(QWidget):
             set_features_df=self._on_features_df,
             set_labels=self._canvas.set_labels,
             clear=self._on_canvas_clear,
+            add_foci_layer=self._canvas.add_foci_layer,
+            set_foci_layer_data=self._canvas.set_foci_layer_data,
+            set_foci_layer_visible=self._canvas.set_foci_layer_visible,
+            clear_foci_layers=self._canvas.clear_foci_layers,
+            # Re-emit on the panel signal so MainWindow can route the
+            # foci features to the inline histograms in FociDetectionPanel.
+            set_foci_features=self.fociFeaturesAvailable.emit,
         )
         progress = ProgressSink(
             started=self._on_progress_started,
@@ -429,6 +454,23 @@ class LivePreviewPanel(QWidget):
         if self._controller is not None:
             self._controller.request_render(reason="options")
 
+    def apply_thresholds_only(self) -> None:
+        """Re-filter the cached foci scatter without re-running detection.
+
+        Hooked to FociDetectionPanel.thresholdsChanged in MainWindow so
+        threshold drags are a fast path — cheap dataframe filter +
+        scatter swap, no detector re-run.
+        """
+        if self._controller is not None:
+            self._controller.apply_thresholds_only()
+
+    def set_foci_overlay_visible(self, visible: bool) -> None:
+        """Show / hide the foci scatter overlays on the canvas without
+        touching the underlying detection / filtering state. Wired to
+        FociDetectionPanel.fociVisibilityChanged in MainWindow.
+        """
+        self._canvas.set_all_foci_layers_visible(bool(visible))
+
     def set_current_tab(self, tab_key: str) -> None:
         """Called by MainWindow when the user navigates between tabs.
 
@@ -446,7 +488,9 @@ class LivePreviewPanel(QWidget):
     def set_search_dirs(self, dirs: list[Path]) -> None:
         """Where to look for previewable TIFFs (from the project's output dir)."""
         self._search_dirs = [Path(d) for d in dirs if Path(d).exists()]
-        if self._current_tab in ("segment", "features"):
+        if self._current_tab in (
+            "segment", "features", "fluor_norm", "foci_det",
+        ):
             self._refresh_for_tab(self._current_tab)
 
     def set_czi_paths(self, paths: list[Path]) -> None:
@@ -536,14 +580,18 @@ class LivePreviewPanel(QWidget):
     def _samples_for_tab(self, tab_key: str) -> list[_Sample]:
         # Tab-specific source priority:
         # - focus: raw CZIs (the user is tuning focus options).
-        # - segment / features: focused TIFFs first (cheap to load), then
-        #   raw CZIs as a fallback so the preview works even before the
-        #   real Focus stage has produced any disk output.
+        # - segment / features / fluor_norm / foci_det: focused TIFFs
+        #   first (cheap to load), then raw CZIs as a fallback so the
+        #   preview works even before the real Focus stage has produced
+        #   any disk output.
+        downstream_tabs = ("segment", "features", "fluor_norm", "foci_det")
         out: list[_Sample] = []
-        if tab_key in ("segment", "features"):
+        if tab_key in downstream_tabs:
             out.extend(self._tiff_samples())
-        out.extend(self._czi_samples(suffix=" (raw CZI — focus on the fly)"
-                                     if tab_key in ("segment", "features") else ""))
+        out.extend(self._czi_samples(
+            suffix=" (raw CZI — focus on the fly)"
+            if tab_key in downstream_tabs else "",
+        ))
         return out
 
     def _czi_samples(self, *, suffix: str = "") -> list[_Sample]:

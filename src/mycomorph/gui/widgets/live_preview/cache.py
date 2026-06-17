@@ -52,6 +52,11 @@ class CacheEntry:
     features_key: Optional[FeaturesKey] = None
     features_df: Optional[pd.DataFrame] = None
 
+    # Foci-detection preview outputs (per-FOV cached so threshold drags
+    # don't trigger re-detection — only re-filtering on a fast path).
+    foci_key: Optional[tuple] = None
+    foci_df: Optional[pd.DataFrame] = None
+
 
 # ---------------------------------------------------------------------------
 # Key builders — explicit tuples of the option fields that affect each stage.
@@ -123,6 +128,44 @@ def classify_key(seg_k: SegmentKey, classify_opts: Any) -> ClassifyKey:
         getattr(classify_opts, "confidence_threshold", None),
         tuple(getattr(classify_opts, "keep_classes", ()) or ()),
         getattr(classify_opts, "pixels_per_um", None),
+    )
+
+
+def foci_preview_key(
+    seg_k: Any,
+    det_key: str,
+    channels: tuple,
+    det_opts: Any,
+    fluor_norm_opts: Any,
+) -> tuple:
+    """Cache key for live-preview foci detection.
+
+    Includes the upstream segment key (so a new segmentation invalidates
+    foci), the detector name + opts, the *tuple* of fluor channels the
+    detector ran on (so a multi-channel run caches as one entry), AND
+    the fluor-normalisation opts (since the controller post-applies the
+    normaliser before detection runs).
+    """
+    return (
+        "foci",
+        seg_k,
+        str(det_key or ""),
+        tuple(int(c) for c in (channels or ())),
+        getattr(det_opts, "min_sigma", None),
+        getattr(det_opts, "max_sigma", None),
+        getattr(det_opts, "threshold", None),
+        getattr(det_opts, "snr_min", None),
+        getattr(det_opts, "refine", None),
+        getattr(det_opts, "trackpy_diameter_px", None),
+        getattr(det_opts, "wavelet_scales", None),
+        getattr(det_opts, "wavelet_threshold_mad", None),
+        # Fluor-norm opts that change the input image the detector sees.
+        getattr(fluor_norm_opts, "method", None),
+        getattr(fluor_norm_opts, "tophat_radius_px", None),
+        getattr(fluor_norm_opts, "gaussian_lp_sigma", None),
+        getattr(fluor_norm_opts, "rl_iterations", None),
+        getattr(fluor_norm_opts, "rl_psf_sigma", None),
+        getattr(fluor_norm_opts, "bm3d_sigma", None),
     )
 
 

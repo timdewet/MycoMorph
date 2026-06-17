@@ -7,8 +7,48 @@ from pathlib import Path
 from typing import Any, Optional
 
 from mycomorph.core.api import ClassifyOpts, ExtractOpts, FocusOpts, SegmentOpts
+from mycomorph.core.foci import DetectorOpts
 
 from .layout import PlateLayout
+
+
+@dataclass
+class FluorescentNormalisationOpts:
+    """Configuration for the Fluorescent Normalisation pipeline stage."""
+
+    # Key in NORMALISER_REGISTRY: "none", "tophat", "gaussian_lp",
+    # "richardson_lucy", "bm3d", "decon_bm3d", "basic".
+    method: str = "tophat"
+
+    # NormaliserOpts knobs the panel will eventually expose. The stage
+    # builds a NormaliserOpts from these at run time.
+    tophat_radius_px: int = 5
+    gaussian_lp_sigma: Optional[float] = None       # None → auto
+    rl_iterations: int = 30
+    rl_psf_sigma: float = 1.5
+    bm3d_sigma: Optional[float] = None              # None → MAD-estimate
+
+    # Channel selection. None → every channel that isn't phase or mask.
+    apply_to_channels: Optional[list[int]] = None
+
+
+@dataclass
+class FociDetectionOpts:
+    """Configuration for the Foci Detection pipeline stage."""
+
+    # REGISTRY key for the detector. The GUI restricts this to one key
+    # at a time (``wavelet`` by default — a strong baseline for dim
+    # signal after the Fluorescent Normalisation stage). The shape stays
+    # ``list[str]`` for forward compatibility with multi-detector runs
+    # driven from CLI / scripts.
+    detector_keys: list[str] = field(default_factory=lambda: ["wavelet"])
+
+    # Shared detector parameters; individual detectors ignore fields that
+    # don't apply to them.
+    detector_opts: DetectorOpts = field(default_factory=DetectorOpts)
+
+    # Channel selection. None → every channel that isn't phase or mask.
+    apply_to_channels: Optional[list[int]] = None
 
 
 @dataclass
@@ -50,6 +90,8 @@ class RunContext:
     do_segment: bool = True
     do_classify: bool = True
     do_features: bool = False
+    do_fluorescent_normalisation: bool = False
+    do_foci_detection: bool = False
     do_embeddings: bool = False
 
     # Per-stage options
@@ -57,6 +99,12 @@ class RunContext:
     segment_opts: SegmentOpts = field(default_factory=SegmentOpts)
     classify_opts: ClassifyOpts = field(default_factory=ClassifyOpts)
     features_opts: ExtractOpts = field(default_factory=ExtractOpts)
+    fluorescent_normalisation_opts: FluorescentNormalisationOpts = field(
+        default_factory=FluorescentNormalisationOpts
+    )
+    foci_detection_opts: FociDetectionOpts = field(
+        default_factory=FociDetectionOpts
+    )
     embeddings_opts: EmbeddingOpts = field(default_factory=EmbeddingOpts)
 
     # Channel handling (resolved early so all downstream stages agree)
@@ -108,6 +156,32 @@ class RunContext:
         return self.output_dir / "04_features"
 
     @property
+    def fluorescent_normalisation_dir(self) -> Path:
+        return self.output_dir / "04b_fluorescent_normalisation"
+
+    @property
+    def foci_detection_dir(self) -> Path:
+        return self.output_dir / "04c_foci_detection"
+
+    @property
+    def foci_filtered_dir(self) -> Path:
+        # Filtered subsets of the foci-detection parquets written by the
+        # FociFilterDialog when the user picks per-feature thresholds.
+        return self.output_dir / "04d_foci_filtered"
+
+    @property
+    def foci_labels_dir(self) -> Path:
+        # Used by the future FociLabelDialog (Slice 4). Defined now so
+        # downstream code can reference it without a second context.py edit.
+        return self.output_dir / "05_foci_labels"
+
+    @property
+    def foci_filters_dir(self) -> Path:
+        # Per-session threshold JSONs written alongside the filtered
+        # parquets so the chosen thresholds are auditable.
+        return self.output_dir / "05_foci_filters"
+
+    @property
     def embeddings_dir(self) -> Path:
         return self.output_dir / "05_embeddings"
 
@@ -134,6 +208,8 @@ class BulkRunContext:
     do_segment: bool = True
     do_classify: bool = True
     do_features: bool = False
+    do_fluorescent_normalisation: bool = False
+    do_foci_detection: bool = False
     do_embeddings: bool = False
 
     # Per-stage options (shared across all CZIs in the batch)
@@ -141,6 +217,12 @@ class BulkRunContext:
     segment_opts: SegmentOpts = field(default_factory=SegmentOpts)
     classify_opts: ClassifyOpts = field(default_factory=ClassifyOpts)
     features_opts: ExtractOpts = field(default_factory=ExtractOpts)
+    fluorescent_normalisation_opts: FluorescentNormalisationOpts = field(
+        default_factory=FluorescentNormalisationOpts
+    )
+    foci_detection_opts: FociDetectionOpts = field(
+        default_factory=FociDetectionOpts
+    )
     embeddings_opts: EmbeddingOpts = field(default_factory=EmbeddingOpts)
 
     phase_channel: Optional[int] = None
@@ -175,6 +257,26 @@ class BulkRunContext:
     @property
     def features_dir(self) -> Path:
         return self.output_dir / "04_features"
+
+    @property
+    def fluorescent_normalisation_dir(self) -> Path:
+        return self.output_dir / "04b_fluorescent_normalisation"
+
+    @property
+    def foci_detection_dir(self) -> Path:
+        return self.output_dir / "04c_foci_detection"
+
+    @property
+    def foci_filtered_dir(self) -> Path:
+        return self.output_dir / "04d_foci_filtered"
+
+    @property
+    def foci_labels_dir(self) -> Path:
+        return self.output_dir / "05_foci_labels"
+
+    @property
+    def foci_filters_dir(self) -> Path:
+        return self.output_dir / "05_foci_filters"
 
     @property
     def embeddings_dir(self) -> Path:
