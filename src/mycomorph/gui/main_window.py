@@ -44,7 +44,7 @@ from .pipeline.context import BulkRunContext, RunContext
 from .pipeline.layout import PlateLayout
 from .pipeline.runner import BulkPipelineRunner, PipelineRunner
 from .pipeline.stages import EmbeddingsStage
-from .ui import icons, tokens
+from .ui import icons, tokens, theme
 from .ui.elevation import apply_shadow
 from .ui.nav_sidebar import NavEntry, NavSidebar, StageStatus
 from .updater import ReleaseInfo, UpdateChecker
@@ -284,27 +284,46 @@ class MainWindow(QMainWindow):
         hl.setContentsMargins(tokens.S5, 0, tokens.S5, 0)
         hl.setSpacing(tokens.S3)
 
-        self._breadcrumb = QLabel(f"Step 1 of {len(NAV_ENTRIES)} · Input")
-        self._breadcrumb.setObjectName("breadcrumb")
-        hl.addWidget(self._breadcrumb)
+        # ── Left: stage context (name + state chip) — no step counter,
+        #    no duplicate brand. Branding lives in the sidebar only. ──
+        title_col = QVBoxLayout()
+        title_col.setContentsMargins(0, 0, 0, 0)
+        title_col.setSpacing(0)
+        self._stage_title = QLabel("Input")
+        self._stage_title.setObjectName("h2")
+        title_col.addWidget(self._stage_title)
+        self._stage_subhead = QLabel("")
+        self._stage_subhead.setObjectName("caption")
+        title_col.addWidget(self._stage_subhead)
+        hl.addLayout(title_col)
+
+        self._stage_state_chip = QLabel("")
+        self._stage_state_chip.setObjectName("themePill")  # reuse the pill style
+        self._stage_state_chip.setVisible(False)
+        hl.addWidget(self._stage_state_chip)
+
+        # Output-dir chip — surfaces the active run directory; click to open.
+        self._outdir_chip = QPushButton("No output directory")
+        self._outdir_chip.setObjectName("themePill")
+        self._outdir_chip.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._outdir_chip.clicked.connect(self._on_outdir_chip_clicked)
+        hl.addWidget(self._outdir_chip)
+
         hl.addStretch(1)
 
-        brand_name = QLabel("MycoMorph")
-        brand_name.setObjectName("brandName")
-        hl.addWidget(brand_name)
+        # ── Right: theme toggle + persistent primary Run action. ──
+        self._theme_btn = QPushButton("")
+        self._theme_btn.setObjectName("themePill")
+        self._theme_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._theme_btn.clicked.connect(self._on_theme_toggle)
+        hl.addWidget(self._theme_btn)
+        self._sync_theme_btn()
 
-        if self._logo_path.exists():
-            logo_lbl = QLabel()
-            logo_lbl.setFixedSize(QSize(50, 50))
-            renderer = QSvgRenderer(str(self._logo_path))
-            pix = QPixmap(QSize(50, 50))
-            pix.fill(Qt.GlobalColor.transparent)
-            painter = QPainter(pix)
-            renderer.render(painter)
-            painter.end()
-            logo_lbl.setPixmap(pix)
-            logo_lbl.setStyleSheet("background: transparent;")
-            hl.addWidget(logo_lbl)
+        self._header_run_btn = QPushButton("Run pipeline")
+        self._header_run_btn.setObjectName("primary")
+        self._header_run_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._header_run_btn.clicked.connect(self._on_header_run_clicked)
+        hl.addWidget(self._header_run_btn)
 
         header_div = QFrame()
         header_div.setObjectName("headerDivider")
@@ -532,16 +551,19 @@ class MainWindow(QMainWindow):
         entry = NAV_ENTRIES[idx]
         if entry.key == "analysis":
             self.analysis_panel.refresh_library()
-        # The sidebar tracks which keys are visible (e.g. plate is hidden in
-        # bulk mode); use that to drive the step counter.
-        visible_entries = [e for e in NAV_ENTRIES if e.key in self._sidebar._visible_keys]
-        visible_idx = next(
-            (i + 1 for i, e in enumerate(visible_entries) if e.key == entry.key),
-            1,
-        )
-        self._breadcrumb.setText(
-            f"Step {visible_idx} of {len(visible_entries)} · {entry.label}"
-        )
+        # Workspace model, not a wizard: name the stage and its group +
+        # current state, rather than a "Step N of M" counter that implied a
+        # forced linear order the sidebar never actually enforced.
+        self._stage_title.setText(entry.label)
+        if entry.subheader:
+            self._stage_subhead.setText(entry.subheader)
+        elif entry.indent:
+            self._stage_subhead.setText("Image Processing")
+        elif not entry.pipeline:
+            self._stage_subhead.setText("Results")
+        else:
+            self._stage_subhead.setText("")
+        self._update_stage_state_chip(entry.key)
         # Live preview: visible only on the focus / segment / features
         # tabs, hidden on input / plate / run.
         from .widgets.live_preview.panel import RENDER_TAB_KEYS
@@ -806,14 +828,136 @@ class MainWindow(QMainWindow):
 
     # ---------------------------------------------------------------- readiness
 
-    def _recompute_stage_readiness(self) -> None:
-        """Kept as a hook for future use, but a no-op for sidebar dots.
+    # Per-stage output directories (relative to the run output dir) and the
+    # nav key of the upstream stage each one depends on. "done" is read off
+    # disk; "ready/blocked" is derived from the upstream's state. Mirrors the
+    # dependency rules enforced in _preflight_ok.
+    _STAGE_OUTPUT_DIRS = {
+        "focus":      ("01_split_and_focused", "01_focus", "01_split"),
+        "segment":    ("02_segment", "03_classify"),
+        "features":   ("04_features",),
+        "fluor_norm": ("04b_fluorescent_normalisation",),
+        "foci_det":   ("04c_foci_detection",),
+        "embeddings": ("05_embeddings",),
+    }
+    _STAGE_UPSTREAM = {
+        "focus":      None,          # first processing stage — depends on input
+        "segment":    "focus",
+        "features":   "segment",
+        "fluor_norm": "segment",
+        "foci_det":   "fluor_norm",
+        "embeddings": "features",
+    }
 
-        Dots now reflect *actual* run state (running / done / errored) only —
-        form readiness and on-disk output presence no longer paint them, since
-        users found the mixed signals confusing.
+    def _dir_has_content(self, out, name: str) -> bool:
+        d = out / name
+        try:
+            return d.exists() and any(d.iterdir())
+        except Exception:  # noqa: BLE001
+            return False
+
+    def _stage_done_on_disk(self, key: str, out) -> bool:
+        return any(
+            self._dir_has_content(out, n)
+            for n in self._STAGE_OUTPUT_DIRS.get(key, ())
+        )
+
+    def _recompute_stage_readiness(self) -> None:
+        """Paint a quiet pre-run status dot on every processing stage.
+
+        done   — output exists on disk
+        ready   — its upstream is satisfied (done, or input is ready for the
+                  first stage) so the stage can be run now
+        blocked — upstream output missing; running now would fail preflight
+        idle    — no input selected yet / not applicable
+
+        These are kept visually distinct from the loud run-state dots
+        (running / done / errored), which the run lifecycle owns. We never
+        repaint while a run is active so we don't clobber those.
         """
-        return
+        if getattr(self, "_run_active", False):
+            return
+        if not hasattr(self, "_sidebar"):
+            return
+        out = self.input_panel.output_dir
+        input_ready = out is not None and self.input_panel.has_czi_input
+        # Header Run is only actionable once there's something to run.
+        self._header_run_btn.setEnabled(input_ready)
+
+        status_by_key: dict[str, StageStatus] = {}
+        for key in self._STAGE_OUTPUT_DIRS:
+            if not input_ready:
+                st = StageStatus.IDLE
+            elif self._stage_done_on_disk(key, out):
+                st = StageStatus.DONE
+            else:
+                up = self._STAGE_UPSTREAM[key]
+                upstream_ok = up is None or self._stage_done_on_disk(up, out)
+                st = StageStatus.READY if upstream_ok else StageStatus.BLOCKED
+            status_by_key[key] = st
+            self._stage_status[key] = st
+            self._sidebar.set_status(key, st)
+
+        # Refresh the header chip for whichever stage is showing.
+        cur = self._sidebar._items.index(
+            next((it for it in self._sidebar._items if it.isChecked()),
+                 self._sidebar._items[0])
+        ) if self._sidebar._items else 0
+        if 0 <= cur < len(NAV_ENTRIES):
+            self._update_stage_state_chip(NAV_ENTRIES[cur].key)
+        self._refresh_outdir_chip()
+
+    _STATE_CHIP_TEXT = {
+        StageStatus.DONE:    "Done",
+        StageStatus.READY:   "Ready to run",
+        StageStatus.BLOCKED: "Needs upstream output",
+        StageStatus.RUNNING: "Running…",
+        StageStatus.ERROR:   "Failed",
+        StageStatus.IDLE:    "",
+    }
+
+    def _update_stage_state_chip(self, key: str) -> None:
+        st = self._stage_status.get(key, StageStatus.IDLE)
+        text = self._STATE_CHIP_TEXT.get(st, "")
+        self._stage_state_chip.setText(text)
+        self._stage_state_chip.setVisible(bool(text))
+
+    def _refresh_outdir_chip(self) -> None:
+        out = self.input_panel.output_dir
+        if out is None:
+            self._outdir_chip.setText("No output directory")
+            self._outdir_chip.setEnabled(False)
+        else:
+            self._outdir_chip.setText(f"📁 {out.name}")
+            self._outdir_chip.setToolTip(str(out))
+            self._outdir_chip.setEnabled(True)
+
+    def _on_outdir_chip_clicked(self) -> None:
+        out = self.input_panel.output_dir
+        if out is not None and Path(out).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(out)))
+
+    def _on_header_run_clicked(self) -> None:
+        # Jump to the Run tab so the user sees the log/stepper, then start.
+        run_idx = self._sidebar.index_of("run")
+        if run_idx >= 0:
+            self._sidebar.set_current(run_idx)
+        self.run_panel.runRequested.emit()
+
+    def _on_theme_toggle(self) -> None:
+        order = [theme.ThemeMode.AUTO, theme.ThemeMode.LIGHT, theme.ThemeMode.DARK]
+        cur = theme.theme_mode()
+        nxt = order[(order.index(cur) + 1) % len(order)] if cur in order else theme.ThemeMode.LIGHT
+        theme.set_theme_override(nxt)
+        self._sync_theme_btn()
+
+    def _sync_theme_btn(self) -> None:
+        glyph = {
+            theme.ThemeMode.AUTO:  "◐ Auto",
+            theme.ThemeMode.LIGHT: "☀ Light",
+            theme.ThemeMode.DARK:  "☾ Dark",
+        }.get(theme.theme_mode(), "◐ Auto")
+        self._theme_btn.setText(glyph)
 
     def _on_channels_changed(self) -> None:
         ch = self.input_panel.phase_channel
@@ -1007,6 +1151,8 @@ class MainWindow(QMainWindow):
 
     def _on_stage_run_started(self, name: str) -> None:
         self._run_active = True
+        self._header_run_btn.setEnabled(False)
+        self._header_run_btn.setText("Running…")
         self._sidebar.set_status("run", StageStatus.RUNNING)
         nav_key = self._STAGE_TO_NAV.get(name)
         if nav_key:
@@ -1021,6 +1167,8 @@ class MainWindow(QMainWindow):
 
     def _on_run_all_finished(self, _manifest: object) -> None:
         self._run_active = False
+        self._header_run_btn.setEnabled(True)
+        self._header_run_btn.setText("Run pipeline")
         self._sidebar.set_status("run", StageStatus.DONE)
         self._status_msg.setText("Run complete.")
         # Outputs now exist on disk for stages that just ran — re-evaluate so
@@ -1041,6 +1189,8 @@ class MainWindow(QMainWindow):
 
     def _on_run_all_failed(self, msg: str) -> None:
         self._run_active = False
+        self._header_run_btn.setEnabled(True)
+        self._header_run_btn.setText("Run pipeline")
         self._sidebar.set_status("run", StageStatus.ERROR)
         self._status_msg.setText(f"Failed: {msg}")
         self._recompute_stage_readiness()
