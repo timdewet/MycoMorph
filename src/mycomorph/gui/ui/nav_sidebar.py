@@ -26,17 +26,19 @@ from . import icons, tokens, theme
 
 
 class StageStatus(str, Enum):
-    IDLE = "idle"
-    READY = "ready"
+    IDLE = "idle"          # not configured / no upstream yet
+    READY = "ready"        # prerequisites met, can run
+    BLOCKED = "blocked"    # needs an upstream stage's output first
     RUNNING = "running"
     DONE = "done"
     ERROR = "error"
-    DISABLED = "disabled"
+    DISABLED = "disabled"  # not applicable in the current mode — no dot
 
 
 _STATUS_TO_ICON = {
     StageStatus.IDLE:     ("status-idle",     "muted"),
     StageStatus.READY:    ("status-ready",    "primary"),
+    StageStatus.BLOCKED:  ("status-blocked",  "warning"),
     StageStatus.RUNNING:  ("status-running",  "warning"),
     StageStatus.DONE:     ("status-done",     "success"),
     StageStatus.ERROR:    ("status-error",    "danger"),
@@ -47,9 +49,11 @@ _STATUS_TO_ICON = {
 class _StatusBadge(QLabel):
     """Small icon badge showing the stage's status.
 
-    Hidden by default — only made visible once the stage has actually entered
-    a meaningful state (running / done / error). Idle stages render no dot, so
-    the sidebar stays clean before any run has happened.
+    Renders a quiet indicator for every state EXCEPT ``DISABLED`` (a stage
+    that doesn't apply in the current mode draws no dot). The pre-run states
+    (idle / ready / blocked) use low-key glyphs — a hollow ring, a coloured
+    ring, an amber dot — while run states (running / done / error) read
+    louder, so the two signal families never get confused.
     """
 
     SIZE = 16
@@ -64,13 +68,13 @@ class _StatusBadge(QLabel):
 
     def set_status(self, s: StageStatus) -> None:
         self._status = s
-        # Idle / disabled / ready stages don't get a dot — only show after
-        # a stage has actually started running, finished, or errored.
-        if s in (StageStatus.RUNNING, StageStatus.DONE, StageStatus.ERROR):
+        # Every state carries a dot except DISABLED (stage not applicable in
+        # the current mode). The glyph map keeps pre-run states visually quiet.
+        if s is StageStatus.DISABLED:
+            self.setVisible(False)
+        else:
             self.setVisible(True)
             self._refresh()
-        else:
-            self.setVisible(False)
 
     def _refresh(self) -> None:
         from PyQt6.QtCore import QSize
@@ -82,6 +86,9 @@ class _StatusBadge(QLabel):
             self.setText("")
         else:
             fallback = {
+                StageStatus.IDLE:     "○",
+                StageStatus.READY:    "○",
+                StageStatus.BLOCKED:  "●",
                 StageStatus.RUNNING:  "◐",
                 StageStatus.DONE:     "✓",
                 StageStatus.ERROR:    "!",

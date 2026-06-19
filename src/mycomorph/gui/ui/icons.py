@@ -56,8 +56,9 @@ ICONS: dict[str, str] = {
     "check-circle":  "mdi.check-circle",
     "cog":           "mdi.cog",
     # Status-dot replacements
-    "status-idle":      "mdi.circle-outline",
-    "status-ready":     "mdi.circle-medium",
+    "status-idle":      "mdi.circle-outline",      # not configured — faint hollow ring
+    "status-ready":     "mdi.circle-outline",      # ready — coloured ring (role tints it)
+    "status-blocked":   "mdi.circle-medium",       # needs upstream — filled amber dot
     "status-running":   "mdi.timer-sand",
     "status-done":      "mdi.check-circle",
     "status-error":     "mdi.alert-circle",
