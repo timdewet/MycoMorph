@@ -15,7 +15,7 @@ Stage adapters:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from importlib.resources import files as _pkg_files
 from pathlib import Path
 from typing import Callable, Iterable, Optional
@@ -56,14 +56,14 @@ def _read_imagej_labels(tiff_path: Path) -> Optional[list[str]]:
 def _read_pixels_per_um(tiff_path: Path) -> Optional[float]:
     """Return pixels-per-µm inferred from a TIFF's metadata.
 
-    Prefers ImageJ ``spacing`` (µm/px). Falls back to TIFF ``XResolution``
-    in pixels-per-centimetre. Returns None if no reliable pixel size is
-    present.
+    Prefers OME ``PhysicalSizeX``, then TIFF ``XResolution`` with its declared
+    unit. ImageJ ``spacing`` is deliberately ignored because it describes the
+    Z axis, not XY pixel calibration.
     """
     import tifffile
     try:
         with tifffile.TiffFile(str(tiff_path)) as tif:
-            meta = tif.imagej_metadata or {}
+            ome = tif.ome_metadata
             first_page = tif.pages[0] if tif.pages else None
             tags = first_page.tags if first_page is not None else {}
             xres = tags.get("XResolution")
@@ -71,9 +71,21 @@ def _read_pixels_per_um(tiff_path: Path) -> Optional[float]:
     except Exception:  # noqa: BLE001
         return None
 
-    spacing = meta.get("spacing")
-    if isinstance(spacing, (int, float)) and spacing > 0:
-        return 1.0 / float(spacing)
+    if ome:
+        try:
+            from xml.etree import ElementTree as ET
+            root = ET.fromstring(ome)
+            pixels = next((node for node in root.iter() if node.tag.endswith("Pixels")), None)
+            if pixels is not None:
+                size = float(pixels.attrib.get("PhysicalSizeX", "0"))
+                unit = pixels.attrib.get("PhysicalSizeXUnit", "µm").lower()
+                if size > 0:
+                    if unit in {"µm", "um", "micrometer", "micrometre"}:
+                        return 1.0 / size
+                    if unit in {"nm", "nanometer", "nanometre"}:
+                        return 1000.0 / size
+        except (ET.ParseError, TypeError, ValueError):
+            pass
 
     if xres is not None:
         try:
@@ -128,15 +140,18 @@ def split_plate(
     out_dir.mkdir(parents=True, exist_ok=True)
 
     progress_cb(0.0, f"Splitting {czi_path.name} into {len(layout)} wells")
-    split_and_save(
+    written = split_and_save(
         czi_path=czi_path,
         layout=layout,
         output_dir=out_dir,
         channel_names=list(channel_names) if channel_names else None,
         pixels_per_um=pixels_per_um,
+        progress_cb=lambda fraction, message: progress_cb(
+            0.02 + 0.96 * fraction, message,
+        ),
     )
-    progress_cb(1.0, f"Wrote {len(layout)} per-well TIFFs to {out_dir}")
-    return sorted(out_dir.glob("*.tif"))
+    progress_cb(1.0, f"Wrote {len(written)} per-well TIFFs to {out_dir}")
+    return list(written)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -157,7 +172,7 @@ class FocusOpts:
 def run_focus(
     czi_path: Path,
     out_dir: Path,
-    opts: FocusOpts = field(default_factory=FocusOpts),  # type: ignore[arg-type]
+    opts: FocusOpts | None = None,
     layout_df=None,
     progress_cb: ProgressCB = _noop,
     single_bucket_label: Optional[str] = None,
@@ -173,7 +188,10 @@ def run_focus(
     that label as its stem — for non-plate / bulk-mode workflows.
     """
     from .focus.pipeline import Options, process_czi
+    from .naming import build_output_filename
     from .split_czi_plate import normalize_well_id
+
+    opts = opts or FocusOpts()
 
     opts_obj = Options(
         metric=opts.metric,
@@ -186,6 +204,7 @@ def run_focus(
     well_filenames: dict[str, str] | None = None
     if layout_df is not None:
         well_filenames = {}
+        pending_names: list[tuple[str, str, tuple[str, str, str, str]]] = []
         for _, row in layout_df.iterrows():
             well = normalize_well_id(str(row["well"]))
             cond = str(row.get("condition", "")).strip()
@@ -194,10 +213,15 @@ def run_focus(
             rn   = str(row.get("replica", "")).strip()
             if not cond and not rep and not mut:
                 continue
-            parts = [cond, rep, mut]
-            if rn:
-                parts.append(f"R{rn}")
-            well_filenames[well] = "__".join(p.replace(" ", "_") for p in parts)
+            base = build_output_filename(cond, rep, mut, rn)
+            pending_names.append((well, base, (cond, rep, mut, rn)))
+        counts: dict[str, int] = {}
+        for _, base, _ in pending_names:
+            counts[base] = counts.get(base, 0) + 1
+        for well, base, fields in pending_names:
+            if counts[base] > 1:
+                base = build_output_filename(*fields, stable_identifier=well)
+            well_filenames[well] = base.removesuffix(".tif")
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -237,7 +261,7 @@ def segment_tiff(
     tiff_path: Path,
     out_path: Path,
     phase_channel: int,
-    opts: SegmentOpts = field(default_factory=SegmentOpts),  # type: ignore[arg-type]
+    opts: SegmentOpts | None = None,
     channel_labels: Optional[list[str]] = None,
     progress_cb: ProgressCB = _noop,
 ) -> Path:
@@ -245,7 +269,18 @@ def segment_tiff(
     from cellpose.models import CellposeModel
 
     from .cellpose_pipeline import process_tiff_unit, save_hyperstack
+    from .provenance import (
+        checkpoint_signature,
+        clear_artifact_in_progress,
+        mark_artifact_in_progress,
+        write_artifact_signature,
+    )
 
+    opts = opts or SegmentOpts()
+    tiff_path = Path(tiff_path)
+    out_path = Path(out_path)
+    signature_channels = channel_labels
+    mark_artifact_in_progress(out_path)
     progress_cb(0.0, f"Loading Cellpose model (cpsam, gpu={opts.gpu})")
     model = CellposeModel(gpu=opts.gpu)
 
@@ -259,9 +294,13 @@ def segment_tiff(
         flow_threshold=opts.flow_threshold,
         cellprob_threshold=opts.cellprob_threshold,
         min_size=opts.min_size,
+        progress_cb=lambda fraction, message: progress_cb(
+            0.1 + 0.82 * fraction, message,
+        ),
     )
 
     if stacked is None:
+        clear_artifact_in_progress(out_path)
         progress_cb(1.0, f"No FOVs segmented from {tiff_path.name}")
         return out_path
 
@@ -284,7 +323,6 @@ def segment_tiff(
     detected_px = _read_pixels_per_um(tiff_path)
     pixels_per_um = detected_px if detected_px is not None else opts.pixels_per_um
 
-    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     save_hyperstack(
         stacked=stacked,
@@ -294,6 +332,15 @@ def segment_tiff(
         channel_labels=channel_labels,
         pixels_per_um=pixels_per_um,
     )
+    signature = checkpoint_signature(
+        stage="segment",
+        input_path=tiff_path,
+        options=opts,
+        channels=signature_channels,
+        phase_channel=phase_channel,
+    )
+    write_artifact_signature(out_path, signature)
+    clear_artifact_in_progress(out_path)
 
     # Carry the acquisition sidecar from the input TIFF to the segmented
     # output so a Focus → Segment → Features pipeline (no Classify) still
@@ -346,7 +393,7 @@ def classify_filter_tiff(
     tiff_path: Path,
     out_path: Path,
     phase_channel: int,
-    opts: ClassifyOpts = field(default_factory=ClassifyOpts),  # type: ignore[arg-type]
+    opts: ClassifyOpts | None = None,
     channel_labels: Optional[list[str]] = None,
     progress_cb: ProgressCB = _noop,
 ) -> Path:
@@ -356,33 +403,30 @@ def classify_filter_tiff(
     i.e. the final channel is the binary mask. The output preserves the
     same layout but with rejected cells zeroed out of the mask.
     """
-    import tifffile
-
     from .cell_quality_classifier import classify_and_filter_mask
     from .cellpose_pipeline import save_hyperstack
     from .label_cells import load_hyperstack
+    from .provenance import (
+        checkpoint_signature,
+        clear_artifact_in_progress,
+        mark_artifact_in_progress,
+        prepare_checkpoint_dir,
+        write_artifact_signature,
+    )
 
+    opts = opts or ClassifyOpts()
+    tiff_path = Path(tiff_path)
+    out_path = Path(out_path)
+    mark_artifact_in_progress(out_path)
     progress_cb(0.0, f"Loading segmented hyperstack {tiff_path.name}")
     data, _meta = load_hyperstack(tiff_path)        # (N_FOV, C, Y, X)
     n_fov = data.shape[0]
 
-    # The trained CNN's rule-based companion filters (MIN_AREA_UM2 /
-    # MAX_AREA_UM2) were calibrated to whatever pixel-size constant the
-    # *training script* used (13.8767 by default). The classifier's
-    # decision boundary is therefore tied to ``opts.pixels_per_um``,
-    # not the file's true scale — substituting the detected value at
-    # inference would shift the boundary and reject good cells.
-    #
-    # The *output* TIFF, however, must carry the **real** pixel size so
-    # downstream consumers (extract_features_tiff) compute lengths and
-    # widths in correct microns. We keep two scales:
-    #   - filter_pixels_per_um:    opts value, used by detect_debris /
-    #                              detect_clumps (training-time constant)
-    #   - output_pixels_per_um:    auto-detected from the input TIFF,
-    #                              written into the saved hyperstack's
-    #                              metadata
-    filter_pixels_per_um = opts.pixels_per_um
+    # Physical-area rules must use the acquisition's real XY scale. The CNN
+    # still receives the same raw-pixel crops as before; no bundled-model
+    # feature encoding or weights are changed here.
     detected_px = _read_pixels_per_um(tiff_path)
+    filter_pixels_per_um = detected_px if detected_px is not None else opts.pixels_per_um
     output_pixels_per_um = (
         detected_px if detected_px is not None else opts.pixels_per_um
     )
@@ -410,17 +454,27 @@ def classify_filter_tiff(
     # it's processed. If the run is stopped or crashes mid-well, restarting
     # will skip FOVs whose .npz already exists. When all FOVs are present,
     # the final hyperstack is assembled and the .partial dir is removed.
-    out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
     partial_dir = out_path.with_suffix(out_path.suffix + ".partial")
-    partial_dir.mkdir(parents=True, exist_ok=True)
+    signature = checkpoint_signature(
+        stage="classify",
+        input_path=tiff_path,
+        options=opts,
+        channels=channel_labels,
+        phase_channel=phase_channel,
+        model_path=opts.model_path,
+    )
+    reusable_checkpoints = prepare_checkpoint_dir(partial_dir, signature)
 
     totals = {"total": 0, "kept": 0, "edge": 0, "debris": 0, "cnn": 0}
 
     def _fov_path(idx: int) -> Path:
         return partial_dir / f"fov_{idx:03d}.npz"
 
-    n_existing = sum(1 for i in range(n_fov) if _fov_path(i).exists())
+    n_existing = (
+        sum(1 for i in range(n_fov) if _fov_path(i).exists())
+        if reusable_checkpoints else 0
+    )
     if n_existing:
         progress_cb(0.04, f"Resuming: {n_existing}/{n_fov} FOV checkpoints already on disk")
 
@@ -429,14 +483,18 @@ def classify_filter_tiff(
 
         fov_file = _fov_path(i)
         if fov_file.exists():
-            # Already processed in a prior run; just account for stats and skip.
+            # Reuse only a complete checkpoint with the expected shape and stats.
             try:
                 with np.load(fov_file) as npz:
-                    for k in totals:
-                        totals[k] += int(npz["totals"][list(totals).index(k)])
-            except Exception:
-                pass
-            continue
+                    cached_fov = npz["fov"]
+                    cached_totals = npz["totals"]
+                    if cached_fov.shape != data[i].shape or cached_totals.shape != (5,):
+                        raise ValueError("checkpoint shape mismatch")
+                    for idx, key in enumerate(totals):
+                        totals[key] += int(cached_totals[idx])
+                continue
+            except Exception:  # noqa: BLE001
+                fov_file.unlink(missing_ok=True)
 
         fov = data[i]
         image_channels = fov[:-1]
@@ -514,11 +572,11 @@ def classify_filter_tiff(
         condition_name=tiff_path.stem + "__filtered",
         filenames=[f"fov_{i:03d}" for i in range(stacked.shape[0])],
         channel_labels=channel_labels,
-        # Use the *real* per-image pixel size in the saved metadata so
-        # extract_features_tiff produces correct microns. The CNN filter
-        # used ``filter_pixels_per_um`` above; that's a separate concern.
+        # Preserve the real per-image scale for downstream physical units.
         pixels_per_um=output_pixels_per_um,
     )
+    write_artifact_signature(out_path, signature)
+    clear_artifact_in_progress(out_path)
 
     # Carry the acquisition sidecar from the input TIFF to the classified
     # output so the Features stage (which reads from 03_classify/) can find

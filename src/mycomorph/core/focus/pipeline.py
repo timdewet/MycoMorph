@@ -262,7 +262,8 @@ def _write_acquisition_sidecar(
     if scene_indices is not None:
         payload["scene_indices"] = list(scene_indices)
     try:
-        sidecar.write_text(json.dumps(payload, indent=2))
+        from ..provenance import atomic_write_text
+        atomic_write_text(sidecar, json.dumps(payload, indent=2))
     except OSError:
         pass
 
@@ -270,15 +271,25 @@ def _write_acquisition_sidecar(
 def _write_zmap_tif(path: Path, z_map: np.ndarray) -> None:
     """Write a single (Y, X) Z-index map as a uint8 TIFF (Fiji-friendly)."""
     arr = np.clip(z_map, 0, 255).astype(np.uint8)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(str(path), arr, photometric="minisblack")
+    from ..provenance import atomic_output_path
+    tmp = atomic_output_path(path)
+    try:
+        tifffile.imwrite(str(tmp), arr, photometric="minisblack")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _write_well_zmaps_tif(path: Path, z_maps: list[np.ndarray]) -> None:
     """Write a (T, Y, X) stack of Z-maps for all FOVs in one well."""
     arr = np.stack([np.clip(zm, 0, 255).astype(np.uint8) for zm in z_maps], axis=0)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(str(path), arr, photometric="minisblack")
+    from ..provenance import atomic_output_path
+    tmp = atomic_output_path(path)
+    try:
+        tifffile.imwrite(str(tmp), arr, photometric="minisblack")
+        tmp.replace(path)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 @dataclass
@@ -570,7 +581,11 @@ def process_czi(
                 )
             )
     else:
-        for scene_index in all_indices:
+        for scene_pos, scene_index in enumerate(all_indices):
+            _emit(
+                0.05 + 0.9 * (scene_pos / max(len(all_indices), 1)),
+                f"Processing FOV {scene_pos + 1}/{len(all_indices)}",
+            )
             scene = scene_cache.pop(scene_index, None) or io_czi.read_scene(
                 czi_path, scene_index
             )
@@ -613,6 +628,10 @@ def process_czi(
                     output_path=out_path,
                     scores_csv=scores_path,
                 )
+            )
+            _emit(
+                0.05 + 0.9 * ((scene_pos + 1) / max(len(all_indices), 1)),
+                f"Completed FOV {scene_pos + 1}/{len(all_indices)}",
             )
 
     if opts.archive_original and (result.scene_results or result.well_results):

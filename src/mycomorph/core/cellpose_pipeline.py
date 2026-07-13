@@ -244,7 +244,8 @@ def segment_single_fov(channels, phase_channel, model, diameter=None,
 
 
 def process_condition(condition_dir, model, phase_channel, diameter=None,
-                      classify_opts=None):
+                      classify_opts=None, flow_threshold=0.4,
+                      cellprob_threshold=0.0, min_size=15):
     """
     Process all CZI files in a condition folder.
 
@@ -329,7 +330,8 @@ def process_condition(condition_dir, model, phase_channel, diameter=None,
 
 def process_tiff_unit(tiff_path, model, phase_channel, diameter=None,
                       classify_opts=None, sample=False,
-                      flow_threshold=0.4, cellprob_threshold=0.0, min_size=15):
+                      flow_threshold=0.4, cellprob_threshold=0.0, min_size=15,
+                      progress_cb=None):
     """
     Segment all (or a sampled) FOVs in a multi-FOV TIFF hyperstack.
 
@@ -361,6 +363,11 @@ def process_tiff_unit(tiff_path, model, phase_channel, diameter=None,
     cell_counts = []
 
     for fov_idx in indices:
+        if progress_cb is not None:
+            progress_cb(
+                len(fov_arrays) / max(len(indices), 1),
+                f"Segmenting FOV {fov_idx + 1}/{n_fov}",
+            )
         print(f"    FOV {fov_idx+1}/{n_fov}", end=" ... ")
 
         channels = data[fov_idx]  # (C, Y, X)
@@ -381,6 +388,9 @@ def process_tiff_unit(tiff_path, model, phase_channel, diameter=None,
         fov_names.append(f"fov_{fov_idx:03d}")
         cell_counts.append(n_cells)
         print("done")
+
+    if progress_cb is not None:
+        progress_cb(1.0, f"Segmented {len(fov_arrays)}/{len(indices)} FOVs")
 
     if not fov_arrays:
         return None, [], 0
@@ -430,21 +440,28 @@ def save_hyperstack(stacked, output_path, condition_name, filenames, channel_lab
         'mode': 'composite',
         'Labels': channel_labels,
         'unit': 'um',
-        'spacing': 1.0 / pixels_per_um if pixels_per_um else 1.0,  # µm/px for downstream readers
     }
     
     # Resolution in pixels per centimetre (TIFF standard unit)
     pixels_per_cm = pixels_per_um * 10000
     
-    tifffile.imwrite(
-        str(output_path),
-        stacked,
-        imagej=True,
-        metadata=imagej_metadata,
-        description=description,
-        resolution=(pixels_per_cm, pixels_per_cm),
-        resolutionunit=3,  # 3 = centimetre
-    )
+    from .provenance import atomic_output_path
+
+    output_path = Path(output_path)
+    tmp_path = atomic_output_path(output_path)
+    try:
+        tifffile.imwrite(
+            str(tmp_path),
+            stacked,
+            imagej=True,
+            metadata=imagej_metadata,
+            description=description,
+            resolution=(pixels_per_cm, pixels_per_cm),
+            resolutionunit=3,  # 3 = centimetre
+        )
+        tmp_path.replace(output_path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def main():
@@ -738,6 +755,8 @@ def main():
             stacked, filenames, total_cells = process_condition(
                 condition_dir, model, phase_channel, diameter=args.diameter,
                 classify_opts=classify_opts,
+                flow_threshold=args.flow_threshold,
+                min_size=args.min_size,
             )
 
             if stacked is None:
@@ -771,6 +790,8 @@ def main():
                 tiff_path, model, phase_channel, diameter=args.diameter,
                 classify_opts=classify_opts,
                 sample=args.sample,
+                flow_threshold=args.flow_threshold,
+                min_size=args.min_size,
             )
 
             if stacked is None:

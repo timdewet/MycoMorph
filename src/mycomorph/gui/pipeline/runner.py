@@ -10,17 +10,9 @@ from pathlib import Path
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
 from .bulk_layout import _output_filename
+from .cancellation import CancellationToken, StopRequested
 from .context import BulkRunContext, RunContext
 from .stages import ALL_STAGES, ClassifyStage, ExtractStage, SegmentStage, Stage, _iter_tiffs
-
-
-class StopRequested(Exception):
-    """Raised inside a progress callback when the user clicks Stop.
-
-    Stages call progress_cb frequently (per-FOV); raising from there gives
-    a near-immediate cancellation instead of having to wait for the next
-    stage boundary.
-    """
 
 
 class PipelineRunner(QObject):
@@ -35,8 +27,11 @@ class PipelineRunner(QObject):
     stageStarted = pyqtSignal(str)               # stage name
     stageProgress = pyqtSignal(str, float, str)  # stage name, fraction, message
     stageFinished = pyqtSignal(str, int)         # stage name, num_outputs
+    stageCancelled = pyqtSignal(str)              # stage name
     runFinished = pyqtSignal(Path)               # manifest path
+    runCancelled = pyqtSignal(Path)              # manifest path
     runFailed = pyqtSignal(str)                  # error message
+    workerStopped = pyqtSignal()
 
     def __init__(
         self,
@@ -49,11 +44,15 @@ class PipelineRunner(QObject):
         self._stages = stages or ALL_STAGES
         self._thread: QThread | None = None
         self._reuse_existing = reuse_existing
-        self._stop_requested = False
+        self._stop_token = CancellationToken()
+
+    @property
+    def _stop_requested(self) -> bool:
+        return self._stop_token.is_cancelled
 
     def request_stop(self) -> None:
-        """Ask the runner to stop at the next stage boundary."""
-        self._stop_requested = True
+        """Thread-safe cooperative cancellation, callable from the GUI thread."""
+        self._stop_token.cancel()
 
     def _rename_outputs_for_layout_changes(self, log_cb) -> None:
         """Detect on-disk TIFFs whose filenames don't match the current
@@ -379,6 +378,7 @@ class PipelineRunner(QObject):
         self._thread = QThread()
         self.moveToThread(self._thread)
         self._thread.started.connect(self._run)
+        self._thread.finished.connect(self.workerStopped)
         self._thread.start()
 
     def _run(self) -> None:
@@ -470,7 +470,7 @@ class PipelineRunner(QObject):
                             "opts": _stage_opts(self._ctx, stage.name),
                             "outputs": [],
                         })
-                        self.stageFinished.emit(stage.name, 0)
+                        self.stageCancelled.emit(stage.name)
                         break
 
                 manifest["stages"].append({
@@ -507,11 +507,21 @@ class PipelineRunner(QObject):
             manifest["stopped_early"] = self._stop_requested
             # Persist the plate layout alongside the manifest
             layout_csv = self._ctx.output_dir / "plate_layout.csv"
-            self._ctx.layout.to_csv(layout_csv)
+            from mycomorph.core.provenance import atomic_output_path
+            layout_tmp = atomic_output_path(layout_csv)
+            self._ctx.layout.to_csv(layout_tmp)
+            layout_tmp.replace(layout_csv)
             manifest["plate_layout_csv"] = str(layout_csv)
 
-            self._ctx.manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
-            self.runFinished.emit(self._ctx.manifest_path)
+            from mycomorph.core.provenance import atomic_write_text
+            atomic_write_text(
+                self._ctx.manifest_path,
+                json.dumps(manifest, indent=2, default=str),
+            )
+            if self._stop_requested:
+                self.runCancelled.emit(self._ctx.manifest_path)
+            else:
+                self.runFinished.emit(self._ctx.manifest_path)
 
         except Exception as e:  # noqa: BLE001
             self.runFailed.emit(str(e))
@@ -531,23 +541,31 @@ class BulkPipelineRunner(QObject):
     stageStarted = pyqtSignal(str)
     stageProgress = pyqtSignal(str, float, str)
     stageFinished = pyqtSignal(str, int)
+    stageCancelled = pyqtSignal(str)
     runFinished = pyqtSignal(Path)
+    runCancelled = pyqtSignal(Path)
     runFailed = pyqtSignal(str)
+    workerStopped = pyqtSignal()
 
     def __init__(self, ctx: BulkRunContext, reuse_existing: bool = False) -> None:
         super().__init__()
         self._ctx = ctx
         self._thread: QThread | None = None
         self._reuse_existing = reuse_existing
-        self._stop_requested = False
+        self._stop_token = CancellationToken()
+
+    @property
+    def _stop_requested(self) -> bool:
+        return self._stop_token.is_cancelled
 
     def request_stop(self) -> None:
-        self._stop_requested = True
+        self._stop_token.cancel()
 
     def start(self) -> None:
         self._thread = QThread()
         self.moveToThread(self._thread)
         self._thread.started.connect(self._run)
+        self._thread.finished.connect(self.workerStopped)
         self._thread.start()
 
     # --------------------------------------------------------------------------
@@ -607,6 +625,15 @@ class BulkPipelineRunner(QObject):
                 ctx.focus_dir.mkdir(parents=True, exist_ok=True)
                 focus_outputs: list[Path] = []
                 n = len(entries)
+                base_names = [
+                    _output_filename(
+                        str(e.get("condition", "")),
+                        str(e.get("reporter", "")),
+                        str(e.get("mutant_or_drug", "")),
+                        str(e.get("replica", "")),
+                    )
+                    for e in entries
+                ]
 
                 for i, entry in enumerate(entries):
                     if self._stop_requested:
@@ -617,6 +644,10 @@ class BulkPipelineRunner(QObject):
                         str(entry.get("reporter", "")),
                         str(entry.get("mutant_or_drug", "")),
                         str(entry.get("replica", "")),
+                        stable_identifier=(
+                            str(Path(entry["czi_path"]).resolve())
+                            if base_names.count(base_names[i]) > 1 else None
+                        ),
                     ).removesuffix(".tif")
 
                     out_file = ctx.focus_dir / f"{label}{ctx.focus_opts.filename_suffix}.tif"
@@ -650,11 +681,15 @@ class BulkPipelineRunner(QObject):
 
                 manifest["stages"].append({
                     "name": "Focus",
+                    "stopped": self._stop_requested,
                     "elapsed_s": round(time.time() - t0, 2),
                     "opts": _stage_opts_bulk(ctx, "Focus"),
                     "outputs": [str(p) for p in focus_outputs],
                 })
-                self.stageFinished.emit("Focus", len(focus_outputs))
+                if self._stop_requested:
+                    self.stageCancelled.emit("Focus")
+                else:
+                    self.stageFinished.emit("Focus", len(focus_outputs))
 
             # ── Segment + Classify + Features: reuse existing stage objects ────
             for stage_obj in (SegmentStage(), ClassifyStage(), ExtractStage()):
@@ -676,7 +711,8 @@ class BulkPipelineRunner(QObject):
                 stage_out = stage_obj.output_dir(ctx)  # type: ignore[arg-type]
                 reused = False
                 outputs: list[Path] = []
-                if self._reuse_existing and stage_out.exists():
+                handles_own = bool(getattr(stage_obj, "handles_own_reuse", False))
+                if self._reuse_existing and stage_out.exists() and not handles_own:
                     existing = _iter_tiffs(stage_out)
                     if existing:
                         cb(1.0, f"Reused existing output ({len(existing)} files)")
@@ -694,7 +730,7 @@ class BulkPipelineRunner(QObject):
                             "opts": _stage_opts_bulk(ctx, stage_obj.name),
                             "outputs": [],
                         })
-                        self.stageFinished.emit(stage_obj.name, 0)
+                        self.stageCancelled.emit(stage_obj.name)
                         break
 
                 manifest["stages"].append({
@@ -720,8 +756,10 @@ class BulkPipelineRunner(QObject):
         # Persist the entry list alongside the manifest for traceability.
         try:
             entries_csv = self._ctx.output_dir / "bulk_entries.csv"
+            from mycomorph.core.provenance import atomic_output_path
+            entries_tmp = atomic_output_path(entries_csv)
             import csv as _csv
-            with open(entries_csv, "w", newline="") as f:
+            with open(entries_tmp, "w", newline="") as f:
                 w = _csv.writer(f)
                 w.writerow(["czi_path", "condition", "reporter",
                             "mutant_or_drug", "replica", "notes"])
@@ -730,11 +768,19 @@ class BulkPipelineRunner(QObject):
                         "czi_path", "condition", "reporter",
                         "mutant_or_drug", "replica", "notes",
                     )])
+            entries_tmp.replace(entries_csv)
             manifest["bulk_entries_csv"] = str(entries_csv)
         except Exception:  # noqa: BLE001
             pass
-        self._ctx.manifest_path.write_text(json.dumps(manifest, indent=2, default=str))
-        self.runFinished.emit(self._ctx.manifest_path)
+        from mycomorph.core.provenance import atomic_write_text
+        atomic_write_text(
+            self._ctx.manifest_path,
+            json.dumps(manifest, indent=2, default=str),
+        )
+        if stopped:
+            self.runCancelled.emit(self._ctx.manifest_path)
+        else:
+            self.runFinished.emit(self._ctx.manifest_path)
 
 
 def _stage_opts_bulk(ctx: BulkRunContext, name: str) -> dict:

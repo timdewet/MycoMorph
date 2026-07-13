@@ -213,9 +213,11 @@ class MainWindow(QMainWindow):
         # Stage-state tracking for sidebar status dots.
         self._stage_status: dict[str, StageStatus] = {e.key: StageStatus.IDLE for e in NAV_ENTRIES}
         self._run_active = False
+        self._close_when_run_ends = False
         self.run_panel.stageRunStarted.connect(self._on_stage_run_started)
         self.run_panel.stageRunFinished.connect(self._on_stage_run_finished)
         self.run_panel.runFinishedAll.connect(self._on_run_all_finished)
+        self.run_panel.runCancelledAll.connect(self._on_run_all_cancelled)
         self.run_panel.runFailedAll.connect(self._on_run_all_failed)
 
         self._build_chrome()
@@ -690,6 +692,27 @@ class MainWindow(QMainWindow):
             self._sidebar.set_current(input_idx)
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt API)
+        if self._run_active:
+            if self._close_when_run_ends:
+                event.ignore()
+                return
+            answer = QMessageBox.question(
+                self,
+                "Stop active run?",
+                "A pipeline run is active. Stop it safely and close when cleanup is complete?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if answer != QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            self._close_when_run_ends = True
+            runner = getattr(self, "_runner", None)
+            if runner is not None:
+                runner.request_stop()
+            self._status_msg.setText("Stopping safely before closing…")
+            event.ignore()
+            return
         self._save_state()
         super().closeEvent(event)
 
@@ -1187,6 +1210,14 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
+    def _on_run_all_cancelled(self, _manifest: object) -> None:
+        self._run_active = False
+        self._header_run_btn.setEnabled(True)
+        self._header_run_btn.setText("Run pipeline")
+        self._sidebar.set_status("run", StageStatus.IDLE)
+        self._status_msg.setText("Run stopped.")
+        self._recompute_stage_readiness()
+
     def _on_run_all_failed(self, msg: str) -> None:
         self._run_active = False
         self._header_run_btn.setEnabled(True)
@@ -1311,9 +1342,14 @@ class MainWindow(QMainWindow):
         self._runner.stageStarted.connect(self.run_panel.on_stage_started)
         self._runner.stageProgress.connect(self.run_panel.on_stage_progress)
         self._runner.stageFinished.connect(self.run_panel.on_stage_finished)
+        self._runner.stageCancelled.connect(self.run_panel.on_stage_cancelled)
         self._runner.runFinished.connect(self.run_panel.on_run_finished)
+        self._runner.runCancelled.connect(self.run_panel.on_run_cancelled)
         self._runner.runFailed.connect(self.run_panel.on_run_failed)
-        self.run_panel.stopRequested.connect(self._runner.request_stop)
+        self.run_panel.stopRequested.connect(
+            self._runner.request_stop,
+            type=Qt.ConnectionType.DirectConnection,
+        )
 
         self.run_panel.run_btn.setEnabled(False)
         self.run_panel.stop_btn.setEnabled(True)
@@ -1323,5 +1359,13 @@ class MainWindow(QMainWindow):
             self.run_panel.stop_btn.setEnabled(False)
 
         self._runner.runFinished.connect(_end)
+        self._runner.runCancelled.connect(_end)
         self._runner.runFailed.connect(_end)
+        self._runner.workerStopped.connect(self._close_after_worker_stopped)
+        self._run_active = True
         self._runner.start()
+
+    def _close_after_worker_stopped(self) -> None:
+        if self._close_when_run_ends:
+            self._close_when_run_ends = False
+            QTimer.singleShot(0, self.close)

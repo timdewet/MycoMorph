@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
@@ -36,13 +37,14 @@ def main() -> int:
     apply_theme(app)
     win = MainWindow()
     win.show()
+    if os.environ.get("MYCOMORPH_SMOKE_TEST") == "1":
+        QTimer.singleShot(500, app.quit)
     rc = app.exec()
     # Force-quit any lingering Qt resources. ``os._exit`` bypasses
     # Python's atexit cleanup — safe here because the GUI is the
     # only thing this entry-point manages, and it's the documented
     # escape hatch for Qt apps that won't release the terminal when
     # WebEngine helper processes outlive the main loop.
-    import os
     os._exit(rc)
 
 

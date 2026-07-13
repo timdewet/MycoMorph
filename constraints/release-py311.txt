@@ -1,0 +1,22 @@
+# Reproducible Python 3.11 release stack. Update intentionally as one tested set.
+numpy==2.4.5
+scipy==1.17.1
+scikit-image==0.26.0
+scikit-learn==1.8.0
+tifffile==2026.3.3
+czifile==2026.4.11
+pylibCZIrw==6.0.1
+matplotlib==3.10.8
+typer==0.24.1
+cellpose==4.1.1
+torch==2.11.0
+torchvision==0.26.0
+pandas==3.0.2
+pyarrow==24.0.0
+h5py==3.16.0
+PyQt6==6.11.0
+pyqtgraph==0.14.0
+qtawesome==1.4.2
+umap-learn==0.5.11
+plotly==6.7.0
+PyQt6-WebEngine==6.11.0

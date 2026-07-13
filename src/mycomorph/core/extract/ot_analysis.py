@@ -23,7 +23,11 @@ proper:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import TYPE_CHECKING, Optional, Sequence
+
+if TYPE_CHECKING:
+    import numpy as np
+    import pandas as pd
 
 
 def load_ot_sidecar(sidecar_path: Path) -> tuple["np.ndarray", "pd.DataFrame"]:

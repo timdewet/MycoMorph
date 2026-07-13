@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 import tifffile
 
+from ..provenance import atomic_output_path
+
 
 def _imagej_metadata(
     axes: str,
@@ -38,9 +40,6 @@ def _imagej_metadata(
         "Labels": list(channel_names),
         "unit": "um",
     }
-    px_x, px_y = px_um
-    if px_x is not None:
-        meta["spacing"] = float(px_x)
     if description:
         meta["Info"] = description
     return meta
@@ -82,15 +81,19 @@ def write(
         n_slices=1,
     )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(
-        str(path),
-        planes_zcyx,
-        imagej=True,
-        metadata=metadata,
-        resolution=_resolution(pixel_size_um),
-        resolutionunit=3 if _resolution(pixel_size_um) else None,  # 3 = CENTIMETER
-    )
+    tmp_path = atomic_output_path(path)
+    try:
+        tifffile.imwrite(
+            str(tmp_path),
+            planes_zcyx,
+            imagej=True,
+            metadata=metadata,
+            resolution=_resolution(pixel_size_um),
+            resolutionunit=3 if _resolution(pixel_size_um) else None,  # 3 = CENTIMETER
+        )
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)
 
 
 def write_tcyx(
@@ -121,12 +124,16 @@ def write_tcyx(
         n_slices=n_t,
     )
 
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tifffile.imwrite(
-        str(path),
-        planes_tcyx,
-        imagej=True,
-        metadata=metadata,
-        resolution=_resolution(pixel_size_um),
-        resolutionunit=3 if _resolution(pixel_size_um) else None,
-    )
+    tmp_path = atomic_output_path(path)
+    try:
+        tifffile.imwrite(
+            str(tmp_path),
+            planes_tcyx,
+            imagej=True,
+            metadata=metadata,
+            resolution=_resolution(pixel_size_um),
+            resolutionunit=3 if _resolution(pixel_size_um) else None,
+        )
+        tmp_path.replace(path)
+    finally:
+        tmp_path.unlink(missing_ok=True)

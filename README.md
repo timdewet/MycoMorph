@@ -88,8 +88,7 @@ The bundle config lives in [packaging/mycomorph.spec](packaging/mycomorph.spec).
 py -3.11 -m venv .venv
 .venv\Scripts\activate
 python -m pip install --upgrade pip
-pip install -e .
-pip install pyinstaller
+pip install -c constraints\release-py311.txt -e . pyinstaller==6.16.0
 pyinstaller packaging\mycomorph.spec
 ```
 
@@ -106,7 +105,7 @@ CPU-only is fine if you don't need GPU; the bundle is much smaller.
 ### macOS / Linux
 
 ```bash
-pip install pyinstaller
+pip install -c constraints/release-py311.txt -e . pyinstaller==6.16.0
 pyinstaller packaging/mycomorph.spec
 ```
 

@@ -21,8 +21,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QListWidget,
-    QListWidgetItem,
     QMessageBox,
     QPushButton,
     QSpinBox,
@@ -38,12 +36,6 @@ from mycomorph.core.api import (
     resolve_classifier_preset,
 )
 from mycomorph.core.foci import DetectorOpts
-from mycomorph.core.foci.detectors import (
-    BACTERIAL_SPECIFIC_KEYS,
-    CLASSICAL_BASELINE_KEYS,
-    DEEP_LEARNING_KEYS,
-    DIM_SIGNAL_KEYS,
-)
 from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
 
 from ..pipeline.context import (
@@ -56,6 +48,10 @@ from ..widgets.foci_filter_io import (
     FILTER_FEATURES,
     compute_pass_mask,
     save_foci_filter,
+)
+from .selection_widgets import (
+    ChannelIndexSelect as _ChannelIndexSelect,
+    DetectorKeySelect as _DetectorKeySelect,
 )
 
 
@@ -603,136 +599,6 @@ class SegmentClassifyPanel(QWidget):
 # ─────────────────────────────────────────────────────────────────────────────
 # Foci-detection panels
 # ─────────────────────────────────────────────────────────────────────────────
-
-
-class _ChannelIndexSelect(QWidget):
-    """Compact multi-select listing fluorescence channels by ``index: name``.
-
-    Channel names are populated lazily via ``set_channels``; the selection
-    persists as the *original* channel index (so toggling which channel is
-    phase doesn't reshuffle saved selections). The phase channel is hidden
-    from the list — these panels only operate on fluorescence.
-    """
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        self._list = QListWidget()
-        self._list.setSelectionMode(QListWidget.SelectionMode.MultiSelection)
-        self._list.setMaximumHeight(110)
-        layout.addWidget(self._list)
-        self._channels: list[str] = []
-        self._exclude: set[int] = set()
-        # ``_index_at_row[row]`` → original channel index for the item at
-        # that visible row. Lets selected_indices() return the user-stable
-        # original indices even though phase rows are filtered out.
-        self._index_at_row: list[int] = []
-        self._pending_selection: list[int] | None = None
-
-    def set_channels(
-        self,
-        names: list[str],
-        exclude_indices: list[int] | None = None,
-    ) -> None:
-        self._channels = list(names)
-        self._exclude = set(exclude_indices or [])
-        prev_idx = self.selected_indices() or self._pending_selection
-        self._list.clear()
-        self._index_at_row = []
-        for i, name in enumerate(self._channels):
-            if i in self._exclude:
-                continue
-            item = QListWidgetItem(f"{i}: {name}")
-            item.setFlags(item.flags() | Qt.ItemFlag.ItemIsSelectable)
-            self._list.addItem(item)
-            self._index_at_row.append(i)
-        if prev_idx:
-            self.set_selected_indices(list(prev_idx))
-            self._pending_selection = None
-
-    def selected_indices(self) -> list[int]:
-        return [
-            self._index_at_row[self._list.row(item)]
-            for item in self._list.selectedItems()
-        ]
-
-    def set_selected_indices(self, indices: list[int]) -> None:
-        if self._list.count() == 0:
-            self._pending_selection = list(indices)
-            return
-        self._list.clearSelection()
-        for orig_idx in indices:
-            try:
-                row = self._index_at_row.index(int(orig_idx))
-            except ValueError:
-                continue
-            self._list.item(row).setSelected(True)
-
-
-class _DetectorKeySelect(QWidget):
-    """Single-select of one detector REGISTRY key, grouped by family.
-
-    Normalisation is now a separate upstream stage (Fluorescent
-    Normalisation), so the panel only surfaces *pure* detectors —
-    bundled "normalise + detect" variants (e.g. ``tophat_dog``,
-    ``decon_bm3d_wavelet``) would double-apply normalisation when the
-    upstream stage already handled it. They stay in the library for the
-    benchmark notebook but aren't exposed here.
-
-    Non-selectable header rows segment the list into "classical
-    baselines", "dim signal", "bacterial-specific", "deep learning".
-    """
-
-    _GROUPS: list[tuple[str, list[str]]] = [
-        ("Classical baselines",    CLASSICAL_BASELINE_KEYS),
-        ("Dim signal",             DIM_SIGNAL_KEYS),
-        ("Bacterial-specific",     BACTERIAL_SPECIFIC_KEYS),
-        ("Deep learning",          DEEP_LEARNING_KEYS),
-    ]
-
-    def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(2)
-        self._list = QListWidget()
-        self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self._list.setMaximumHeight(180)
-        layout.addWidget(self._list)
-        self._key_rows: dict[str, int] = {}
-        self._build_items()
-
-    def _build_items(self) -> None:
-        self._list.clear()
-        self._key_rows.clear()
-        for header, keys in self._GROUPS:
-            hdr = QListWidgetItem(f"— {header} —")
-            hdr.setFlags(Qt.ItemFlag.NoItemFlags)
-            hdr.setForeground(Qt.GlobalColor.gray)
-            self._list.addItem(hdr)
-            for key in keys:
-                item = QListWidgetItem(key)
-                self._list.addItem(item)
-                self._key_rows[key] = self._list.row(item)
-
-    def selected_key(self) -> str | None:
-        items = self._list.selectedItems()
-        if not items:
-            return None
-        item = items[0]
-        if not (item.flags() & Qt.ItemFlag.ItemIsSelectable):
-            return None
-        return item.text()
-
-    def set_selected_key(self, key: str | None) -> None:
-        self._list.clearSelection()
-        if key is None:
-            return
-        row = self._key_rows.get(key)
-        if row is not None:
-            self._list.item(row).setSelected(True)
 
 
 class FluorescentNormalisationPanel(QWidget):

@@ -44,7 +44,9 @@ class RunPanel(QWidget):
     # holding a ref to the runner directly.
     stageRunStarted = pyqtSignal(str)
     stageRunFinished = pyqtSignal(str, int)
+    stageRunCancelled = pyqtSignal(str)
     runFinishedAll = pyqtSignal(object)
+    runCancelledAll = pyqtSignal(object)
     runFailedAll = pyqtSignal(str)
 
     def __init__(self, parent: QWidget | None = None) -> None:
@@ -317,6 +319,12 @@ class RunPanel(QWidget):
         self._refresh_overall(None, 0.0)
         self.stageRunFinished.emit(name, n_outputs)
 
+    def on_stage_cancelled(self, name: str) -> None:
+        self.stepper.set_state(name, StepState.SKIPPED)
+        self.log.log(f"■ {name} stopped", level="warning")
+        self._refresh_overall(None, 0.0)
+        self.stageRunCancelled.emit(name)
+
     def on_run_finished(self, manifest_path: Path) -> None:
         self.status_label.setText(f"Done — {manifest_path.name}")
         self.log.log(f"✓ Run complete. Manifest: {manifest_path}", level="success")
@@ -326,6 +334,14 @@ class RunPanel(QWidget):
         self.overall_bar.setValue(1000)
         self.overall_bar.setFormat("%p%  ·  done")
         self.runFinishedAll.emit(manifest_path)
+
+    def on_run_cancelled(self, manifest_path: Path) -> None:
+        self.status_label.setText("Stopped")
+        self.log.log(f"■ Run stopped safely. Manifest: {manifest_path}", level="warning")
+        self._last_manifest_path = Path(manifest_path)
+        self.open_output_btn.setEnabled(True)
+        self.overall_bar.setFormat("%p%  ·  stopped")
+        self.runCancelledAll.emit(manifest_path)
 
     def on_run_failed(self, error: str) -> None:
         self.status_label.setText("Failed")

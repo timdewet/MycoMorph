@@ -18,6 +18,13 @@ app = typer.Typer(
 )
 app.add_typer(focus_app, name="focus", help="Focus picking for CZI Z-stacks.")
 
+_DELEGATE_CONTEXT = {
+    "allow_extra_args": True,
+    "ignore_unknown_options": True,
+    # Let each delegated argparse CLI render its complete, authoritative help.
+    "help_option_names": [],
+}
+
 
 def _delegate(module, argv: list[str]) -> None:
     """Call a legacy argparse main() with a rewritten sys.argv."""
@@ -29,34 +36,49 @@ def _delegate(module, argv: list[str]) -> None:
         sys.argv = saved
 
 
-@app.command("split", help="Split a multi-position CZI plate into per-well TIFFs.")
-def split(argv: list[str] = typer.Argument(None)) -> None:  # pragma: no cover
+@app.command(
+    "split", help="Split a multi-position CZI plate into per-well TIFFs.",
+    context_settings=_DELEGATE_CONTEXT,
+)
+def split(ctx: typer.Context) -> None:  # pragma: no cover
     from . import split_czi_plate as m
-    _delegate(m, argv or [])
+    _delegate(m, list(ctx.args))
 
 
-@app.command("segment", help="Run Cellpose-SAM segmentation on CZI or TIFF input.")
-def segment(argv: list[str] = typer.Argument(None)) -> None:  # pragma: no cover
+@app.command(
+    "segment", help="Run Cellpose-SAM segmentation on CZI or TIFF input.",
+    context_settings=_DELEGATE_CONTEXT,
+)
+def segment(ctx: typer.Context) -> None:  # pragma: no cover
     from . import cellpose_pipeline as m
-    _delegate(m, argv or [])
+    _delegate(m, list(ctx.args))
 
 
-@app.command("review", help="Active-learning review of classifier predictions.")
-def review(argv: list[str] = typer.Argument(None)) -> None:  # pragma: no cover
+@app.command(
+    "review", help="Active-learning review of classifier predictions.",
+    context_settings=_DELEGATE_CONTEXT,
+)
+def review(ctx: typer.Context) -> None:  # pragma: no cover
     from . import review_classifications as m
-    _delegate(m, argv or [])
+    _delegate(m, list(ctx.args))
 
 
-@app.command("label", help="Interactive labeling of segmented cells.")
-def label(argv: list[str] = typer.Argument(None)) -> None:  # pragma: no cover
+@app.command(
+    "label", help="Interactive labeling of segmented cells.",
+    context_settings=_DELEGATE_CONTEXT,
+)
+def label(ctx: typer.Context) -> None:  # pragma: no cover
     from . import label_cells as m
-    _delegate(m, argv or [])
+    _delegate(m, list(ctx.args))
 
 
-@app.command("train", help="Train a cell-quality classifier.")
-def train(argv: list[str] = typer.Argument(None)) -> None:  # pragma: no cover
+@app.command(
+    "train", help="Train a cell-quality classifier.",
+    context_settings=_DELEGATE_CONTEXT,
+)
+def train(ctx: typer.Context) -> None:  # pragma: no cover
     from . import train_classifier as m
-    _delegate(m, argv or [])
+    _delegate(m, list(ctx.args))
 
 
 # ── Feature library subcommands ───────────────────────────────────────────────

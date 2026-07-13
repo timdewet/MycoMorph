@@ -23,13 +23,20 @@ COLUMNS = [
 ]
 
 
-def _output_filename(condition: str, reporter: str, mutant: str, replica: str) -> str:
+def _output_filename(
+    condition: str,
+    reporter: str,
+    mutant: str,
+    replica: str,
+    *,
+    stable_identifier: str | None = None,
+) -> str:
     """The same template all stage adapters expect (matches PlateLayout)."""
-    parts = [condition, reporter, mutant]
-    parts = [p.replace(" ", "_") for p in parts]
-    if str(replica).strip():
-        parts.append(f"R{str(replica).strip()}")
-    return "__".join(parts) + ".tif"
+    from mycomorph.core.naming import build_output_filename
+    return build_output_filename(
+        condition, reporter, mutant, replica,
+        stable_identifier=stable_identifier,
+    )
 
 
 @dataclass

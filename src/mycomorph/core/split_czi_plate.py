@@ -37,6 +37,8 @@ import czifile
 import numpy as np
 
 from .cellpose_pipeline import save_hyperstack
+from .errors import PipelineValidationError
+from .naming import build_output_filename
 
 
 # ---------------------------------------------------------------------------
@@ -321,17 +323,6 @@ def load_plate_layout(csv_path):
 # Output naming
 # ---------------------------------------------------------------------------
 
-def build_output_filename(condition, reporter, mutant_or_drug, replica=""):
-    """Build output filename: condition__reporter__mutant_or_drug[__R{n}].tif"""
-    parts = [condition, reporter, mutant_or_drug]
-    sanitized = [p.replace(' ', '_') for p in parts]
-    if replica:
-        rep = str(replica).strip()
-        if rep:
-            sanitized.append(f"R{rep}")
-    return '__'.join(sanitized) + '.tif'
-
-
 # ---------------------------------------------------------------------------
 # Template CSV generation
 # ---------------------------------------------------------------------------
@@ -428,7 +419,7 @@ def _read_czi_per_scene_acquisition_times(czi_path):
 
 
 def _write_acquisition_sidecar(tiff_path, source_czi, plate_acq_dt, scene_indices,
-                               per_scene_times=None):
+                               per_scene_times=None, scientific_labels=None):
     """Write a ``<tiff_stem>__acquisition.json`` next to a per-well TIFF.
 
     Mirrors the schema written by ``focus.pipeline._write_acquisition_sidecar``
@@ -449,9 +440,11 @@ def _write_acquisition_sidecar(tiff_path, source_czi, plate_acq_dt, scene_indice
         "plate_acquisition_datetime": plate_acq_dt,
         "fov_acquisition_times": fov_times,
         "scene_indices": list(int(s) for s in scene_indices),
+        "scientific_labels": scientific_labels or {},
     }
     try:
-        sidecar.write_text(json.dumps(payload, indent=2))
+        from .provenance import atomic_write_text
+        atomic_write_text(sidecar, json.dumps(payload, indent=2))
     except OSError:
         pass
 
@@ -551,7 +544,7 @@ def _read_czi_pixels_per_um(czi_path):
 
 
 def split_and_save(czi_path, layout, output_dir, channel_names=None,
-                   pixels_per_um=None):
+                   pixels_per_um=None, progress_cb=None):
     """
     Split a multi-scene CZI into per-well TIFF hyperstacks.
 
@@ -561,6 +554,9 @@ def split_and_save(czi_path, layout, output_dir, channel_names=None,
         output_dir: Output directory (created if needed)
         channel_names: Optional list of channel name strings
         pixels_per_um: Pixel scale
+
+    Returns:
+        list[Path]: TIFF files successfully written during this call.
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -601,21 +597,27 @@ def split_and_save(czi_path, layout, output_dir, channel_names=None,
     wells_to_process = sorted(czi_wells & csv_wells, key=well_sort_key)
 
     if not wells_to_process:
-        print("ERROR: No matching wells between CZI and CSV.")
-        sys.exit(1)
+        raise PipelineValidationError("No matching wells between CZI and plate layout.")
 
-    # 4. Check for duplicate output filenames
-    filenames = {}
+    # 4. Resolve post-sanitisation collisions with the stable well ID.
+    base_names: dict[str, list[str]] = defaultdict(list)
     for well_id in wells_to_process:
         row = layout[well_id]
         fname = build_output_filename(row['condition'], row['reporter'],
                                       row['mutant_or_drug'],
                                       row.get('replica', ''))
-        if fname in filenames:
-            print(f"ERROR: Duplicate output filename '{fname}' "
-                  f"for wells {filenames[fname]} and {well_id}.")
-            sys.exit(1)
-        filenames[fname] = well_id
+        base_names[fname].append(well_id)
+    filenames: dict[str, str] = {}
+    for fname, wells in base_names.items():
+        for well_id in wells:
+            if len(wells) == 1:
+                filenames[well_id] = fname
+                continue
+            row = layout[well_id]
+            filenames[well_id] = build_output_filename(
+                row['condition'], row['reporter'], row['mutant_or_drug'],
+                row.get('replica', ''), stable_identifier=well_id,
+            )
 
     # 5. Read all scenes from CZI
     print(f"\nReading CZI image data...")
@@ -635,17 +637,27 @@ def split_and_save(czi_path, layout, output_dir, channel_names=None,
 
     # 7. Process each well
     print(f"\nSplitting {len(wells_to_process)} wells:")
-    for well_id in wells_to_process:
+    written: list[Path] = []
+    for well_index, well_id in enumerate(wells_to_process):
+        if progress_cb is not None:
+            progress_cb(
+                well_index / max(len(wells_to_process), 1),
+                f"Splitting well {well_index + 1}/{len(wells_to_process)} ({well_id})",
+            )
         scene_indices = well_scenes[well_id]
         row = layout[well_id]
-        fname = build_output_filename(row['condition'], row['reporter'],
-                                      row['mutant_or_drug'],
-                                      row.get('replica', ''))
+        fname = filenames[well_id]
 
         # Collect FOV arrays
         fov_arrays = []
         fov_names = []
-        for scene_idx in scene_indices:
+        for scene_pos, scene_idx in enumerate(scene_indices):
+            if progress_cb is not None:
+                progress_cb(
+                    (well_index + scene_pos / max(len(scene_indices), 1))
+                    / max(len(wells_to_process), 1),
+                    f"Well {well_id}: FOV {scene_pos + 1}/{len(scene_indices)}",
+                )
             if scene_idx not in all_scenes:
                 print(f"  WARNING: Scene index {scene_idx} not found, skipping")
                 continue
@@ -673,7 +685,7 @@ def split_and_save(czi_path, layout, output_dir, channel_names=None,
         # Stack: (N_FOV, C, Y, X)
         stacked = np.stack(fov_arrays, axis=0)
 
-        condition_name = fname.replace('.tif', '')
+        condition_name = str(row['condition'])
         output_path = output_dir / fname
 
         save_hyperstack(stacked, output_path, condition_name,
@@ -685,11 +697,22 @@ def split_and_save(czi_path, layout, output_dir, channel_names=None,
             plate_acq_dt=plate_acq_dt,
             scene_indices=scene_indices,
             per_scene_times=per_scene_times,
+            scientific_labels={
+                "well": well_id,
+                "condition": str(row.get("condition", "")),
+                "reporter": str(row.get("reporter", "")),
+                "mutant_or_drug": str(row.get("mutant_or_drug", "")),
+                "replica": str(row.get("replica", "")),
+            },
         )
+        written.append(output_path)
 
         print(f"  {well_id} ({len(fov_arrays)} FOVs) -> {fname}  {stacked.shape}")
 
     print(f"\nDone. Output saved to: {output_dir}")
+    if progress_cb is not None:
+        progress_cb(1.0, f"Wrote {len(written)} well TIFFs")
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -763,8 +786,11 @@ Examples:
     if args.channel_names:
         channel_names = [n.strip() for n in args.channel_names.split(',')]
 
-    split_and_save(czi_path, layout, output_dir, channel_names,
-                   args.pixels_per_um)
+    try:
+        split_and_save(czi_path, layout, output_dir, channel_names,
+                       args.pixels_per_um)
+    except PipelineValidationError as exc:
+        parser.error(str(exc))
 
 
 if __name__ == '__main__':

@@ -34,11 +34,52 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          pip install -e .
+          pip install -e ".[test]"
 
-      - name: Compile all sources
-        run: python -m compileall src
+      - name: Static checks
+        run: |
+          python -m compileall src
+          ruff check src tests
+          mypy src/mycomorph/core/errors.py src/mycomorph/core/naming.py \
+            src/mycomorph/core/provenance.py src/mycomorph/core/extract/ot_cache.py \
+            src/mycomorph/gui/pipeline/cancellation.py
+
+      - name: Test
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest -q
 
       - name: Import smoke
         run: |
           python -c "import mycomorph; import mycomorph.core; import mycomorph.gui; print(mycomorph.__version__)"
+
+      - name: Torch and Cellpose import smoke (macOS)
+        if: runner.os == 'macOS'
+        run: python -c "from importlib.metadata import version; import torch; import cellpose; print(torch.__version__, version('cellpose'))"
+
+  windows-bundle:
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install pinned release stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints/release-py311.txt . pyinstaller==6.16.0
+
+      - name: Build Windows bundle
+        run: pyinstaller --clean --noconfirm packaging/mycomorph.spec
+
+      - name: Smoke-launch bundle
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:MYCOMORPH_SMOKE_TEST = "1"
+          $process = Start-Process -FilePath "dist/MycoMorph/MycoMorph.exe" -PassThru -Wait
+          exit $process.ExitCode

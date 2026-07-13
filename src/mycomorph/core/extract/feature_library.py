@@ -21,6 +21,7 @@ Storage layout::
 from __future__ import annotations
 
 import json
+import hashlib
 import shutil
 from datetime import datetime, timezone
 from pathlib import Path
@@ -72,6 +73,31 @@ _INDEX_COLUMNS = [
 ]
 
 
+def _storage_key(kind: str, display_value: str) -> str:
+    digest = hashlib.sha256(str(display_value).encode("utf-8")).hexdigest()[:20]
+    return f"{kind}_{digest}"
+
+
+def _atomic_copy(source: Path, destination: Path) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    tmp = destination.with_name(f".{destination.name}.tmp")
+    tmp.unlink(missing_ok=True)
+    try:
+        shutil.copy2(source, tmp)
+        tmp.replace(destination)
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
+def _inside(base: Path, relative: str | Path) -> Path:
+    """Resolve a library-owned relative path without allowing traversal."""
+    base = base.resolve()
+    candidate = (base / relative).resolve()
+    if not candidate.is_relative_to(base):
+        raise ValueError(f"Library path escapes storage root: {relative}")
+    return candidate
+
+
 class MorphologyLibrary:
     """Manage a persistent library of per-run morphological features and models."""
 
@@ -96,7 +122,12 @@ class MorphologyLibrary:
 
     def _write_index(self, idx: pd.DataFrame) -> None:
         self._ensure_dirs()
-        idx.to_parquet(self._index_path, index=False)
+        tmp = self._index_path.with_name(f".{self._index_path.name}.tmp")
+        try:
+            idx.to_parquet(tmp, index=False)
+            tmp.replace(self._index_path)
+        finally:
+            tmp.unlink(missing_ok=True)
 
     # ------------------------------------------------------------------
     # Public API
@@ -119,8 +150,9 @@ class MorphologyLibrary:
             raise FileNotFoundError(features_parquet)
 
         self._ensure_dirs()
-        dest = self._runs_dir / f"{run_id}.parquet"
-        shutil.copy2(features_parquet, dest)
+        storage_name = f"{_storage_key('run', run_id)}.parquet"
+        dest = self._runs_dir / storage_name
+        _atomic_copy(features_parquet, dest)
 
         df = pd.read_parquet(features_parquet)
         conditions = _condition_labels(df)
@@ -149,7 +181,7 @@ class MorphologyLibrary:
                     "date_added": datetime.now(timezone.utc).isoformat(
                         timespec="seconds"
                     ),
-                    "features_file": f"{_RUNS_SUBDIR}/{run_id}.parquet",
+                    "features_file": f"{_RUNS_SUBDIR}/{storage_name}",
                     "crops_h5_path": crops_h5_path,
                 }
             ]
@@ -171,7 +203,10 @@ class MorphologyLibrary:
 
         frames = []
         for _, row in idx.iterrows():
-            path = self._dir / row["features_file"]
+            try:
+                path = _inside(self._dir, row["features_file"])
+            except ValueError:
+                continue
             if path.exists():
                 part = pd.read_parquet(path)
                 part["_library_run_id"] = row["run_id"]
@@ -200,7 +235,10 @@ class MorphologyLibrary:
             return False
 
         for _, row in match.iterrows():
-            path = self._dir / row["features_file"]
+            try:
+                path = _inside(self._dir, row["features_file"])
+            except ValueError:
+                continue
             if path.exists():
                 path.unlink()
 
@@ -267,8 +305,8 @@ class MorphologyLibrary:
 
     def _write_manifest(self, entries: list[dict]) -> None:
         self._models_dir.mkdir(parents=True, exist_ok=True)
-        with open(self._manifest_path(), "w") as f:
-            json.dump(entries, f, indent=2)
+        from ..provenance import atomic_write_text
+        atomic_write_text(self._manifest_path(), json.dumps(entries, indent=2))
 
     def register_model(
         self,
@@ -282,8 +320,8 @@ class MorphologyLibrary:
     ) -> Path:
         """Copy a trained model into the library and update the manifest."""
         self._models_dir.mkdir(parents=True, exist_ok=True)
-        dest = self._models_dir / f"{model_name}.pth"
-        shutil.copy2(model_path, dest)
+        dest = self._models_dir / f"{_storage_key('model', model_name)}.pth"
+        _atomic_copy(Path(model_path), dest)
 
         entries = self._read_manifest()
         entries = [e for e in entries if e.get("model_name") != model_name]
@@ -322,7 +360,10 @@ class MorphologyLibrary:
         """Resolve the .pth path for a named model."""
         for entry in self._read_manifest():
             if entry.get("model_name") == model_name:
-                return self._dir / entry["model_path"]
+                try:
+                    return _inside(self._dir, entry["model_path"])
+                except ValueError:
+                    return None
         return None
 
     def latest_model(self, model_type: Optional[str] = None) -> Optional[dict]:
@@ -357,7 +398,10 @@ class MorphologyLibrary:
             if stored and Path(stored).exists():
                 out.append((run_id, Path(stored)))
                 continue
-            features_path = self._dir / row["features_file"]
+            try:
+                features_path = _inside(self._dir, row["features_file"])
+            except ValueError:
+                continue
             crops_path = features_path.parent / "all_crops.h5"
             if not crops_path.exists():
                 run_dir = features_path.parent.parent

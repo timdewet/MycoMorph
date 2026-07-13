@@ -291,6 +291,7 @@ def consolidate_well_h5_files(
     so peak RAM is bounded.
     """
     import h5py
+    from ..provenance import atomic_output_path
 
     well_files = [Path(p) for p in well_files if Path(p).exists()]
     if not well_files:
@@ -302,8 +303,9 @@ def consolidate_well_h5_files(
         channel_names = [str(s) for s in first.attrs["channel_names"]]
 
     out_path = Path(out_path)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    out = h5py.File(str(out_path), "w")
+    tmp_path = atomic_output_path(out_path)
+    tmp_path.unlink(missing_ok=True)
+    out = h5py.File(str(tmp_path), "w")
     crops_ds = out.create_dataset(
         "crops",
         shape=(0, n_channels, crop_size, crop_size),
@@ -391,4 +393,5 @@ def consolidate_well_h5_files(
     out.attrs["n_fovs"] = fov_id_offset
     out.attrs["schema_version"] = HDF5_SCHEMA_VERSION
     out.close()
+    tmp_path.replace(out_path)
     return out_path

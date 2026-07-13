@@ -22,10 +22,13 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Optional, Sequence
 
 import numpy as np
 import pandas as pd
+
+if TYPE_CHECKING:
+    from .representation_generate import GenerationReport
 
 
 # ─────────────────────────────────────────────────────────────────────────

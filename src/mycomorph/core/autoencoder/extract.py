@@ -144,7 +144,10 @@ def extract_embeddings(
     # (toggleable from the Analysis tab). This keeps the saved embeddings
     # canonical and reusable across different correction strategies.
     emb_path = output_dir / "cnn_embeddings.parquet"
-    df.to_parquet(emb_path, index=False)
+    from ..provenance import atomic_output_path
+    emb_tmp = atomic_output_path(emb_path)
+    df.to_parquet(emb_tmp, index=False)
+    emb_tmp.replace(emb_path)
     progress_cb(0.90, f"Saved {len(df)} cell embeddings (raw)")
 
     # Compute strain-level profiles (mean per condition).
@@ -155,14 +158,20 @@ def extract_embeddings(
     # Centered profiles are what should be used for similarity / UMAP.
     progress_cb(0.92, "Computing strain profiles...")
     profiles = df.groupby("condition_label")[emb_cols].mean()
-    profiles.to_csv(output_dir / "strain_profiles.csv")
+    profiles_path = output_dir / "strain_profiles.csv"
+    profiles_tmp = atomic_output_path(profiles_path)
+    profiles.to_csv(profiles_tmp)
+    profiles_tmp.replace(profiles_path)
 
     # Centered profiles: subtract the global per-cell mean.
     global_mean = df[emb_cols].mean()
     centered = df.copy()
     centered[emb_cols] = df[emb_cols].values - global_mean.values
     centered_profiles = centered.groupby("condition_label")[emb_cols].mean()
-    centered_profiles.to_csv(output_dir / "strain_profiles_centered.csv")
+    centered_path = output_dir / "strain_profiles_centered.csv"
+    centered_tmp = atomic_output_path(centered_path)
+    centered_profiles.to_csv(centered_tmp)
+    centered_tmp.replace(centered_path)
 
     # NT-relative profiles: subtract the negative-control centroid. This is
     # the standard "treatment vs wild-type" representation used in
@@ -173,7 +182,10 @@ def extract_embeddings(
     if is_control.any():
         anchor = profiles[is_control].mean().values
         nt_relative = profiles - anchor
-        nt_relative.to_csv(output_dir / "strain_profiles_nt_relative.csv")
+        nt_path = output_dir / "strain_profiles_nt_relative.csv"
+        nt_tmp = atomic_output_path(nt_path)
+        nt_relative.to_csv(nt_tmp)
+        nt_tmp.replace(nt_path)
         msg = f"Saved {len(profiles)} strain profiles (raw + centered + NT-relative)"
     else:
         msg = f"Saved {len(profiles)} strain profiles (raw + centered; no controls detected)"
@@ -209,5 +221,4 @@ def _harmony_correct(embeddings: np.ndarray, run_ids: np.ndarray) -> np.ndarray:
         return embeddings
     except Exception:
         return embeddings
-
 

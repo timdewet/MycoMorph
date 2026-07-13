@@ -8,7 +8,7 @@ multi-file stages report a smooth 0→1 to the outer runner.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Callable, Iterable, Optional, Protocol
 
 from mycomorph.core.api import (
     classify_filter_tiff,
@@ -21,6 +21,15 @@ from mycomorph.core.api import (
     split_plate,
 )
 from mycomorph.core.extract.feature_library import FeatureLibrary
+from mycomorph.core.provenance import (
+    artifact_signature_matches,
+    artifact_is_in_progress,
+    atomic_output_path,
+    checkpoint_signature,
+    validate_hdf5,
+    validate_parquet,
+    validate_tiff,
+)
 
 from .context import RunContext
 
@@ -62,6 +71,37 @@ def _iter_tiffs(directory: Path) -> list[Path]:
     for pattern in ("*.tif", "*.tiff", "*.ome.tif", "*.ome.tiff"):
         paths.update(directory.glob(pattern))
     return sorted(paths)
+
+
+def _can_reuse(
+    path: Path,
+    signature: dict,
+    validator: Callable[[Path], bool],
+    progress_cb: ProgressCB,
+    *,
+    companions: Iterable[tuple[Path, Callable[[Path], bool]]] = (),
+) -> bool:
+    """Accept a matching artifact, or an intact legacy artifact with warning."""
+    if artifact_is_in_progress(path):
+        progress_cb(0.0, f"Discarding interrupted output: {path.name}")
+        return False
+    if not validator(path):
+        progress_cb(0.0, f"Discarding corrupt/incomplete output: {path.name}")
+        return False
+    for companion, companion_validator in companions:
+        if not companion_validator(companion):
+            progress_cb(0.0, f"Discarding incomplete output set: {companion.name}")
+            return False
+    matches = artifact_signature_matches(path, signature)
+    if matches is False:
+        progress_cb(0.0, f"Options or input changed; rebuilding {path.name}")
+        return False
+    if matches is None:
+        progress_cb(
+            0.0,
+            f"Reusing legacy output after integrity check (provenance unavailable): {path.name}",
+        )
+    return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -122,13 +162,27 @@ def _expected_stems_for_layout(ctx, focus_suffix: str = "") -> set[str]:
     from mycomorph.core.split_czi_plate import build_output_filename
 
     if hasattr(ctx, "czi_entries"):
+        entries = list(getattr(ctx, "czi_entries", []) or [])
+        base_names = [
+            build_output_filename(
+                str(entry.get("condition", "")),
+                str(entry.get("reporter", "")),
+                str(entry.get("mutant_or_drug", "")),
+                str(entry.get("replica", "")),
+            )
+            for entry in entries
+        ]
         stems: set[str] = set()
-        for entry in getattr(ctx, "czi_entries", []) or []:
+        for entry, base_name in zip(entries, base_names):
             stem = build_output_filename(
                 str(entry.get("condition", "")),
                 str(entry.get("reporter", "")),
                 str(entry.get("mutant_or_drug", "")),
                 str(entry.get("replica", "")),
+                stable_identifier=(
+                    str(Path(entry["czi_path"]).resolve())
+                    if base_names.count(base_name) > 1 else None
+                ),
             ).removesuffix(".tif")
             if stem:
                 stems.add(stem + focus_suffix)
@@ -370,7 +424,15 @@ class SegmentStage:
             # Per-TIFF reuse: skip if output already exists. Avoids
             # re-segmenting wells from a previous run when the user has
             # added a new CZI and ticked reuse-existing.
-            if ctx.reuse_existing and out.exists():
+            signature = checkpoint_signature(
+                stage="segment",
+                input_path=tiff,
+                options=ctx.segment_opts,
+                channels=ctx.channel_labels,
+                phase_channel=ctx.phase_channel or 0,
+            )
+            if (ctx.reuse_existing and out.exists()
+                    and _can_reuse(out, signature, validate_tiff, progress_cb)):
                 progress_cb(
                     (i + 1) / n,
                     f"[{i+1}/{n}] Reused {tiff.name}",
@@ -387,7 +449,8 @@ class SegmentStage:
                 channel_labels=ctx.channel_labels,
                 progress_cb=cb,
             )
-            outputs.append(out)
+            if out.exists():
+                outputs.append(out)
         progress_cb(
             1.0,
             f"Segmented {n} TIFFs"
@@ -437,7 +500,16 @@ class ClassifyStage:
         for i, tiff in enumerate(inputs):
             out = ctx.classify_dir / tiff.name
             # Per-TIFF reuse: skip already-classified wells when reuse-existing.
-            if ctx.reuse_existing and out.exists():
+            signature = checkpoint_signature(
+                stage="classify",
+                input_path=tiff,
+                options=ctx.classify_opts,
+                channels=ctx.channel_labels,
+                phase_channel=ctx.phase_channel or 0,
+                model_path=ctx.classify_opts.model_path,
+            )
+            if (ctx.reuse_existing and out.exists()
+                    and _can_reuse(out, signature, validate_tiff, progress_cb)):
                 progress_cb(
                     (i + 1) / n,
                     f"[{i+1}/{n}] Reused {tiff.name}",
@@ -533,13 +605,27 @@ class ExtractStage:
             out = ctx.features_dir / (tiff.stem + ".parquet")
             # Per-TIFF reuse: skip already-extracted wells when reuse-existing.
             # Also picks up the optional per-well crops .h5 if present.
-            if ctx.reuse_existing and out.exists():
+            crop_h5 = out.with_name(out.stem + "__crops.h5")
+            companions = (
+                [(crop_h5, validate_hdf5)] if getattr(opts, "save_crops", True) else []
+            )
+            signature = checkpoint_signature(
+                stage="features",
+                input_path=tiff,
+                options={"options": opts, "run_id": run_id},
+                channels=ctx.channel_labels,
+                phase_channel=ctx.phase_channel,
+            )
+            if (ctx.reuse_existing and out.exists()
+                    and _can_reuse(
+                        out, signature, validate_parquet, progress_cb,
+                        companions=companions,
+                    )):
                 progress_cb(
                     (i + 1) / n,
                     f"[{i+1}/{n}] Reused {tiff.name}",
                 )
                 outputs.append(out)
-                crop_h5 = out.with_name(out.stem + "__crops.h5")
                 if crop_h5.exists():
                     crop_files.append(crop_h5)
                 n_skipped += 1
@@ -774,7 +860,7 @@ class FluorescentNormalisationStage:
         n_skipped = 0
         for i, tiff in enumerate(inputs):
             out = ctx.fluorescent_normalisation_dir / tiff.name
-            if ctx.reuse_existing and out.exists():
+            if ctx.reuse_existing and out.exists() and validate_tiff(out):
                 progress_cb(
                     (i + 1) / n,
                     f"[{i+1}/{n}] Reused {tiff.name}",
@@ -835,10 +921,15 @@ class FluorescentNormalisationStage:
                 if k in metadata:
                     imagej_meta[k] = metadata[k]
 
-            tifffile.imwrite(
-                str(out), out_data,
-                imagej=True, metadata=imagej_meta,
-            )
+            tmp_out = atomic_output_path(out)
+            try:
+                tifffile.imwrite(
+                    str(tmp_out), out_data,
+                    imagej=True, metadata=imagej_meta,
+                )
+                tmp_out.replace(out)
+            finally:
+                tmp_out.unlink(missing_ok=True)
             outputs.append(out)
 
         progress_cb(
@@ -928,7 +1019,7 @@ class FociDetectionStage:
         n_skipped = 0
         for i, tiff in enumerate(inputs):
             out = ctx.foci_detection_dir / (tiff.stem + ".parquet")
-            if ctx.reuse_existing and out.exists():
+            if ctx.reuse_existing and out.exists() and validate_parquet(out):
                 progress_cb(
                     (i + 1) / n,
                     f"[{i+1}/{n}] Reused {tiff.name}",
@@ -1001,7 +1092,12 @@ class FociDetectionStage:
             df_all = (
                 pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
             )
-            df_all.to_parquet(out, index=False)
+            tmp_out = atomic_output_path(out)
+            try:
+                df_all.to_parquet(tmp_out, index=False)
+                tmp_out.replace(out)
+            finally:
+                tmp_out.unlink(missing_ok=True)
             outputs.append(out)
 
         progress_cb(

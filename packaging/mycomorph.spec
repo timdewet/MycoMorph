@@ -17,6 +17,7 @@ above command on a Windows machine.
 """
 
 from PyInstaller.utils.hooks import collect_all, collect_submodules
+from importlib.util import find_spec
 
 
 datas: list = []
@@ -41,24 +42,19 @@ for pkg in (
     "torchvision",
     "pylibCZIrw",
     "tifffile",
-    "aicspylibczi",
     "skimage",
     "h5py",
     "pyqtgraph",
 ):
-    try:
-        d, b, h = collect_all(pkg)
-        datas += d
-        binaries += b
-        hiddenimports += h
-    except Exception:
-        pass
+    if find_spec(pkg) is None:
+        raise RuntimeError(f"Required package is unavailable: {pkg}")
+    d, b, h = collect_all(pkg)
+    datas += d
+    binaries += b
+    hiddenimports += h
 
 for pkg in ("skimage", "scipy", "mycomorph"):
-    try:
-        hiddenimports += collect_submodules(pkg)
-    except Exception:
-        pass
+    hiddenimports += collect_submodules(pkg)
 
 excludes = [
     "tkinter",

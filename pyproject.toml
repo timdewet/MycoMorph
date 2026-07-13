@@ -48,7 +48,12 @@ foci = [
     "basicpy",                                       # BaSiC flat-field correction
     "spotiflow ; python_version<'3.13'",             # deep-learning detector; no 3.13 wheels yet
 ]
-test = ["pytest>=8", "pytest-qt>=4"]
+test = [
+    "pytest>=8",
+    "pytest-qt>=4",
+    "ruff>=0.12",
+    "mypy>=1.16",
+]
 
 [project.scripts]
 mycomorph = "mycomorph.gui.app:main"
@@ -60,3 +65,19 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 "mycomorph.core" = ["models/*.pth"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+# Start with correctness checks that are suitable for the existing codebase;
+# broader style rules can be adopted module-by-module during refactors.
+select = ["E9", "F63", "F7", "F82"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+follow_imports = "skip"
+check_untyped_defs = true
+warn_unused_ignores = true

@@ -23,7 +23,18 @@ the pipeline run.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable, Optional
+from typing import TYPE_CHECKING, Callable, Optional
+
+from .ot_cache import (
+    embedding_ot_cache_path as _embedding_ot_cache_path,
+    features_ot_cache_path as _features_ot_cache_path,
+    ot_sidecar_path as _ot_sidecar_path,
+    save_ot_sidecar as _save_ot_sidecar,
+    try_load_ot_cache as _try_load_ot_cache,
+)
+
+if TYPE_CHECKING:
+    import numpy as np
 
 ProgressCB = Callable[[float, str], None]
 
@@ -1908,6 +1919,7 @@ def render_embeddings_html(
     of the architecture subdirectories under ``<models_dir>/embeddings/``).
     Empty string = use the most recently-modified one.
     """
+    import numpy as np
     import pandas as pd
 
     from .feature_library import FeatureLibrary
@@ -2286,131 +2298,6 @@ def render_embeddings_html(
 # ──────────────────────────────────────────────────────────────────────────────
 # CNN Embedding UMAP via Optimal Transport (Sinkhorn divergence)
 # ──────────────────────────────────────────────────────────────────────────────
-
-
-def _ot_sidecar_path(html_path: "Path") -> "Path":
-    """Sidecar location for the cached OT distance matrix + group metadata."""
-    return Path(html_path).with_suffix(".ot_distance.parquet")
-
-
-def _save_ot_sidecar(
-    html_path: "Path",
-    D: "np.ndarray",
-    group_meta: list[dict],
-    params: "dict | None" = None,
-) -> None:
-    """Persist the OT distance matrix as a parquet so downstream analyses
-    (ranked matches, permutation tests, recolouring) don't recompute it.
-
-    Schema: one row per group, columns = group_meta keys + ``d_<idx>``
-    columns holding the distance to every other group. Indexed by row
-    position. ``params`` is a dict of the parameters that produced the
-    matrix (n_cells, sinkhorn_reg, pca_dims, batch_correct …) — saved
-    as a sibling JSON so cache lookups can validate a hit. Best-effort
-    — silently swallows write failures.
-    """
-    import json
-    import pandas as pd
-
-    try:
-        meta_df = pd.DataFrame(group_meta)
-        n = D.shape[0]
-        for j in range(n):
-            meta_df[f"d_{j}"] = D[:, j]
-        sidecar = _ot_sidecar_path(html_path)
-        meta_df.to_parquet(sidecar, index=False)
-        if params is not None:
-            sidecar.with_suffix(sidecar.suffix + ".params.json").write_text(
-                json.dumps(params, sort_keys=True, default=str),
-                encoding="utf-8",
-            )
-    except Exception:  # noqa: BLE001
-        pass
-
-
-def _embedding_ot_cache_path(emb_path: "Path") -> "Path":
-    """Stable cache location next to the embeddings parquet for the
-    precomputed OT distance matrix written by ``EmbeddingsStage``.
-    """
-    return Path(emb_path).with_name(
-        Path(emb_path).stem + ".ot_default.ot_distance.parquet",
-    )
-
-
-def _features_ot_cache_path(library_dir: "Path | None", species: str) -> "Path":
-    """Stable cache location for the features-OT distance matrix.
-
-    Lives under the library's ``features_ot_cache/`` subdir, keyed by
-    species (since each species' library is queried separately and has
-    its own condition / control set).
-    """
-    from .feature_library import FeatureLibrary
-
-    lib = FeatureLibrary(library_dir)
-    cache_dir = lib.library_dir / "features_ot_cache"
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    safe = "".join(c if c.isalnum() else "_" for c in (species or "all"))
-    return cache_dir / f"{safe}.ot_distance.parquet"
-
-
-def _try_load_ot_cache(
-    cache_sidecar: "Path",
-    requested_params: dict,
-    *,
-    miss_reason: "list[str] | None" = None,
-) -> "tuple[np.ndarray, list[dict]] | None":
-    """Return ``(D, group_meta)`` if the cache exists and its stored
-    params match the requested ones. ``None`` on miss / stale cache.
-
-    When ``miss_reason`` is provided (mutable list), the first reason
-    for a miss is appended to it — useful for diagnostics when the
-    Analysis panel can't figure out why a fresh precompute didn't take.
-    """
-    import json
-
-    import numpy as np
-    import pandas as pd
-
-    def _report(reason: str) -> None:
-        if miss_reason is not None:
-            miss_reason.append(reason)
-
-    if not cache_sidecar.exists():
-        _report(f"cache file not found at {cache_sidecar.name}")
-        return None
-    params_path = cache_sidecar.with_suffix(
-        cache_sidecar.suffix + ".params.json",
-    )
-    if params_path.exists():
-        try:
-            stored = json.loads(params_path.read_text(encoding="utf-8"))
-        except Exception as exc:  # noqa: BLE001
-            _report(f"params.json unreadable: {exc}")
-            return None
-        for k, v in requested_params.items():
-            if str(stored.get(k)) != str(v):
-                _report(
-                    f"param mismatch on {k!r}: "
-                    f"requested={v!r} cached={stored.get(k)!r}"
-                )
-                return None
-    else:
-        _report("params.json missing — old cache layout, will recompute")
-    try:
-        df = pd.read_parquet(cache_sidecar)
-    except Exception as exc:  # noqa: BLE001
-        _report(f"parquet unreadable: {exc}")
-        return None
-    d_cols = sorted(
-        [c for c in df.columns if c.startswith("d_")],
-        key=lambda c: int(c.split("_", 1)[1]),
-    )
-    if not d_cols:
-        _report("cache parquet has no d_* columns")
-        return None
-    D = df[d_cols].to_numpy(dtype=np.float64)
-    meta = df.drop(columns=d_cols).to_dict("records")
-    return D, meta
 
 
 def precompute_features_ot_cache(
@@ -3055,7 +2942,7 @@ def render_embeddings_ot_html(
         pca_dims_before_ot
         and pca_dims_before_ot > 0
         and len(emb_cols) > pca_dims_before_ot
-    ):
+):
         try:
             from sklearn.decomposition import PCA as _PCA
             n_pca = min(

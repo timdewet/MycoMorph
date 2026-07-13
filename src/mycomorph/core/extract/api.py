@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -223,7 +223,7 @@ def _process_fov(
 def extract_features_tiff(
     tiff_path: Path,
     out_path: Path,
-    opts: ExtractOpts = field(default_factory=ExtractOpts),  # type: ignore[arg-type]
+    opts: ExtractOpts | None = None,
     *,
     run_id: Optional[str] = None,
     channel_labels: Optional[list[str]] = None,
@@ -236,10 +236,20 @@ def extract_features_tiff(
     """
     from ..label_cells import load_hyperstack
     from ..api import _read_imagej_labels, _read_pixels_per_um  # type: ignore[attr-defined]
+    from ..provenance import (
+        atomic_output_path,
+        checkpoint_signature,
+        clear_artifact_in_progress,
+        mark_artifact_in_progress,
+        prepare_checkpoint_dir,
+        write_artifact_signature,
+    )
 
+    opts = opts or ExtractOpts()
     tiff_path = Path(tiff_path)
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    mark_artifact_in_progress(out_path)
 
     progress_cb(0.0, f"Loading {tiff_path.name}")
     data, _meta = load_hyperstack(tiff_path)
@@ -288,17 +298,30 @@ def extract_features_tiff(
 
     # Per-FOV checkpoint dir, mirroring classify_filter_tiff's resumability.
     partial_dir = out_path.with_suffix(out_path.suffix + ".partial")
-    partial_dir.mkdir(parents=True, exist_ok=True)
+    signature = checkpoint_signature(
+        stage="features",
+        input_path=tiff_path,
+        options={"options": opts, "run_id": run_id},
+        channels=channel_labels,
+        phase_channel=phase_channel,
+    )
+    reusable_checkpoints = prepare_checkpoint_dir(partial_dir, signature)
 
-    n_existing = sum(1 for i in range(n_fov) if (partial_dir / f"fov_{i:03d}.npz").exists())
+    n_existing = (
+        sum(1 for i in range(n_fov) if (partial_dir / f"fov_{i:03d}.npz").exists())
+        if reusable_checkpoints else 0
+    )
     if n_existing:
         progress_cb(0.04, f"Resuming: {n_existing}/{n_fov} FOV checkpoints already on disk")
 
     crops_h5_path = out_path.with_name(out_path.stem + "__crops.h5") if opts.save_crops else None
+    crops_h5_tmp = atomic_output_path(crops_h5_path) if crops_h5_path is not None else None
+    if crops_h5_tmp is not None:
+        crops_h5_tmp.unlink(missing_ok=True)
     h5_file = crops_ds = None
-    if crops_h5_path is not None:
+    if crops_h5_tmp is not None:
         h5_file, crops_ds = crops_mod.open_well_h5(
-            crops_h5_path,
+            crops_h5_tmp,
             crop_size=opts.crop_size,
             n_channels=n_crop_channels,
             channel_names=crop_channel_names,
@@ -307,6 +330,12 @@ def extract_features_tiff(
     all_dfs: list[pd.DataFrame] = []
     all_crop_meta: list[dict] = []
     n_crops_written = 0
+    out_tmp = atomic_output_path(out_path)
+    csv_path = out_path.with_suffix(".csv")
+    csv_tmp = atomic_output_path(csv_path) if opts.save_csv else None
+    out_tmp.unlink(missing_ok=True)
+    if csv_tmp is not None:
+        csv_tmp.unlink(missing_ok=True)
 
     try:
         for i in range(n_fov):
@@ -324,30 +353,39 @@ def extract_features_tiff(
                 # the .partial dir; previously this fell over inside the
                 # broadcast assignment with an opaque numpy error.
                 stale_ckpt = False
-                if h5_file is not None and ckpt.exists():
-                    with np.load(ckpt) as npz:
-                        if "crops" in npz and npz["crops"].size:
-                            arr = npz["crops"]
-                            if arr.shape[1:] != crops_ds.shape[1:]:
-                                progress_cb(
-                                    0.05 + 0.9 * (i / max(n_fov, 1)),
-                                    f"FOV {i+1}/{n_fov}: stale checkpoint "
-                                    f"{arr.shape[1:]} vs h5 {crops_ds.shape[1:]} — "
-                                    f"re-extracting",
-                                )
-                                stale_ckpt = True
-                            else:
-                                crops_ds.resize(
-                                    n_crops_written + arr.shape[0], axis=0,
-                                )
-                                crops_ds[n_crops_written: n_crops_written + arr.shape[0]] = arr
-                                n_crops_written += arr.shape[0]
-                if not stale_ckpt:
+                try:
                     df = pd.read_parquet(df_npz)
+                    with np.load(ckpt) as npz:
+                        if "crops" not in npz:
+                            raise ValueError("missing crops array")
+                        arr = npz["crops"]
+                    cached_meta = json.loads(meta_npz.read_text()) if meta_npz.exists() else []
+                    if arr.size and len(cached_meta) != arr.shape[0]:
+                        raise ValueError("crop metadata length mismatch")
+                    if h5_file is not None and arr.size and arr.shape[1:] != crops_ds.shape[1:]:
+                        progress_cb(
+                            0.05 + 0.9 * (i / max(n_fov, 1)),
+                            f"FOV {i+1}/{n_fov}: stale checkpoint "
+                            f"{arr.shape[1:]} vs h5 {crops_ds.shape[1:]} — "
+                            f"re-extracting",
+                        )
+                        stale_ckpt = True
+                    elif h5_file is None and arr.size:
+                        stale_ckpt = True
+                except Exception:  # noqa: BLE001
+                    stale_ckpt = True
+                if not stale_ckpt:
                     all_dfs.append(df)
-                    if meta_npz.exists():
-                        all_crop_meta.extend(json.loads(meta_npz.read_text()))
+                    all_crop_meta.extend(cached_meta)
+                    if h5_file is not None and arr.size:
+                        crops_ds.resize(n_crops_written + arr.shape[0], axis=0)
+                        crops_ds[n_crops_written: n_crops_written + arr.shape[0]] = arr
+                        n_crops_written += arr.shape[0]
                     continue
+                if stale_ckpt:
+                    ckpt.unlink(missing_ok=True)
+                    df_npz.unlink(missing_ok=True)
+                    meta_npz.unlink(missing_ok=True)
                 # Fall through to re-extract this FOV from scratch.
 
             fov_acq_time = fov_acq_times[i] if i < len(fov_acq_times) else None
@@ -386,7 +424,10 @@ def extract_features_tiff(
             tmp_df.replace(df_npz)
 
             if crops_arr is None:
-                np.savez(ckpt, crops=np.zeros((0,), dtype=np.float32))
+                tmp_ckpt = ckpt.with_name(ckpt.name + ".tmp")
+                with open(tmp_ckpt, "wb") as fh:
+                    np.savez_compressed(fh, crops=np.zeros((0,), dtype=np.float32))
+                tmp_ckpt.replace(ckpt)
             else:
                 tmp_ckpt = ckpt.with_name(ckpt.name + ".tmp")
                 with open(tmp_ckpt, "wb") as fh:
@@ -408,14 +449,23 @@ def extract_features_tiff(
             full = pd.concat(all_dfs, ignore_index=True)
         else:
             full = pd.DataFrame()
-        full.to_parquet(out_path, index=False)
+        full.to_parquet(out_tmp, index=False)
         if opts.save_csv:
-            csv_path = out_path.with_suffix(".csv")
-            full.to_csv(csv_path, index=False)
+            full.to_csv(csv_tmp, index=False)
 
         if h5_file is not None:
             crops_mod.finalise_well_h5(h5_file, all_crop_meta)
             h5_file = None  # closed by finalise
+
+        # Publish only after every requested format was written successfully.
+        out_tmp.replace(out_path)
+        if csv_tmp is not None:
+            csv_tmp.replace(csv_path)
+        if crops_h5_tmp is not None:
+            crops_h5_tmp.replace(crops_h5_path)
+
+        write_artifact_signature(out_path, signature)
+        clear_artifact_in_progress(out_path)
 
         # Final write succeeded → drop the partial checkpoints.
         try:
@@ -437,6 +487,11 @@ def extract_features_tiff(
                 h5_file.close()
             except Exception:  # noqa: BLE001
                 pass
+        if crops_h5_tmp is not None:
+            crops_h5_tmp.unlink(missing_ok=True)
+        out_tmp.unlink(missing_ok=True)
+        if csv_tmp is not None:
+            csv_tmp.unlink(missing_ok=True)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -470,7 +525,13 @@ def consolidate_features(
     full = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    full.to_parquet(out_path, index=False)
+    from ..provenance import atomic_output_path
+    out_tmp = atomic_output_path(out_path)
+    full.to_parquet(out_tmp, index=False)
+    out_tmp.replace(out_path)
     if write_csv:
-        full.to_csv(out_path.with_suffix(".csv"), index=False)
+        csv_path = out_path.with_suffix(".csv")
+        csv_tmp = atomic_output_path(csv_path)
+        full.to_csv(csv_tmp, index=False)
+        csv_tmp.replace(csv_path)
     return out_path
