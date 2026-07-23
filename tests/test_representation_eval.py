@@ -318,13 +318,10 @@ def test_harmony_orientation_helper_round_trip():
     regardless of the installed harmonypy version (0.0.x transposes;
     2.x doesn't)."""
     try:
-        from mycomorph.core.extract.qc_plots import _run_harmony_oriented
-    except ImportError:
-        return  # qc_plots optional-deps not installed — skip
-    try:
         import harmonypy  # noqa: F401
     except ImportError:
         return  # harmonypy not installed in this env — skip
+    from mycomorph.core.extract.representation_eval import apply_harmony
     import numpy as np
 
     rng = np.random.default_rng(0)
@@ -337,10 +334,11 @@ def test_harmony_orientation_helper_round_trip():
     ]).astype(np.float32)
     batches = np.array(["a"] * n_per_batch + ["b"] * n_per_batch)
 
-    Z = _run_harmony_oriented(X, batches, nclust=2)
+    Z, applied = apply_harmony(X, batches)
 
     # Shape must match input — this is the invariant that previously
     # broke silently on 0.0.9.
+    assert applied
     assert Z.shape == X.shape, f"Z.shape {Z.shape} != X.shape {X.shape}"
 
     # Sanity: the inter-batch mean gap should shrink after correction.

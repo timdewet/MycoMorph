@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import sys
 import types
 from pathlib import Path
@@ -23,6 +24,11 @@ from mycomorph.core.provenance import (
     clear_artifact_in_progress,
     mark_artifact_in_progress,
     prepare_checkpoint_dir,
+)
+from mycomorph.core.extract.ot_cache import (
+    copy_to_variant_cache,
+    try_load_ot_cache,
+    variant_cache_path,
 )
 from mycomorph.core import split_czi_plate as split_mod
 
@@ -367,3 +373,41 @@ def test_bulk_duplicate_names_match_downstream_stage_filter(tmp_path: Path):
     assert len(expected) == 2
     assert all(stem.endswith("_focused") for stem in expected)
     assert all("__W" in stem for stem in expected)
+
+
+@pytest.mark.parametrize("batch_correct", [False, True])
+@pytest.mark.parametrize("merge_replicates", [False, True])
+def test_ot_cache_variants_are_isolated_and_reusable(
+    tmp_path: Path,
+    batch_correct: bool,
+    merge_replicates: bool,
+):
+    canonical = tmp_path / "features.ot_distance.parquet"
+    params = {
+        "batch_correct": batch_correct,
+        "merge_replicates": merge_replicates,
+    }
+    pd.DataFrame({"group": ["WT"], "d_0": [0.0]}).to_parquet(
+        canonical, index=False,
+    )
+    canonical.with_suffix(canonical.suffix + ".params.json").write_text(
+        json.dumps(params), encoding="utf-8",
+    )
+
+    variant = copy_to_variant_cache(
+        canonical,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
+
+    assert variant == variant_cache_path(
+        canonical,
+        batch_correct=batch_correct,
+        merge_replicates=merge_replicates,
+    )
+    assert variant is not None and variant.exists()
+    loaded = try_load_ot_cache(variant, params)
+    assert loaded is not None
+    distances, metadata = loaded
+    assert distances.tolist() == [[0.0]]
+    assert metadata == [{"group": "WT"}]

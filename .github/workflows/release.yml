@@ -51,7 +51,9 @@ jobs:
         shell: pwsh
         run: |
           $tag = "${{ needs.release-please.outputs.tag_name }}"
-          $tagVersion = $tag.TrimStart('v')
+          # release-please uses component tags such as mycomorph-v0.3.0.
+          # Accept both that form and a conventional v0.3.0 tag.
+          $tagVersion = $tag -replace '^mycomorph-v', '' -replace '^v', ''
           $pkgVersion = (python -c "import mycomorph; print(mycomorph.__version__)").Trim()
           if ($tagVersion -ne $pkgVersion) {
             Write-Error "Tag '$tag' (=> '$tagVersion') does not match mycomorph.__version__ ('$pkgVersion')."
