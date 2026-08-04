@@ -46,7 +46,6 @@ foci = [
     "bm3d",                                          # BM3D denoising
     "trackpy",                                       # radial-symmetry detector
     "basicpy",                                       # BaSiC flat-field correction
-    "spotiflow ; python_version<'3.13'",             # deep-learning detector; no 3.13 wheels yet
 ]
 test = [
     "pytest>=8",

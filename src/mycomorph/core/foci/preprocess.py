@@ -17,7 +17,7 @@ that deconvolution doesn't amplify high-frequency noise.
   tuning beyond the noise σ (which we auto-estimate by MAD).
 
 Both functions are pure-function preprocessing — feed the result to any
-detector (``wavelet``, ``dog``, ``spotiflow``, …).
+detector (``wavelet``, ``dog``, ``bacteroidal``, …).
 
 Default PSF is a 9×9 Gaussian with σ=1.5 px, which approximates a
 widefield Mtb PSF at typical binning. For a more accurate PSF, generate

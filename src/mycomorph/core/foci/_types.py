@@ -51,9 +51,6 @@ class DetectorOpts:
     # Trackpy
     trackpy_diameter_px: int = 7        # must be odd
     trackpy_minmass: Optional[float] = None
-    # Spotiflow
-    spotiflow_model: str = "general"    # pretrained model name
-    spotiflow_min_distance: int = 2
     # Wavelet à trous (Olivo-Marin 2002) — best classical option for dim foci
     wavelet_scales: tuple[int, ...] = (1, 2)    # foci-size scales to keep
     wavelet_threshold_mad: float = 3.0          # per-plane MAD threshold

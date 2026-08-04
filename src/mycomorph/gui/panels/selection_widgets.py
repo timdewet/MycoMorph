@@ -8,7 +8,6 @@ from PyQt6.QtWidgets import QListWidget, QListWidgetItem, QVBoxLayout, QWidget
 from mycomorph.core.foci.detectors import (
     BACTERIAL_SPECIFIC_KEYS,
     CLASSICAL_BASELINE_KEYS,
-    DEEP_LEARNING_KEYS,
     DIM_SIGNAL_KEYS,
 )
 
@@ -77,7 +76,6 @@ class DetectorKeySelect(QWidget):
         ("Classical baselines", CLASSICAL_BASELINE_KEYS),
         ("Dim signal", DIM_SIGNAL_KEYS),
         ("Bacterial-specific", BACTERIAL_SPECIFIC_KEYS),
-        ("Deep learning", DEEP_LEARNING_KEYS),
     ]
 
     def __init__(self, parent: QWidget | None = None) -> None:
