@@ -7,8 +7,8 @@ All detectors expose:
 
 The ``REGISTRY`` maps short string keys to factory callables so the
 notebook can iterate over a selected subset without importing every
-optional dependency upfront. Heavy / optional deps (Spotiflow, BaSiC,
-trackpy) are imported lazily inside the relevant detector's body.
+optional dependency upfront. Heavy / optional deps (BaSiC, trackpy)
+are imported lazily inside the relevant detector's body.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from .basic import (
     GaussianNormWaveletDetector,
 )
 from .bacteroidal import BacteroidalDetector
-from .spotiflow import SpotiflowDetector
 from .wavelet import WaveletAtrousDetector
 from .enhanced import (
     Bm3dWaveletDetector,
@@ -44,7 +43,6 @@ REGISTRY: dict[str, Callable[[], object]] = {
     "bm3d_wavelet": Bm3dWaveletDetector,
     "decon_bm3d_wavelet": DeconvolveBm3dWaveletDetector,
     "bacteroidal": BacteroidalDetector,
-    "spotiflow": SpotiflowDetector,
 }
 
 
@@ -55,7 +53,6 @@ ENHANCED_DIM_SIGNAL_KEYS = [
     "gaussian_norm_wavelet", "decon_wavelet", "bm3d_wavelet", "decon_bm3d_wavelet",
 ]
 BACTERIAL_SPECIFIC_KEYS = ["bacteroidal"]
-DEEP_LEARNING_KEYS = ["spotiflow"]
 
 ALL_KEYS = (
     CLASSICAL_BASELINE_KEYS
@@ -63,7 +60,6 @@ ALL_KEYS = (
     + DIM_SIGNAL_KEYS
     + ENHANCED_DIM_SIGNAL_KEYS
     + BACTERIAL_SPECIFIC_KEYS
-    + DEEP_LEARNING_KEYS
 )
 
 __all__ = [
@@ -79,7 +75,6 @@ __all__ = [
     "Bm3dWaveletDetector",
     "DeconvolveBm3dWaveletDetector",
     "BacteroidalDetector",
-    "SpotiflowDetector",
     "REGISTRY",
     "ALL_KEYS",
     "CLASSICAL_BASELINE_KEYS",
@@ -87,5 +82,4 @@ __all__ = [
     "DIM_SIGNAL_KEYS",
     "ENHANCED_DIM_SIGNAL_KEYS",
     "BACTERIAL_SPECIFIC_KEYS",
-    "DEEP_LEARNING_KEYS",
 ]

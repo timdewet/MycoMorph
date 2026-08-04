@@ -5,8 +5,8 @@ contract and are exposed through :data:`mycomorph.core.foci.detectors.REGISTRY`.
 Per-FOV normalisers (top-hat, BaSiC, Richardson-Lucy, BM3D, …) share an analogous
 :data:`mycomorph.core.foci.normalise.NORMALISER_REGISTRY`.
 
-All heavy / optional dependencies (``bm3d``, ``trackpy``, ``spotiflow``, ``basicpy``)
-are lazy-imported inside detector / normaliser bodies, so ``import mycomorph.core.foci``
+All heavy / optional dependencies (``bm3d``, ``trackpy``, ``basicpy``) are
+lazy-imported inside detector / normaliser bodies, so ``import mycomorph.core.foci``
 succeeds without the ``[foci]`` optional extra installed.
 """
 

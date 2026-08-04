@@ -400,7 +400,7 @@ class PreviewController(QObject):
             # Foci detection runs on the main thread after segment because
             # it needs both the fluorescence channels and the labeled
             # mask. Cheap for ``dog``/``log``/``wavelet``; can be sluggish
-            # for ``decon_bm3d_wavelet``/``spotiflow`` on big FOVs — the
+            # for ``decon_bm3d_wavelet`` on big FOVs — the
             # user toggles detectors in the panel to manage cost.
             if self._tab == "foci_det":
                 self._run_foci_detection_preview(entry)
