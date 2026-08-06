@@ -156,6 +156,13 @@ class LivePreviewPanel(QWidget):
         # Sources, refreshed when the input panel's CZIs / output dir change.
         self._search_dirs: list[Path] = []
         self._czi_paths: list[Path] = []
+        # The project's 02_segment dir. Held here rather than pushed
+        # straight at the controller because MainWindow can set it before
+        # ``wire_pipeline`` has built one; replayed on wiring.
+        self._segment_dir: Optional[Path] = None
+        # Stages the current render served from a previous run's output
+        # instead of recomputing. Drives the idle status line.
+        self._reused_stages: set[str] = set()
         # Plate / bulk layout context for sample naming. Held so we can
         # rebuild the sample combo whenever the user re-edits a layout.
         # ``mode`` is the InputMode value (single_plate / bulk / single_file).
@@ -436,8 +443,15 @@ class LivePreviewPanel(QWidget):
             started=self._on_progress_started,
             finished=self._on_progress_finished,
             failed=self._on_progress_failed,
+            reused=self._on_progress_reused,
         )
         self._controller = PreviewController(opts, canvas, progress, parent=self)
+        # Replay anything MainWindow pushed at us before there was a
+        # controller to receive it.
+        self._controller.set_segment_dir(self._segment_dir)
+        # Reset the per-render reuse tally as each render kicks off; the
+        # controller emits this before any stage signal.
+        self._controller.renderStateChanged.connect(self._on_render_state_changed)
         # Re-render when the user drags / resizes the ROI rectangle.
         self._canvas.add_roi_change_listener(self._on_roi_geometry_changed)
         # Apply the default ROI-on state so the rectangle is visible
@@ -492,6 +506,16 @@ class LivePreviewPanel(QWidget):
             "segment", "features", "fluor_norm", "foci_det",
         ):
             self._refresh_for_tab(self._current_tab)
+
+    def set_segment_dir(self, path: Optional[Path]) -> None:
+        """The project's ``02_segment`` directory, if the stage has run.
+
+        Lets the preview skip cellpose for FOVs a previous run already
+        segmented at the options currently showing in the panel.
+        """
+        self._segment_dir = Path(path) if path is not None else None
+        if self._controller is not None:
+            self._controller.set_segment_dir(self._segment_dir)
 
     def set_czi_paths(self, paths: list[Path]) -> None:
         """The list of CZI files known to the InputPanel.
@@ -890,8 +914,23 @@ class LivePreviewPanel(QWidget):
         self._progress_bar.setVisible(True)
         self._cancel_btn.setVisible(True)
 
+    def _on_render_state_changed(self, running: bool) -> None:
+        if running:
+            self._reused_stages.clear()
+
+    def _on_progress_reused(self, stage: str) -> None:
+        # No spinner — nothing ran. Recorded so the idle label can say
+        # where the result came from once the chain settles.
+        self._reused_stages.add(stage)
+
     def _on_progress_finished(self) -> None:
-        self._progress_label.setText("")
+        if self._reused_stages:
+            nice = ", ".join(
+                self._STAGE_LABEL.get(s, s) for s in sorted(self._reused_stages)
+            )
+            self._progress_label.setText(f"Reused {nice} from run output")
+        else:
+            self._progress_label.setText("")
         self._progress_bar.setVisible(False)
         self._cancel_btn.setVisible(False)
 

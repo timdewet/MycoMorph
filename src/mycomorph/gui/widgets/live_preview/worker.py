@@ -71,6 +71,13 @@ class RenderRequest:
     # ``C0`` / ``C1``.
     channel_labels: Optional[list[str]] = None
 
+    # The pipeline's segmentation output directory (``02_segment``) for
+    # the current project, or ``None`` when no output dir is set. When
+    # the pipeline already segmented this sample with the options the
+    # preview is currently showing, the mask is read from here instead
+    # of re-running cellpose. See :meth:`PreviewWorker._try_disk_segment`.
+    segment_dir: Optional[Path] = None
+
     # Optional segmentation crop ``(x0, y0, x1, y1)`` in image pixel
     # coordinates. When set, segment / classify / features run only on
     # the cropped region; the resulting mask is padded back to the full
@@ -111,6 +118,10 @@ class SegmentPayload:
     key: tuple
     mask: np.ndarray
     n_cells: int
+    # True when the mask was read from the pipeline's 02_segment output
+    # rather than produced by a live cellpose run. Purely informational —
+    # the mask itself is what a live run at these options would produce.
+    reused: bool = False
 
 
 @dataclass
@@ -135,6 +146,11 @@ class PreviewWorker(QThread):
 
     # ``payload`` is one of the *Payload classes above.
     stageStarted = pyqtSignal(str)
+    # Emitted instead of ``stageStarted`` when a stage's result came off
+    # disk from a previous pipeline run — no work was done, so there's
+    # nothing to spin on, but the panel says so rather than leaving the
+    # user wondering why it was instant.
+    stageReused = pyqtSignal(str)
     stageFinished = pyqtSignal(str, object)
     stageFailed = pyqtSignal(str, str)        # stage_name, error_message
     chainFinished = pyqtSignal()
@@ -296,6 +312,13 @@ class PreviewWorker(QThread):
         if cached.segment_key == new_key and cached.mask is not None:
             return None
 
+        # Before paying for cellpose, see whether a previous pipeline run
+        # already segmented this exact FOV at these exact options.
+        disk_payload = self._try_disk_segment(new_key)
+        if disk_payload is not None:
+            self.stageReused.emit("segment")
+            return disk_payload
+
         self.stageStarted.emit("segment")
         from cellpose.models import CellposeModel
         from mycomorph.core.cellpose_pipeline import segment_phase
@@ -370,6 +393,88 @@ class PreviewWorker(QThread):
         else:
             mask = mask_local
         return SegmentPayload(key=new_key, mask=mask, n_cells=int(mask.max()))
+
+    def _try_disk_segment(self, new_key: tuple) -> Optional[SegmentPayload]:
+        """Load this FOV's mask from the pipeline's ``02_segment`` output.
+
+        Reuse is only sound when the run that wrote that mask used the
+        same inputs and options the preview is currently showing, so we
+        rebuild the exact :func:`checkpoint_signature` ``SegmentStage``
+        wrote alongside the artifact and compare digests. A match means a
+        live run would reproduce the stored mask, so serving it is a pure
+        speed-up; anything else (missing sidecar, changed options, edited
+        input file) falls through to cellpose.
+
+        Returns ``None`` on any miss — reuse is an optimisation, never a
+        correctness requirement, so no failure here is worth surfacing.
+        """
+        req = self._req
+        if req.segment_dir is None or not req.use_disk_focus:
+            # Raw-CZI previews focus in memory and were never written to
+            # disk, so there's no artifact whose signature could match.
+            return None
+        if req.roi is not None:
+            # An ROI segments a crop; cellpose scores a crop differently
+            # from the full frame the pipeline saw. Never reuse across it.
+            return None
+        if not isinstance(req.phase_channel, int):
+            # Signature includes the phase channel, so we need the
+            # resolved index rather than the "auto" sentinel.
+            return None
+
+        candidate = Path(req.segment_dir) / req.sample_path.name
+        if not candidate.exists():
+            return None
+
+        try:
+            from mycomorph.core.provenance import (
+                artifact_is_in_progress,
+                artifact_signature_matches,
+                checkpoint_signature,
+            )
+
+            if artifact_is_in_progress(candidate):
+                # A run is writing this file right now.
+                return None
+            signature = checkpoint_signature(
+                stage="segment",
+                input_path=req.sample_path,
+                options=req.segment_opts,
+                channels=req.channel_labels,
+                phase_channel=req.phase_channel,
+            )
+            if artifact_signature_matches(candidate, signature) is not True:
+                # False = different options; None = unsigned legacy
+                # artifact whose provenance we can't vouch for.
+                return None
+
+            from mycomorph.core.label_cells import load_hyperstack
+            data, _meta = load_hyperstack(candidate)
+            if req.fov_index >= data.shape[0]:
+                return None
+            mask = self._relabel_disk_mask(data[req.fov_index][-1])
+        except Exception:  # noqa: BLE001
+            return None
+
+        return SegmentPayload(
+            key=new_key, mask=mask, n_cells=int(mask.max()), reused=True,
+        )
+
+    @staticmethod
+    def _relabel_disk_mask(raw_mask: np.ndarray) -> np.ndarray:
+        """Turn a stored mask channel into unique integer cell IDs.
+
+        Segment writes a *binary* (0/255) mask for MicrobeJ compatibility,
+        so connected components have to be re-labelled before classify /
+        features can iterate cells. Mirrors what ``classify_filter_tiff``
+        does to the same input (api.py).
+        """
+        from skimage.measure import label as sk_label
+
+        unique_positive = np.unique(raw_mask[raw_mask > 0])
+        if len(unique_positive) <= 1:
+            return sk_label(raw_mask > 0, connectivity=1).astype(np.int32)
+        return raw_mask.astype(np.int32)
 
     def _maybe_run_classify(self, channels: np.ndarray, mask: np.ndarray
                             ) -> Optional[ClassifyPayload]:

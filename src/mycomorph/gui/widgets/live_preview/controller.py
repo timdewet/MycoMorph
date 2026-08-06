@@ -124,6 +124,9 @@ class ProgressSink:
     started: Callable[[str], None] = lambda _stage: None
     finished: Callable[[], None] = lambda: None
     failed: Callable[[str, str], None] = lambda _stage, _msg: None
+    # A stage was served from a previous run's output on disk instead of
+    # being recomputed. Fires in place of ``started`` for that stage.
+    reused: Callable[[str], None] = lambda _stage: None
 
 
 class PreviewController(QObject):
@@ -158,6 +161,10 @@ class PreviewController(QObject):
         self._tab: str = "segment"
         self._sample_path: Optional[Path] = None
         self._fov_index: int = 0
+        # The project's 02_segment directory, when one exists. Lets the
+        # worker skip cellpose for FOVs a previous run already segmented
+        # at the options currently showing in the panel.
+        self._segment_dir: Optional[Path] = None
         # Tracks foci scatter-layer names currently in use so a render
         # pass on the foci_det tab can wipe stale layers (e.g. when the
         # user unticks a detector mid-session).
@@ -197,6 +204,15 @@ class PreviewController(QObject):
         # to wait for the worker chain (cache hits → worker emits nothing).
         if tab in ("fluor_norm", "foci_det"):
             self._redraw_foci_overlays()
+
+    def set_segment_dir(self, path: Optional[Path]) -> None:
+        """Point the worker at the pipeline's ``02_segment`` output.
+
+        Doesn't force a render — the next one picks it up. Passing
+        ``None`` (no output dir, or the stage hasn't run) simply means
+        every preview segments live.
+        """
+        self._segment_dir = Path(path) if path is not None else None
 
     def request_render(self, reason: str = "") -> None:
         """Schedule a render, debounced; cancels any in-flight worker."""
@@ -298,6 +314,7 @@ class PreviewController(QObject):
             features_opts=self._opts.features_opts() if target == "features" else None,
             use_disk_focus=use_disk_focus,
             channel_labels=self._opts.channel_labels(),
+            segment_dir=self._segment_dir,
             roi=self._opts.roi(),
             cached_entry=self._cache.get(self._sample_path, self._fov_index),
         )
@@ -346,6 +363,7 @@ class PreviewController(QObject):
         # comes back. Detach so a new worker can start.
         try:
             self._worker.stageStarted.disconnect(self._on_stage_started)
+            self._worker.stageReused.disconnect(self._on_stage_reused)
             self._worker.stageFinished.disconnect(self._on_stage_finished)
             self._worker.stageFailed.disconnect(self._on_stage_failed)
             self._worker.chainFinished.disconnect(self._on_chain_finished)
@@ -358,6 +376,7 @@ class PreviewController(QObject):
     def _start_worker(self, request: RenderRequest) -> None:
         worker = PreviewWorker(request, parent=self)
         worker.stageStarted.connect(self._on_stage_started)
+        worker.stageReused.connect(self._on_stage_reused)
         worker.stageFinished.connect(self._on_stage_finished)
         worker.stageFailed.connect(self._on_stage_failed)
         worker.chainFinished.connect(self._on_chain_finished)
@@ -370,6 +389,9 @@ class PreviewController(QObject):
 
     def _on_stage_started(self, stage: str) -> None:
         self._progress.started(stage)
+
+    def _on_stage_reused(self, stage: str) -> None:
+        self._progress.reused(stage)
 
     def _on_stage_finished(self, stage: str, payload: object) -> None:
         # Land the result both in the cache and on the canvas.

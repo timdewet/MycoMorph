@@ -170,3 +170,72 @@ class TestExtractCellCrop:
         h, w = edge_touching_mask.shape
         assert 0 <= y_min < y_max <= h
         assert 0 <= x_min < x_max <= w
+
+
+# ── Classifier instance cache ──────────────────────────────────────────────
+#
+# Loading the CNN is a torch.load + load_state_dict + device transfer, and
+# both callers repeat it: `classify_filter_tiff` filters once per FOV, and
+# the live preview re-classifies on every option change. These pin the
+# cache's identity rules so stale weights can never be served.
+
+class _StubClassifier:
+    """Stands in for CellQualityClassifier so no real weights are needed."""
+
+    instances = 0
+
+    def __init__(self, model_path, in_channels, device=None):
+        _StubClassifier.instances += 1
+        self.model_path = model_path
+        self.in_channels = in_channels
+        self.device = device
+
+
+@pytest.fixture
+def stub_classifier(monkeypatch, tmp_path):
+    from mycomorph.core import cell_quality_classifier as cqc
+
+    _StubClassifier.instances = 0
+    monkeypatch.setattr(cqc, "CellQualityClassifier", _StubClassifier)
+    monkeypatch.setattr(cqc, "_CLASSIFIER_CACHE", {})
+    model = tmp_path / "model.pth"
+    model.write_bytes(b"weights-v1")
+    return cqc, model
+
+
+class TestClassifierCache:
+    def test_same_model_file_is_loaded_once(self, stub_classifier):
+        cqc, model = stub_classifier
+        first, first_lock = cqc._cached_classifier(model, 3)
+        second, second_lock = cqc._cached_classifier(model, 3)
+
+        assert first is second
+        assert first_lock is second_lock
+        assert _StubClassifier.instances == 1
+
+    def test_retrained_weights_at_the_same_path_reload(self, stub_classifier):
+        cqc, model = stub_classifier
+        first, _ = cqc._cached_classifier(model, 3)
+        model.write_bytes(b"weights-v2-which-is-longer")
+        second, _ = cqc._cached_classifier(model, 3)
+
+        assert first is not second
+        assert _StubClassifier.instances == 2
+
+    def test_channel_count_and_device_key_separately(self, stub_classifier):
+        cqc, model = stub_classifier
+        cqc._cached_classifier(model, 3)
+        cqc._cached_classifier(model, 4)
+        cqc._cached_classifier(model, 3, device="cpu")
+
+        assert _StubClassifier.instances == 3
+
+    def test_unfingerprintable_model_is_not_cached(self, stub_classifier, tmp_path):
+        """A missing file can't be identified, so never serve it from cache."""
+        cqc, _model = stub_classifier
+        missing = tmp_path / "gone.pth"
+        first, _ = cqc._cached_classifier(missing, 3)
+        second, _ = cqc._cached_classifier(missing, 3)
+
+        assert first is not second
+        assert cqc._CLASSIFIER_CACHE == {}
