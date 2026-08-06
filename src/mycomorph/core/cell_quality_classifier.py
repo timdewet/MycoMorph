@@ -22,6 +22,8 @@ Requirements:
     pip install torch torchvision numpy scikit-image scipy
 """
 
+import threading
+
 import numpy as np
 from pathlib import Path
 
@@ -441,6 +443,46 @@ class CellQualityClassifier:
         return class_indices, all_probs
 
 
+# Constructing a CellQualityClassifier means a torch.load + load_state_dict
+# + device transfer. Both callers pay that repeatedly for the same weights:
+# `classify_filter_tiff` calls the filter once per FOV, and the live preview
+# re-runs classification on every option change. Cache instances on the model
+# file's identity (path + mtime + size), so retraining to the same path
+# invalidates the entry without any explicit cache-busting.
+_CLASSIFIER_CACHE: dict[tuple, tuple] = {}
+_CLASSIFIER_CACHE_LOCK = threading.Lock()
+
+
+def _cached_classifier(model_path, in_channels, device=None):
+    """Return ``(classifier, inference_lock)`` for these weights.
+
+    The lock guards forward passes: cached instances are shared between
+    the pipeline's worker thread and the preview's, and a torch module is
+    only reliably re-entrant when nothing else is mid-forward on it.
+    """
+    model_path = Path(model_path)
+    try:
+        stat = model_path.stat()
+        key = (
+            str(model_path.resolve()), stat.st_mtime_ns, stat.st_size,
+            int(in_channels), str(device),
+        )
+    except OSError:
+        # Can't fingerprint it — build an uncached instance rather than
+        # risk handing back weights that no longer match the file.
+        return CellQualityClassifier(str(model_path), in_channels, device=device), threading.Lock()
+
+    with _CLASSIFIER_CACHE_LOCK:
+        entry = _CLASSIFIER_CACHE.get(key)
+        if entry is None:
+            entry = (
+                CellQualityClassifier(str(model_path), in_channels, device=device),
+                threading.Lock(),
+            )
+            _CLASSIFIER_CACHE[key] = entry
+        return entry
+
+
 # ── Main filtering API ────────────────────────────────────────────────────────
 
 def classify_and_filter_mask(
@@ -535,7 +577,7 @@ def classify_and_filter_mask(
 
         # 3 channels: phase + mask + area (area is derived from mask)
         in_channels = 3
-        clf = CellQualityClassifier(str(model_path), in_channels, device=device)
+        clf, clf_lock = _cached_classifier(model_path, in_channels, device=device)
 
         # Extract crops for remaining cells (phase + mask + true area)
         labels_list = sorted(remaining)
@@ -554,7 +596,8 @@ def classify_and_filter_mask(
                 )
 
         crops_array = np.stack(crops_list, axis=0)
-        class_indices, probabilities = clf.predict_batch(crops_array)
+        with clf_lock:
+            class_indices, probabilities = clf.predict_batch(crops_array)
 
         keep_indices = {CLASS_NAMES.index(c) for c in keep_classes if c in CLASS_NAMES}
         cnn_removed = 0

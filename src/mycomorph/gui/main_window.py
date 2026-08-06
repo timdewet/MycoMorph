@@ -1025,6 +1025,7 @@ class MainWindow(QMainWindow):
         )
         if out is None:
             self.live_preview.set_search_dirs([])
+            self.live_preview.set_segment_dir(None)
             self.label_train_panel.set_segment_dir(None)
             self.foci_det_panel.set_label_button_enabled(False)
             return
@@ -1036,6 +1037,10 @@ class MainWindow(QMainWindow):
         self.live_preview.set_search_dirs([d for d in candidates if d.exists()])
         seg_dir = out / "02_segment"
         self.label_train_panel.set_segment_dir(seg_dir if seg_dir.exists() else None)
+        # Same directory feeds the live preview, which reuses a stored
+        # mask whenever its provenance signature matches the options the
+        # user is currently previewing (skipping a cellpose run).
+        self.live_preview.set_segment_dir(seg_dir if seg_dir.exists() else None)
         # Enable the foci-label button if Foci Detection has produced output.
         foci_dir = out / "04c_foci_detection"
         has_foci = foci_dir.exists() and any(foci_dir.glob("*.parquet"))
