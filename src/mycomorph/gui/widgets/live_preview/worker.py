@@ -27,6 +27,8 @@ from .cache import (
     classify_key,
     disk_focus_key,
     features_key,
+    fluor_norm_channels_key,
+    foci_preview_key,
     segment_key,
 )
 
@@ -85,10 +87,32 @@ class RenderRequest:
     # with the displayed phase plane.
     roi: Optional[tuple[int, int, int, int]] = None
 
+    # Foci-tab options, snapshotted by the controller at request time
+    # (Qt widgets must never be touched from the worker thread).
+    # ``foci_tab`` is "fluor_norm" / "foci_det" when one of those tabs
+    # is active, else None — it gates the FOCI side-stage: fluor_norm
+    # computes only the normalised channel stack, foci_det additionally
+    # runs detection + per-focus features.
+    foci_tab: Optional[str] = None
+    fluor_norm_opts: Any = None
+    foci_det_opts: Any = None
+
     # The cache entry currently associated with (sample, fov). The
     # worker reads its `*_key` fields to decide which stages can be
     # skipped, but never mutates it.
     cached_entry: CacheEntry = field(default_factory=CacheEntry)
+
+
+def target_fluor_channels(image_channels, opts, phase_idx: int) -> list[int]:
+    """Every fluor channel the foci detector should run on. Respects
+    ``apply_to_channels`` when the user has narrowed the list; otherwise
+    every channel that isn't phase. Order matches the user's selection
+    (or natural channel order) so palette colours stay stable."""
+    apply_to = list(getattr(opts, "apply_to_channels", None) or [])
+    n_ch = image_channels.shape[0]
+    if not apply_to:
+        return [c for c in range(n_ch) if c != phase_idx]
+    return [c for c in apply_to if 0 <= c < n_ch and c != phase_idx]
 
 
 # Order in which stages execute and the names emitted on signals.
@@ -134,6 +158,24 @@ class ClassifyPayload:
 class FeaturesPayload:
     key: tuple
     df: Any  # pandas DataFrame; kept untyped to avoid the import here
+
+
+@dataclass
+class FociPayload:
+    """Foci-tab post-processing computed on the worker thread.
+
+    ``norm_channels``/``norm_key`` carry the normalised channel stack
+    the detector ran on (``None`` when normalisation is pass-through or
+    already cached). ``df``/``foci_key`` carry the per-focus features
+    DataFrame (``foci_key is None`` when detection didn't run — the
+    fluor_norm tab, or a detection cache hit).
+    """
+
+    norm_key: Optional[tuple] = None
+    norm_channels: Optional[np.ndarray] = None
+    foci_key: Optional[tuple] = None
+    df: Any = None
+    det_key: str = ""
 
 
 class PreviewWorker(QThread):
@@ -217,6 +259,26 @@ class PreviewWorker(QThread):
             if seg_payload is not None:
                 self.stageFinished.emit("segment", seg_payload)
             mask = self._resolve_mask(seg_payload)
+
+            # FOCI (fluor-norm / foci-det tabs) ───────────────────────
+            # Side-branch, not part of STAGE_ORDER: normalise the fluor
+            # channels and (on the foci_det tab) run detection +
+            # per-focus features. Runs here — on the worker thread — so
+            # the GUI never stalls on RL/BM3D or a slow detector. A
+            # failure is reported but doesn't abort the rest of the
+            # chain (classification can still land).
+            if req.foci_tab is not None and channels is not None:
+                self._check_cancel()
+                try:
+                    foci_payload = self._maybe_run_foci(channels, mask)
+                except CancelledError:
+                    raise
+                except Exception as exc:  # noqa: BLE001
+                    self.stageFailed.emit("foci", str(exc))
+                    foci_payload = None
+                if foci_payload is not None:
+                    self.stageFinished.emit("foci", foci_payload)
+
             if target == 1:
                 self.chainFinished.emit()
                 return
@@ -253,6 +315,168 @@ class PreviewWorker(QThread):
             self.cancelled.emit()
 
     # ------------------------------------------------------------ stages
+
+    def _current_focus_key(self):
+        """The focus key for this render — the cached one, or re-derived
+        when focus was just produced this pass (the controller writes it
+        to the cache only when the payload lands)."""
+        req = self._req
+        if req.cached_entry.focus_key is not None:
+            return req.cached_entry.focus_key
+        if req.use_disk_focus:
+            return disk_focus_key(
+                req.sample_path, req.fov_index, req.phase_channel,
+            )
+        from .cache import focus_key as _fk
+        return _fk(
+            req.sample_path, req.fov_index, req.focus_opts, req.phase_channel,
+        )
+
+    def _current_segment_key(self):
+        req = self._req
+        return segment_key(
+            self._current_focus_key(), req.segment_opts,
+            req.phase_channel, req.roi,
+        )
+
+    def _apply_fluor_norm(self, channels: np.ndarray, announce) -> Optional[np.ndarray]:
+        """Normalised copy of ``channels`` per the request's fluor-norm
+        opts, or ``None`` when normalisation is pass-through (method
+        'none' / not configured, or a run-level-fit method like BaSiC
+        that a single-FOV preview can't fit). ``announce`` is called
+        right before real work starts so cheap pass-throughs don't
+        flash a stage spinner."""
+        req = self._req
+        opts = req.fluor_norm_opts
+        if opts is None:
+            return None
+        method = getattr(opts, "method", "none")
+        if method in ("", "none"):
+            return None
+        from mycomorph.core.foci.normalise import (
+            NormaliserOpts, build, requires_run_level_fit,
+        )
+        if requires_run_level_fit(method):
+            return None
+        norm_opts = NormaliserOpts(
+            tophat_radius_px=getattr(opts, "tophat_radius_px", 5),
+            gaussian_lp_sigma=getattr(opts, "gaussian_lp_sigma", None),
+            rl_iterations=getattr(opts, "rl_iterations", 30),
+            rl_psf_sigma=getattr(opts, "rl_psf_sigma", 1.5),
+            bm3d_sigma=getattr(opts, "bm3d_sigma", None),
+        )
+        try:
+            normaliser = build(method, norm_opts)
+        except Exception:  # noqa: BLE001
+            return None
+        phase_idx = (
+            req.phase_channel if isinstance(req.phase_channel, int) else 0
+        )
+        apply_to = list(getattr(opts, "apply_to_channels", None) or [])
+        n_ch = channels.shape[0]
+        if not apply_to:
+            apply_to = [c for c in range(n_ch) if c != phase_idx]
+        announce()
+        out = np.array(channels, dtype=np.float32, copy=True)
+        for c in apply_to:
+            if not (0 <= c < n_ch):
+                continue
+            self._check_cancel()
+            try:
+                out[c] = normaliser.apply(channels[c])
+            except Exception:  # noqa: BLE001
+                pass
+        return out
+
+    def _maybe_run_foci(
+        self, channels: np.ndarray, mask: Optional[np.ndarray],
+    ) -> Optional[FociPayload]:
+        """Foci-tab side stage: normalised channel stack plus (foci_det
+        tab only) detection + per-focus features. Cache-aware on both
+        pieces; returns ``None`` when everything was already cached."""
+        req = self._req
+        cached = req.cached_entry
+        phase_idx = (
+            req.phase_channel if isinstance(req.phase_channel, int) else 0
+        )
+        payload = FociPayload()
+
+        announced = False
+
+        def announce() -> None:
+            nonlocal announced
+            if not announced:
+                self.stageStarted.emit("foci")
+                announced = True
+
+        # 1. Normalised channels — both foci tabs display them; the
+        #    detector runs on them when present.
+        norm_key = fluor_norm_channels_key(
+            self._current_focus_key(), req.fluor_norm_opts,
+            channels.shape[0], phase_idx,
+        )
+        if cached.norm_key == norm_key and cached.norm_channels is not None:
+            norm = cached.norm_channels
+        else:
+            norm = self._apply_fluor_norm(channels, announce)
+            if norm is not None:
+                payload.norm_key = norm_key
+                payload.norm_channels = norm
+
+        # 2. Detection — foci_det tab only, and only with a mask.
+        det_bundle = req.foci_det_opts
+        detector_keys = (
+            list(getattr(det_bundle, "detector_keys", []) or [])
+            if det_bundle is not None else []
+        )
+        if req.foci_tab != "foci_det" or mask is None or not detector_keys:
+            return payload if payload.norm_key is not None else None
+
+        from mycomorph.core.foci._types import DetectorOpts as _DO
+        from mycomorph.core.foci.detectors import REGISTRY as DET_REGISTRY
+
+        det_key = str(detector_keys[0])
+        det_opts = getattr(det_bundle, "detector_opts", None) or _DO()
+        targets = target_fluor_channels(channels, det_bundle, phase_idx)
+        new_key = foci_preview_key(
+            self._current_segment_key(), det_key, tuple(targets),
+            det_opts, req.fluor_norm_opts,
+        )
+        if not targets or det_key not in DET_REGISTRY:
+            # Deliver an explicitly-empty result so stale scatter clears.
+            payload.foci_key = new_key
+            payload.det_key = det_key
+            return payload
+        if cached.foci_key == new_key and cached.foci_df is not None:
+            return payload if payload.norm_key is not None else None
+
+        announce()
+        import pandas as pd  # noqa: PLC0415
+        from mycomorph.core.foci.features import features_dataframe
+
+        det_input = norm if norm is not None else channels
+        per_channel: list = []
+        for ch in targets:
+            self._check_cancel()
+            detector = DET_REGISTRY[det_key]()
+            image = det_input[ch]
+            foci = detector.detect(image, mask, det_opts)
+            if getattr(det_opts, "split_merged", False):
+                from mycomorph.core.foci.decompose import split_merged_foci
+                foci = split_merged_foci(
+                    image, foci, det_opts, labeled_mask=mask,
+                )
+            df_ch = features_dataframe(image, mask, foci, detector=det_key)
+            if not df_ch.empty:
+                df_ch["channel_index"] = int(ch)
+            per_channel.append(df_ch)
+        payload.foci_key = new_key
+        payload.df = (
+            pd.concat(per_channel, ignore_index=True)
+            if per_channel else pd.DataFrame()
+        )
+        payload.det_key = det_key
+        return payload
 
     def _maybe_run_focus(self) -> Optional[FocusPayload]:
         """Phase 2: load the focused image from disk if not cached."""

@@ -30,10 +30,12 @@ from PyQt6.QtCore import QObject, QTimer, pyqtSignal
 from .cache import (
     CacheEntry,
     PreviewCache,
+    fluor_norm_channels_key,
 )
 from .worker import (
     ClassifyPayload,
     FeaturesPayload,
+    FociPayload,
     FocusPayload,
     PreviewWorker,
     RenderRequest,
@@ -303,6 +305,11 @@ class PreviewController(QObject):
         # the first time focus loads channels for a given sample.
         raw_phase = self._opts.phase_channel()
         phase_channel: Any = raw_phase if isinstance(raw_phase, (int, str)) else None
+        # Foci-tab work (normalisation + detection) runs on the worker
+        # thread — snapshot the panel opts here, on the GUI thread.
+        foci_tab = (
+            self._tab if self._tab in ("fluor_norm", "foci_det") else None
+        )
         return RenderRequest(
             sample_path=self._sample_path,
             fov_index=self._fov_index,
@@ -316,8 +323,23 @@ class PreviewController(QObject):
             channel_labels=self._opts.channel_labels(),
             segment_dir=self._segment_dir,
             roi=self._opts.roi(),
+            foci_tab=foci_tab,
+            fluor_norm_opts=(
+                self._opts.fluor_norm_opts() if foci_tab is not None else None
+            ),
+            foci_det_opts=(
+                self._opts.foci_det_opts() if foci_tab == "foci_det" else None
+            ),
             cached_entry=self._cache.get(self._sample_path, self._fov_index),
         )
+
+    def _entry_phase_index(self, entry: CacheEntry) -> int:
+        """Phase-channel index for canvas rendering, from the cached
+        entry's resolved value with the InputPanel value as fallback."""
+        if entry.resolved_phase_channel is not None:
+            return int(entry.resolved_phase_channel)
+        raw = self._opts.phase_channel()
+        return raw if isinstance(raw, int) else 0
 
     def _effective_phase_index(self, payload: FocusPayload) -> int:
         """Pick the phase channel index to use for canvas rendering.
@@ -407,7 +429,7 @@ class PreviewController(QObject):
                 entry.resolved_phase_channel = int(payload.resolved_phase_channel)
             self._canvas.set_phase(payload.phase)
             self._canvas.set_image_channels(
-                self._channels_for_canvas(entry.image_channels),
+                self._channels_for_canvas(entry),
                 payload.channel_names or [],
                 # Prefer the worker-resolved index (correct when the
                 # InputPanel is set to "auto"), falling back to whatever
@@ -419,13 +441,31 @@ class PreviewController(QObject):
             entry.mask = payload.mask
             entry.n_cells = payload.n_cells
             self._canvas.set_mask(payload.mask, entry.decisions)
-            # Foci detection runs on the main thread after segment because
-            # it needs both the fluorescence channels and the labeled
-            # mask. Cheap for ``dog``/``log``/``wavelet``; can be sluggish
-            # for ``decon_bm3d_wavelet`` on big FOVs — the
-            # user toggles detectors in the panel to manage cost.
-            if self._tab == "foci_det":
-                self._run_foci_detection_preview(entry)
+            # Foci detection now runs on the worker thread (the chain's
+            # foci side-stage) — its FociPayload lands separately.
+        elif isinstance(payload, FociPayload):
+            if payload.norm_key is not None and payload.norm_channels is not None:
+                # A normalised stack is tens of MB — keep at most one
+                # FOV's copy alive across the cache.
+                for other in self._cache._entries.values():
+                    if other is not entry:
+                        other.norm_key = None
+                        other.norm_channels = None
+                entry.norm_key = payload.norm_key
+                entry.norm_channels = payload.norm_channels
+                self._canvas.set_image_channels(
+                    self._channels_for_canvas(entry),
+                    entry.channel_names or [],
+                    self._entry_phase_index(entry),
+                )
+            if payload.foci_key is not None:
+                entry.foci_key = payload.foci_key
+                entry.foci_df = payload.df
+                self._canvas.set_foci_features(entry.foci_df)
+                if payload.df is None or payload.det_key == "":
+                    self._wipe_all_foci_layers()
+                else:
+                    self._paint_scatter_from_cache(entry, payload.det_key)
         elif isinstance(payload, ClassifyPayload):
             entry.classify_key = payload.key
             entry.decisions = payload.decisions
@@ -440,173 +480,55 @@ class PreviewController(QObject):
     # Foci-stages preview: post-processing after the worker chain lands
     # ─────────────────────────────────────────────────────────────────
 
-    def _channels_for_canvas(self, image_channels):
+    def _channels_for_canvas(self, entry: CacheEntry):
         """Return the channel stack to display on the canvas.
 
-        On the ``fluor_norm`` AND ``foci_det`` tabs we substitute each
-        fluorescence channel with its normalised version — so the foci
-        detector sees (and the user sees) the same image the full
-        pipeline will run detection against. On every other tab we pass
-        the raw channels straight through. Phase + mask are never
-        touched. Every selected fluor channel is normalised, not just
-        the first — so multi-channel foci detection stays consistent.
+        On the ``fluor_norm`` AND ``foci_det`` tabs the fluorescence
+        channels are shown normalised — the same input the foci detector
+        ran on. The normalised stack itself is computed by the worker's
+        foci side-stage (RL/BM3D take seconds — never on the GUI
+        thread); this is a read-only cache lookup that serves it when it
+        matches the CURRENT options, and the raw channels otherwise (the
+        in-flight render repaints once the fresh stack lands).
         """
+        image_channels = entry.image_channels
         if image_channels is None or self._tab not in (
             "fluor_norm", "foci_det",
         ):
             return image_channels
-        opts = self._opts.fluor_norm_opts()
-        if opts is None:
+        if entry.norm_channels is None or entry.focus_key is None:
             return image_channels
-        method = getattr(opts, "method", "none")
-        if method in ("", "none"):
-            return image_channels
-        try:
-            from mycomorph.core.foci.normalise import (
-                NormaliserOpts, build, requires_run_level_fit,
-            )
-        except Exception:  # noqa: BLE001
-            return image_channels
-        if requires_run_level_fit(method):
-            # BaSiC needs every FOV of a channel to fit; single-FOV
-            # preview can't do that. Show raw and let the user pick a
-            # per-FOV method to iterate on.
-            return image_channels
-
-        norm_opts = NormaliserOpts(
-            tophat_radius_px=getattr(opts, "tophat_radius_px", 5),
-            gaussian_lp_sigma=getattr(opts, "gaussian_lp_sigma", None),
-            rl_iterations=getattr(opts, "rl_iterations", 30),
-            rl_psf_sigma=getattr(opts, "rl_psf_sigma", 1.5),
-            bm3d_sigma=getattr(opts, "bm3d_sigma", None),
+        expected = fluor_norm_channels_key(
+            entry.focus_key,
+            self._opts.fluor_norm_opts(),
+            image_channels.shape[0],
+            self._entry_phase_index(entry),
         )
-        import numpy as np  # noqa: PLC0415 — kept lazy with the foci import
-        try:
-            normaliser = build(method, norm_opts)
-        except Exception:  # noqa: BLE001
-            return image_channels
-        # Channel indices: skip phase (and don't touch the mask if it
-        # ever lands here — image_channels at this stage is C×Y×X with
-        # no mask appended yet, but be defensive).
-        phase_idx = self._opts.phase_channel()
-        phase_idx = int(phase_idx) if isinstance(phase_idx, int) else 0
-        apply_to = getattr(opts, "apply_to_channels", None) or []
-        n_ch = image_channels.shape[0]
-        if not apply_to:
-            apply_to = [c for c in range(n_ch) if c != phase_idx]
-        out = np.array(image_channels, dtype=np.float32, copy=True)
-        for c in apply_to:
-            if not (0 <= c < n_ch):
-                continue
-            try:
-                out[c] = normaliser.apply(image_channels[c])
-            except Exception:  # noqa: BLE001
-                pass
-        return out
+        if entry.norm_key == expected:
+            return entry.norm_channels
+        return image_channels
 
-    def _run_foci_detection_preview(self, entry: CacheEntry) -> None:
-        """Detect foci on the visible fluor channel and cache the
-        features DataFrame on the cache entry. Then push the features
-        to the panel (for inline histograms) and run the threshold
-        filter to draw the scatter layer.
+    def _paint_foci_from_cache(self, entry: CacheEntry) -> None:
+        """Paint the foci-tab overlays from the entry's cached detection.
 
-        Cache key: detector + opts + channel + fluor-norm opts +
-        upstream segment key. A threshold drag does NOT invalidate this
-        cache — :meth:`apply_thresholds_only` re-uses the cached
-        DataFrame and skips detection.
+        Pure repaint — detection itself runs on the worker thread (the
+        chain's foci side-stage) and lands via FociPayload. Called on
+        tab arrival and after the chain settles so cache hits (where the
+        worker emits nothing) still paint. A stale cached DataFrame may
+        paint briefly while a render is in flight; the FociPayload
+        repaints when the fresh one lands.
         """
         opts = self._opts.foci_det_opts()
-        if opts is None or entry.image_channels is None or entry.mask is None:
-            self._canvas.clear_foci_layers()
-            self._canvas.set_foci_features(None)
-            return
-
-        detector_keys = list(getattr(opts, "detector_keys", []) or [])
-        if not detector_keys:
-            self._canvas.clear_foci_layers()
-            self._canvas.set_foci_features(None)
-            entry.foci_df = None
-            entry.foci_key = None
-            return
-        det_key = str(detector_keys[0])  # single-detector GUI
-
-        try:
-            from mycomorph.core.foci.detectors import REGISTRY as DET_REGISTRY
-            from mycomorph.core.foci._types import DetectorOpts as _DO
-            from mycomorph.core.foci.features import features_dataframe
-        except Exception:  # noqa: BLE001
-            return
-
-        phase_idx = self._opts.phase_channel()
-        phase_idx = int(phase_idx) if isinstance(phase_idx, int) else 0
-        target_channels = self._target_fluor_channels(
-            entry.image_channels, opts, phase_idx,
+        detector_keys = (
+            list(getattr(opts, "detector_keys", []) or [])
+            if opts is not None else []
         )
-        if not target_channels:
+        if not detector_keys or entry.foci_df is None:
             self._wipe_all_foci_layers()
             self._canvas.set_foci_features(None)
             return
-
-        # Optionally apply the fluor-norm preview transform first so
-        # detectors see the same input they would in the full pipeline.
-        channels = self._channels_for_canvas(entry.image_channels)
-        mask = entry.mask
-        det_opts = getattr(opts, "detector_opts", None) or _DO()
-
-        # Cache miss → run detection + features on every selected channel
-        # and stack the results. Otherwise re-use the cached DataFrame so
-        # threshold-only changes are instant.
-        from .cache import foci_preview_key
-        seg_k = entry.segment_key
-        fluor_opts = self._opts.fluor_norm_opts()
-        new_key = foci_preview_key(
-            seg_k, det_key, tuple(target_channels), det_opts, fluor_opts,
-        )
-        if entry.foci_key != new_key or entry.foci_df is None:
-            if det_key not in DET_REGISTRY:
-                entry.foci_df = None
-                entry.foci_key = new_key
-                self._wipe_all_foci_layers()
-                self._canvas.set_foci_features(None)
-                return
-            try:
-                import pandas as pd  # noqa: PLC0415
-                per_channel: list = []
-                for ch in target_channels:
-                    detector = DET_REGISTRY[det_key]()
-                    image = channels[ch]
-                    foci = detector.detect(image, mask, det_opts)
-                    if getattr(det_opts, "split_merged", False):
-                        from mycomorph.core.foci.decompose import (
-                            split_merged_foci,
-                        )
-                        foci = split_merged_foci(
-                            image, foci, det_opts, labeled_mask=mask,
-                        )
-                    df_ch = features_dataframe(
-                        image, mask, foci, detector=det_key,
-                    )
-                    if not df_ch.empty:
-                        df_ch["channel_index"] = int(ch)
-                    per_channel.append(df_ch)
-                df = (
-                    pd.concat(per_channel, ignore_index=True)
-                    if per_channel else pd.DataFrame()
-                )
-            except Exception:  # noqa: BLE001
-                entry.foci_df = None
-                entry.foci_key = new_key
-                self._wipe_all_foci_layers()
-                self._canvas.set_foci_features(None)
-                return
-            entry.foci_df = df
-            entry.foci_key = new_key
-
-        # Push pooled features to the panel histograms (across channels).
         self._canvas.set_foci_features(entry.foci_df)
-
-        # Filter + paint scatter (one layer per channel).
-        self._paint_scatter_from_cache(entry, det_key)
+        self._paint_scatter_from_cache(entry, str(detector_keys[0]))
 
     # Fallback palette used only when a channel has no display label
     # (so we can't infer its colour from the name). Picked to be
@@ -725,20 +647,6 @@ class PreviewController(QObject):
             return
         self._paint_scatter_from_cache(entry, str(keys[0]))
 
-    @staticmethod
-    def _target_fluor_channels(
-        image_channels, opts, phase_idx: int,
-    ) -> list[int]:
-        """Every fluor channel the detector should run on. Respects
-        ``apply_to_channels`` when the user has narrowed the list;
-        otherwise returns every channel that isn't phase. Order matches
-        the user's selection (or natural channel order) so palette
-        colours stay stable across renders."""
-        apply_to = list(getattr(opts, "apply_to_channels", None) or [])
-        n_ch = image_channels.shape[0]
-        if not apply_to:
-            return [c for c in range(n_ch) if c != phase_idx]
-        return [c for c in apply_to if 0 <= c < n_ch and c != phase_idx]
 
     def _on_stage_failed(self, stage: str, msg: str) -> None:
         self._progress.failed(stage, msg)
@@ -779,12 +687,12 @@ class PreviewController(QObject):
                 )
             )
             self._canvas.set_image_channels(
-                self._channels_for_canvas(entry.image_channels),
+                self._channels_for_canvas(entry),
                 entry.channel_names or [],
                 int(phase_idx),
             )
-        if self._tab == "foci_det" and entry.mask is not None:
-            self._run_foci_detection_preview(entry)
+        if self._tab == "foci_det":
+            self._paint_foci_from_cache(entry)
         elif self._tab == "fluor_norm":
             # Make sure stale foci scatter doesn't linger.
             self._canvas.clear_foci_layers()

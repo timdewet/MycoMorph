@@ -48,13 +48,35 @@ def suppress_close_foci(foci: list[Focus], min_dist: float) -> list[Focus]:
     """
     if len(foci) <= 1:
         return list(foci)
+    from scipy.spatial import cKDTree
+
+    # Greedy NMS via KD-tree adjacency (O(n log n) instead of the naive
+    # O(n²) pairwise scan): walking candidates brightest-first, keeping
+    # one suppresses its neighbours — identical output to checking each
+    # candidate against the kept list.
+    pts = np.array([[f.y, f.x] for f in foci], dtype=np.float64)
+    pairs = cKDTree(pts).query_pairs(float(min_dist), output_type="ndarray")
+    if pairs.size:
+        # query_pairs includes distance == min_dist; the suppression
+        # criterion is strictly-less-than, so drop boundary-equal pairs.
+        d2 = ((pts[pairs[:, 0]] - pts[pairs[:, 1]]) ** 2).sum(axis=1)
+        pairs = pairs[d2 < float(min_dist) ** 2]
+    adjacency: dict[int, list[int]] = {}
+    for a, b in pairs:
+        adjacency.setdefault(int(a), []).append(int(b))
+        adjacency.setdefault(int(b), []).append(int(a))
+
+    order = sorted(
+        range(len(foci)), key=lambda i: foci[i].intensity, reverse=True,
+    )
+    suppressed = np.zeros(len(foci), dtype=bool)
     kept: list[Focus] = []
-    for f in sorted(foci, key=lambda f: f.intensity, reverse=True):
-        if all(
-            (f.y - k.y) ** 2 + (f.x - k.x) ** 2 >= min_dist ** 2
-            for k in kept
-        ):
-            kept.append(f)
+    for i in order:
+        if suppressed[i]:
+            continue
+        kept.append(foci[i])
+        for j in adjacency.get(i, ()):
+            suppressed[j] = True
     return kept
 
 
@@ -197,6 +219,16 @@ def build_focus(
     has already done its own fit, like trackpy).
     """
     if refine:
+        # Cheap pre-gate before the (comparatively expensive) Gaussian
+        # fit: permissive detectors hand us thousands of noise candidates
+        # that sit far below the SNR floor, and fitting every one of them
+        # dominates detection time. Refinement only nudges the peak by a
+        # pixel or two, so a candidate at less than half the floor never
+        # climbs past it — gate at 0.5× to keep borderline candidates on
+        # the accurate (post-fit) path.
+        if snr_min > 0.0:
+            if local_snr(image, y0, x0, init_sigma) < 0.5 * snr_min:
+                return None
         y_sub, x_sub, sigma_fit, amp = refine_gaussian_peak(
             image, y0, x0, half_window=refine_window, init_sigma=init_sigma,
         )
