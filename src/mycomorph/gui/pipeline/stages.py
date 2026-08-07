@@ -985,6 +985,7 @@ class FociDetectionStage:
 
     def run(self, ctx, progress_cb: ProgressCB) -> list[Path]:
         import pandas as pd
+        from mycomorph.core.foci.decompose import split_merged_foci
         from mycomorph.core.foci.detectors import REGISTRY as DETECTOR_REGISTRY
         from mycomorph.core.foci.features import features_dataframe
         from mycomorph.core.label_cells import (
@@ -1064,6 +1065,11 @@ class FociDetectionStage:
                     for det_key in detector_keys:
                         detector = DETECTOR_REGISTRY[det_key]()
                         foci = detector.detect(image, labeled_mask, det_opts)
+                        if det_opts.split_merged:
+                            foci = split_merged_foci(
+                                image, foci, det_opts,
+                                labeled_mask=labeled_mask,
+                            )
                         # Stable focus_id per (well, fov, channel, detector).
                         for fid, f in enumerate(foci):
                             f.focus_id = fid

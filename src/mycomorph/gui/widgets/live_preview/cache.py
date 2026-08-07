@@ -157,8 +157,13 @@ def foci_preview_key(
         getattr(det_opts, "snr_min", None),
         getattr(det_opts, "refine", None),
         getattr(det_opts, "trackpy_diameter_px", None),
+        getattr(det_opts, "trackpy_minmass", None),
         getattr(det_opts, "wavelet_scales", None),
         getattr(det_opts, "wavelet_threshold_mad", None),
+        getattr(det_opts, "hmax_h_mad", None),
+        getattr(det_opts, "rs_threshold_mad", None),
+        getattr(det_opts, "split_merged", None),
+        getattr(det_opts, "split_min_improvement", None),
         # Fluor-norm opts that change the input image the detector sees.
         getattr(fluor_norm_opts, "method", None),
         getattr(fluor_norm_opts, "tophat_radius_px", None),

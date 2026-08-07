@@ -44,7 +44,7 @@ profiling = [
 # so installing only the subset you need (e.g. just ``bm3d``) works too.
 foci = [
     "bm3d",                                          # BM3D denoising
-    "trackpy",                                       # radial-symmetry detector
+    "trackpy",                                       # Crocker–Grier centroid detector
     "basicpy",                                       # BaSiC flat-field correction
 ]
 test = [

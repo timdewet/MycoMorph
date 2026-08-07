@@ -576,6 +576,13 @@ class PreviewController(QObject):
                     detector = DET_REGISTRY[det_key]()
                     image = channels[ch]
                     foci = detector.detect(image, mask, det_opts)
+                    if getattr(det_opts, "split_merged", False):
+                        from mycomorph.core.foci.decompose import (
+                            split_merged_foci,
+                        )
+                        foci = split_merged_foci(
+                            image, foci, det_opts, labeled_mask=mask,
+                        )
                     df_ch = features_dataframe(
                         image, mask, foci, detector=det_key,
                     )

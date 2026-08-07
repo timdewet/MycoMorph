@@ -38,6 +38,41 @@ def normalise_image(image: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.9) ->
     return np.clip(out, 0.0, 1.0)
 
 
+def suppress_close_foci(foci: list[Focus], min_dist: float) -> list[Focus]:
+    """Greedy near-duplicate suppression — the brightest focus wins and
+    anything within ``min_dist`` of an already-kept focus is dropped.
+
+    Sub-pixel refinement can converge two nearby candidates onto (almost)
+    the same peak, e.g. both flanks of an unresolved doublet; run this
+    *after* refinement to collapse them back into one detection.
+    """
+    if len(foci) <= 1:
+        return list(foci)
+    kept: list[Focus] = []
+    for f in sorted(foci, key=lambda f: f.intensity, reverse=True):
+        if all(
+            (f.y - k.y) ** 2 + (f.x - k.x) ** 2 >= min_dist ** 2
+            for k in kept
+        ):
+            kept.append(f)
+    return kept
+
+
+def robust_sigma_mad(image: np.ndarray) -> float:
+    """Robust noise-σ estimate via median absolute deviation.
+
+    The 1.4826 factor makes the MAD consistent with the standard
+    deviation for Gaussian noise. Insensitive to the bright foci pixels
+    that would inflate a plain ``std``.
+    """
+    flat = np.asarray(image, dtype=np.float64).ravel()
+    if flat.size == 0:
+        return 0.0
+    med = float(np.median(flat))
+    mad = float(np.median(np.abs(flat - med)))
+    return 1.4826 * mad
+
+
 def _gaussian_2d(coords, amp, x0, y0, sigma, offset):
     x, y = coords
     return offset + amp * np.exp(-(((x - x0) ** 2 + (y - y0) ** 2) / (2.0 * sigma * sigma)))
