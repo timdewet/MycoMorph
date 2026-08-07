@@ -848,11 +848,26 @@ class FluorescentNormalisationPanel(QWidget):
 class FociDetectionPanel(QWidget):
     """Options for the Foci Detection stage.
 
-    Multi-select list of detector keys (grouped by family) plus shared
-    DetectorOpts knobs (sigma range, threshold, SNR floor) and a channel
-    multi-select. The "Label foci…" button opens the FociLabelDialog when
-    a Foci-Detection run has already produced parquet output.
+    Single-select list of detector keys (grouped by family) plus
+    DetectorOpts knobs shown per detector (each key surfaces only the
+    parameters it actually consumes) and a channel multi-select. The
+    "Label foci…" button opens the FociLabelDialog when a Foci-Detection
+    run has already produced parquet output.
     """
+
+    # Detector key → parameter-row keys to show. The SNR floor, the
+    # refinement toggle and the merged-pair splitter apply to every
+    # detector and stay visible. Unknown keys show all rows.
+    _DETECTOR_PARAMS: dict[str, list[str]] = {
+        "dog":             ["min_sigma", "max_sigma", "threshold"],
+        "log":             ["min_sigma", "max_sigma", "threshold"],
+        "trackpy":         ["trackpy_diameter_px", "trackpy_minmass"],
+        "hmax":            ["min_sigma", "hmax_h_mad"],
+        "wavelet":         ["min_sigma", "wavelet_scales",
+                            "wavelet_threshold_mad"],
+        "radial_symmetry": ["min_sigma", "rs_threshold_mad"],
+        "bacteroidal":     ["min_sigma"],
+    }
 
     optionsChanged = pyqtSignal()
     labelRequested = pyqtSignal()
@@ -897,8 +912,10 @@ class FociDetectionPanel(QWidget):
         det_layout.addWidget(self.detectors)
         cap = QLabel(
             "Pick one detector. `wavelet` is a strong default for dim signal; "
-            "`dog` / `log` are faster baselines. Normalisation has already "
-            "been applied upstream by the Fluorescent Normalisation stage."
+            "`dog` / `log` are faster baselines; `hmax` mirrors Fiji's Find "
+            "Maxima prominence; `radial_symmetry` gives the best sub-pixel "
+            "centres on dim round foci. Normalisation has already been "
+            "applied upstream by the Fluorescent Normalisation stage."
         )
         cap.setObjectName("caption")
         cap.setStyleSheet(
@@ -909,7 +926,7 @@ class FociDetectionPanel(QWidget):
         det_layout.addWidget(cap)
         root.addWidget(det_box)
 
-        opt_box = QGroupBox("Detector parameters (shared)")
+        opt_box = QGroupBox("Detector parameters")
         form = QFormLayout(opt_box)
         form.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
         form.setHorizontalSpacing(tokens.S4)
@@ -923,25 +940,113 @@ class FociDetectionPanel(QWidget):
         self.min_sigma.setDecimals(2)
         self.min_sigma.setSingleStep(0.1)
         self.min_sigma.setValue(defaults.min_sigma)
-        form.addRow("min σ (px):", self.min_sigma)
+        self.min_sigma.setToolTip(
+            "Blob-scale lower bound for DoG/LoG; elsewhere sets the "
+            "minimum peak spacing (2·σ) and the refinement seed."
+        )
+        self._row_min_sigma = QLabel("min σ (px):")
+        form.addRow(self._row_min_sigma, self.min_sigma)
 
         self.max_sigma = QDoubleSpinBox()
         self.max_sigma.setRange(0.1, 50.0)
         self.max_sigma.setDecimals(2)
         self.max_sigma.setSingleStep(0.1)
         self.max_sigma.setValue(defaults.max_sigma)
-        form.addRow("max σ (px):", self.max_sigma)
+        self._row_max_sigma = QLabel("max σ (px):")
+        form.addRow(self._row_max_sigma, self.max_sigma)
 
         self.threshold = QDoubleSpinBox()
         self.threshold.setRange(0.0, 1.0)
         self.threshold.setDecimals(4)
         self.threshold.setSingleStep(0.001)
         self.threshold.setValue(defaults.threshold)
-        form.addRow("Threshold:", _with_helper(
+        self._row_threshold = QLabel("Threshold:")
+        self._threshold_wrap = _with_helper(
             self.threshold,
             "Relative intensity threshold on the normalised image (0–1). "
             "Lower → more permissive (more false positives, easier to filter).",
-        ))
+        )
+        form.addRow(self._row_threshold, self._threshold_wrap)
+
+        self.wavelet_threshold_mad = QDoubleSpinBox()
+        self.wavelet_threshold_mad.setRange(0.5, 20.0)
+        self.wavelet_threshold_mad.setDecimals(2)
+        self.wavelet_threshold_mad.setSingleStep(0.1)
+        self.wavelet_threshold_mad.setValue(defaults.wavelet_threshold_mad)
+        self._row_wavelet_mad = QLabel("MAD threshold:")
+        self._wavelet_mad_wrap = _with_helper(
+            self.wavelet_threshold_mad,
+            "Per-scale wavelet threshold in robust-noise (MAD σ) units — the "
+            "wavelet detector's main sensitivity knob. Lower → more permissive.",
+        )
+        form.addRow(self._row_wavelet_mad, self._wavelet_mad_wrap)
+
+        self.wavelet_scales = QLineEdit(
+            ",".join(str(s) for s in defaults.wavelet_scales)
+        )
+        self._row_wavelet_scales = QLabel("Scales:")
+        self._wavelet_scales_wrap = _with_helper(
+            self.wavelet_scales,
+            "Comma-separated dyadic scale indices to keep. `1,2` matches "
+            "features ~2–6 px wide; add higher scales for larger foci.",
+        )
+        form.addRow(self._row_wavelet_scales, self._wavelet_scales_wrap)
+
+        self.trackpy_diameter_px = QSpinBox()
+        self.trackpy_diameter_px.setRange(3, 51)
+        self.trackpy_diameter_px.setSingleStep(2)
+        self.trackpy_diameter_px.setValue(defaults.trackpy_diameter_px)
+        self._row_tp_diam = QLabel("Feature diameter (px):")
+        self._tp_diam_wrap = _with_helper(
+            self.trackpy_diameter_px,
+            "Odd feature diameter for the Crocker–Grier locator (even "
+            "values are bumped up by one).",
+        )
+        form.addRow(self._row_tp_diam, self._tp_diam_wrap)
+
+        self.trackpy_minmass = QDoubleSpinBox()
+        self.trackpy_minmass.setRange(0.0, 10000.0)
+        self.trackpy_minmass.setDecimals(3)
+        self.trackpy_minmass.setSingleStep(0.1)
+        self.trackpy_minmass.setValue(0.0)
+        self.trackpy_minmass_auto = QCheckBox("auto")
+        self.trackpy_minmass_auto.setChecked(defaults.trackpy_minmass is None)
+        tp_minmass_row = QHBoxLayout()
+        tp_minmass_row.setContentsMargins(0, 0, 0, 0)
+        tp_minmass_row.addWidget(self.trackpy_minmass)
+        tp_minmass_row.addWidget(self.trackpy_minmass_auto)
+        tp_minmass_row.addStretch(1)
+        self._tp_minmass_wrap = QWidget()
+        self._tp_minmass_wrap.setLayout(tp_minmass_row)
+        self._row_tp_minmass = QLabel("Min integrated mass:")
+        form.addRow(self._row_tp_minmass, self._tp_minmass_wrap)
+
+        self.hmax_h_mad = QDoubleSpinBox()
+        self.hmax_h_mad.setRange(0.1, 20.0)
+        self.hmax_h_mad.setDecimals(2)
+        self.hmax_h_mad.setSingleStep(0.1)
+        self.hmax_h_mad.setValue(defaults.hmax_h_mad)
+        self._row_hmax = QLabel("Prominence h (MAD σ):")
+        self._hmax_wrap = _with_helper(
+            self.hmax_h_mad,
+            "A peak must rise ≥ h above its surroundings to count — same "
+            "idea as Fiji Find-Maxima prominence, in robust-noise units.",
+        )
+        form.addRow(self._row_hmax, self._hmax_wrap)
+
+        self.rs_threshold_mad = QDoubleSpinBox()
+        self.rs_threshold_mad.setRange(0.1, 20.0)
+        self.rs_threshold_mad.setDecimals(2)
+        self.rs_threshold_mad.setSingleStep(0.1)
+        self.rs_threshold_mad.setValue(defaults.rs_threshold_mad)
+        self._row_rs = QLabel("Peak threshold (MAD σ):")
+        self._rs_wrap = _with_helper(
+            self.rs_threshold_mad,
+            "Candidate peaks must rise this far above the image median, in "
+            "robust-noise units. Sub-pixel centres then come from the "
+            "radial-symmetry solve.",
+        )
+        form.addRow(self._row_rs, self._rs_wrap)
 
         self.snr_min = QDoubleSpinBox()
         self.snr_min.setRange(0.0, 100.0)
@@ -956,7 +1061,40 @@ class FociDetectionPanel(QWidget):
 
         self.refine = QCheckBox("Sub-pixel Gaussian refinement")
         self.refine.setChecked(defaults.refine)
+        self.refine.setToolTip(
+            "2D-Gaussian sub-pixel refinement of each peak. Ignored by "
+            "`radial_symmetry` (its solve IS the sub-pixel step) and "
+            "`trackpy` (does its own refinement)."
+        )
         form.addRow("", self.refine)
+
+        self.split_merged = QCheckBox("Split merged foci (two-Gaussian refit)")
+        self.split_merged.setChecked(defaults.split_merged)
+        self.split_merged.setToolTip(
+            "Refit each detection with a two-Gaussian mixture and split it "
+            "into two foci when the pair model clearly wins. Recovers "
+            "adjacent focus pairs (e.g. twin replisomes) merged into one "
+            "detection. Works with every detector; adds fitting cost."
+        )
+        form.addRow("", self.split_merged)
+
+        # Parameter-row registry for per-detector show/hide (see
+        # _DETECTOR_PARAMS). Rows not listed for the selected detector
+        # are hidden because that detector ignores them.
+        self._detector_param_rows: dict[str, tuple[QWidget, QWidget]] = {
+            "min_sigma":            (self._row_min_sigma, self.min_sigma),
+            "max_sigma":            (self._row_max_sigma, self.max_sigma),
+            "threshold":            (self._row_threshold, self._threshold_wrap),
+            "wavelet_threshold_mad": (self._row_wavelet_mad,
+                                      self._wavelet_mad_wrap),
+            "wavelet_scales":       (self._row_wavelet_scales,
+                                     self._wavelet_scales_wrap),
+            "trackpy_diameter_px":  (self._row_tp_diam, self._tp_diam_wrap),
+            "trackpy_minmass":      (self._row_tp_minmass,
+                                     self._tp_minmass_wrap),
+            "hmax_h_mad":           (self._row_hmax, self._hmax_wrap),
+            "rs_threshold_mad":     (self._row_rs, self._rs_wrap),
+        }
 
         ch_box = QGroupBox("Channels")
         ch_layout = QVBoxLayout(ch_box)
@@ -1074,6 +1212,7 @@ class FociDetectionPanel(QWidget):
         # wiring the dirty-tracking signals below so the initial
         # selection doesn't light up Apply on launch.
         self.detectors.set_selected_key("wavelet")
+        self._refresh_detector_params()
 
         # Detector-options changes are NOT auto-applied — re-detection is
         # expensive (BM3D / wavelet on a 1k×1k FOV is sluggish). Track a
@@ -1083,9 +1222,25 @@ class FociDetectionPanel(QWidget):
         self.detectors._list.itemSelectionChanged.connect(
             self._mark_opts_dirty
         )
-        for w in (self.min_sigma, self.max_sigma, self.threshold, self.snr_min):
+        self.detectors._list.itemSelectionChanged.connect(
+            self._refresh_detector_params
+        )
+        for w in (
+            self.min_sigma, self.max_sigma, self.threshold, self.snr_min,
+            self.wavelet_threshold_mad, self.hmax_h_mad,
+            self.rs_threshold_mad, self.trackpy_diameter_px,
+            self.trackpy_minmass,
+        ):
             w.valueChanged.connect(self._mark_opts_dirty)
-        self.refine.toggled.connect(self._mark_opts_dirty)
+        self.wavelet_scales.textChanged.connect(self._mark_opts_dirty)
+        for w in (self.refine, self.split_merged, self.trackpy_minmass_auto):
+            w.toggled.connect(self._mark_opts_dirty)
+        self.trackpy_minmass_auto.toggled.connect(
+            lambda on: self.trackpy_minmass.setEnabled(not on)
+        )
+        self.trackpy_minmass.setEnabled(
+            not self.trackpy_minmass_auto.isChecked()
+        )
         self.channels._list.itemSelectionChanged.connect(
             self._mark_opts_dirty
         )
@@ -1105,6 +1260,36 @@ class FociDetectionPanel(QWidget):
         self._dirty_opts = True
         self.apply_btn.setEnabled(True)
         self.apply_status.setText("Unapplied changes")
+
+    def _refresh_detector_params(self, *_args) -> None:
+        """Show only the parameter rows the selected detector consumes
+        (per _DETECTOR_PARAMS); show everything when no/unknown key."""
+        key = self.detectors.selected_key()
+        visible = set(self._DETECTOR_PARAMS.get(
+            key or "", list(self._detector_param_rows),
+        ))
+        for name, (label, widget) in self._detector_param_rows.items():
+            on = name in visible
+            label.setVisible(on)
+            widget.setVisible(on)
+
+    def _parsed_wavelet_scales(self) -> tuple[int, ...]:
+        """Parse the comma-separated wavelet-scales line edit.
+
+        Falls back to the DetectorOpts default on garbage input; scales
+        above 8 are dropped (each extra scale is another full-image
+        decomposition level, and foci never live that high).
+        """
+        default = DetectorOpts().wavelet_scales
+        text = self.wavelet_scales.text().replace(";", ",")
+        try:
+            scales = tuple(sorted({
+                int(tok) for tok in text.split(",") if tok.strip()
+            }))
+        except ValueError:
+            return default
+        scales = tuple(s for s in scales if 0 <= s <= 8)
+        return scales or default
 
     def _on_apply_clicked(self) -> None:
         """Commit the pending detector / channel / parameter edits to
@@ -1350,6 +1535,16 @@ class FociDetectionPanel(QWidget):
             threshold=float(self.threshold.value()),
             snr_min=float(self.snr_min.value()),
             refine=self.refine.isChecked(),
+            trackpy_diameter_px=int(self.trackpy_diameter_px.value()),
+            trackpy_minmass=(
+                None if self.trackpy_minmass_auto.isChecked()
+                else float(self.trackpy_minmass.value())
+            ),
+            wavelet_scales=self._parsed_wavelet_scales(),
+            wavelet_threshold_mad=float(self.wavelet_threshold_mad.value()),
+            hmax_h_mad=float(self.hmax_h_mad.value()),
+            rs_threshold_mad=float(self.rs_threshold_mad.value()),
+            split_merged=self.split_merged.isChecked(),
         )
         selected = self.channels.selected_indices()
         # Single-detector now; keep the dataclass shape as ``list[str]`` so
@@ -1371,6 +1566,14 @@ class FociDetectionPanel(QWidget):
             "threshold": float(self.threshold.value()),
             "snr_min": float(self.snr_min.value()),
             "refine": self.refine.isChecked(),
+            "wavelet_threshold_mad": float(self.wavelet_threshold_mad.value()),
+            "wavelet_scales": self.wavelet_scales.text(),
+            "trackpy_diameter_px": int(self.trackpy_diameter_px.value()),
+            "trackpy_minmass": float(self.trackpy_minmass.value()),
+            "trackpy_minmass_auto": self.trackpy_minmass_auto.isChecked(),
+            "hmax_h_mad": float(self.hmax_h_mad.value()),
+            "rs_threshold_mad": float(self.rs_threshold_mad.value()),
+            "split_merged": self.split_merged.isChecked(),
             "apply_to_channels": self.channels.selected_indices(),
             "show_foci": bool(self.show_foci_check.isChecked()),
         }
@@ -1405,11 +1608,37 @@ class FociDetectionPanel(QWidget):
                 self.snr_min.setValue(float(s["snr_min"]))
             if "refine" in s:
                 self.refine.setChecked(bool(s["refine"]))
+            if "wavelet_threshold_mad" in s:
+                self.wavelet_threshold_mad.setValue(
+                    float(s["wavelet_threshold_mad"])
+                )
+            if "wavelet_scales" in s:
+                self.wavelet_scales.setText(str(s["wavelet_scales"]))
+            if "trackpy_diameter_px" in s:
+                self.trackpy_diameter_px.setValue(
+                    int(s["trackpy_diameter_px"])
+                )
+            if "trackpy_minmass" in s:
+                self.trackpy_minmass.setValue(float(s["trackpy_minmass"]))
+            if "trackpy_minmass_auto" in s:
+                self.trackpy_minmass_auto.setChecked(
+                    bool(s["trackpy_minmass_auto"])
+                )
+            if "hmax_h_mad" in s:
+                self.hmax_h_mad.setValue(float(s["hmax_h_mad"]))
+            if "rs_threshold_mad" in s:
+                self.rs_threshold_mad.setValue(float(s["rs_threshold_mad"]))
+            if "split_merged" in s:
+                self.split_merged.setChecked(bool(s["split_merged"]))
             if "apply_to_channels" in s:
                 self.channels.set_selected_indices(
                     list(s["apply_to_channels"] or [])
                 )
             if "show_foci" in s:
                 self.show_foci_check.setChecked(bool(s["show_foci"]))
+            self.trackpy_minmass.setEnabled(
+                not self.trackpy_minmass_auto.isChecked()
+            )
+            self._refresh_detector_params()
         finally:
             self._loading = False

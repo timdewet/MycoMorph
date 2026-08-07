@@ -85,7 +85,7 @@ class DetectorKeySelect(QWidget):
         layout.setSpacing(2)
         self._list = QListWidget()
         self._list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
-        self._list.setMaximumHeight(180)
+        self._list.setMaximumHeight(230)
         layout.addWidget(self._list)
         self._key_rows: dict[str, int] = {}
         self._build_items()

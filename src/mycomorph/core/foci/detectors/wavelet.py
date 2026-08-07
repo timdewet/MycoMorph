@@ -37,7 +37,7 @@ from typing import Optional, Sequence
 import numpy as np
 
 from .._types import DetectorOpts, Focus
-from ._common import build_focus, normalise_image
+from ._common import build_focus, normalise_image, suppress_close_foci
 
 
 def _atrous_kernel_1d() -> np.ndarray:
@@ -172,4 +172,8 @@ class WaveletAtrousDetector:
             )
             if focus is not None:
                 out.append(focus)
-        return out
+        # peak_local_max spacing applies to the *unrefined* candidates;
+        # Gaussian refinement can pull two flanks of an unresolved
+        # doublet onto nearly the same point. Collapse those duplicates
+        # (same spacing the candidate pass used).
+        return suppress_close_foci(out, max(1.0, 2.0 * float(opts.min_sigma)))

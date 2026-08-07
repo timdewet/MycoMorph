@@ -54,6 +54,15 @@ class DetectorOpts:
     # Wavelet à trous (Olivo-Marin 2002) — best classical option for dim foci
     wavelet_scales: tuple[int, ...] = (1, 2)    # foci-size scales to keep
     wavelet_threshold_mad: float = 3.0          # per-plane MAD threshold
+    # h-maxima (morphological prominence, à la ImageJ "Find Maxima")
+    hmax_h_mad: float = 3.0             # prominence h in robust-noise (MAD σ) units
+    # Radial symmetry (Parthasarathy 2012) candidate threshold
+    rs_threshold_mad: float = 3.0       # candidate peak height above bg, MAD σ units
+    # Post-detection two-Gaussian refit that splits merged focus pairs
+    # (see mycomorph.core.foci.decompose). Applied by the pipeline stage /
+    # live preview, not by the detectors themselves.
+    split_merged: bool = False
+    split_min_improvement: float = 0.05  # required ΔR² of 2-Gaussian over 1-Gaussian fit
 
 
 @dataclass

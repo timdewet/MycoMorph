@@ -22,6 +22,8 @@ from .basic import (
     GaussianNormWaveletDetector,
 )
 from .bacteroidal import BacteroidalDetector
+from .hmax import HMaxDetector
+from .radial_symmetry import RadialSymmetryDetector
 from .wavelet import WaveletAtrousDetector
 from .enhanced import (
     Bm3dWaveletDetector,
@@ -34,10 +36,12 @@ REGISTRY: dict[str, Callable[[], object]] = {
     "dog": DogDetector,
     "log": LogDetector,
     "trackpy": TrackpyDetector,
+    "hmax": HMaxDetector,
     "tophat_dog": TophatDogDetector,
     "gaussian_norm_dog": GaussianNormDogDetector,
     "basic_dog": BasicDogDetector,
     "wavelet": WaveletAtrousDetector,
+    "radial_symmetry": RadialSymmetryDetector,
     "gaussian_norm_wavelet": GaussianNormWaveletDetector,
     "decon_wavelet": DeconvolveWaveletDetector,
     "bm3d_wavelet": Bm3dWaveletDetector,
@@ -46,9 +50,9 @@ REGISTRY: dict[str, Callable[[], object]] = {
 }
 
 
-CLASSICAL_BASELINE_KEYS = ["dog", "log", "trackpy"]
+CLASSICAL_BASELINE_KEYS = ["dog", "log", "trackpy", "hmax"]
 NORMALISATION_KEYS = ["tophat_dog", "gaussian_norm_dog", "basic_dog"]
-DIM_SIGNAL_KEYS = ["wavelet"]
+DIM_SIGNAL_KEYS = ["wavelet", "radial_symmetry"]
 ENHANCED_DIM_SIGNAL_KEYS = [
     "gaussian_norm_wavelet", "decon_wavelet", "bm3d_wavelet", "decon_bm3d_wavelet",
 ]
@@ -66,11 +70,13 @@ __all__ = [
     "DogDetector",
     "LogDetector",
     "TrackpyDetector",
+    "HMaxDetector",
     "TophatDogDetector",
     "GaussianNormDogDetector",
     "GaussianNormWaveletDetector",
     "BasicDogDetector",
     "WaveletAtrousDetector",
+    "RadialSymmetryDetector",
     "DeconvolveWaveletDetector",
     "Bm3dWaveletDetector",
     "DeconvolveBm3dWaveletDetector",
