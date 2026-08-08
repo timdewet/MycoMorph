@@ -157,17 +157,32 @@ def patch_snr(patch: np.ndarray, exclude_centre_radius: int = 2) -> float:
     return float((patch[yc, xc] - bg_med) / bg_std)
 
 
+def cell_stats_from_values(cell_values: np.ndarray) -> dict[str, float]:
+    """Per-cell intensity statistics consumed by :func:`compute_features`."""
+    return {
+        "cell_p90":    float(np.percentile(cell_values, 90)),
+        "cell_p95":    float(np.percentile(cell_values, 95)),
+        "cell_median": float(np.median(cell_values)),
+        "cell_std":    float(cell_values.std()),
+    }
+
+
 def compute_features(
     image: np.ndarray,
     focus: Focus,
     *,
     patch_half_size: int = 8,
     cell_pixels: Optional[np.ndarray] = None,
+    cell_stats: Optional[dict[str, float]] = None,
 ) -> dict[str, float]:
     """Compute all features for one candidate Focus.
 
-    ``cell_pixels`` is a boolean mask of the focus's containing cell.
-    If None, cell-relative features are skipped.
+    Cell-relative features come from ``cell_stats`` (a precomputed
+    :func:`cell_stats_from_values` dict — the fast path used by
+    :func:`features_dataframe`, which computes each cell's stats once)
+    or, failing that, from ``cell_pixels`` (a boolean mask of the
+    containing cell — recomputes the stats for this call). With
+    neither, cell-relative features are NaN.
     """
     patch, _ = extract_patch(image, focus, half_size=patch_half_size)
 
@@ -180,12 +195,12 @@ def compute_features(
         "hessian_symmetry":  hessian_eigenvalue_ratio(patch),
     }
 
-    if cell_pixels is not None and cell_pixels.any():
-        cell_values = image[cell_pixels].astype(np.float64)
-        features["cell_p90"] = float(np.percentile(cell_values, 90))
-        features["cell_p95"] = float(np.percentile(cell_values, 95))
-        features["cell_median"] = float(np.median(cell_values))
-        features["cell_std"] = float(cell_values.std())
+    if cell_stats is None and cell_pixels is not None and cell_pixels.any():
+        cell_stats = cell_stats_from_values(
+            image[cell_pixels].astype(np.float64)
+        )
+    if cell_stats is not None:
+        features.update(cell_stats)
         if features["cell_p90"] > 0:
             features["prominence_p90"] = features["intensity"] / features["cell_p90"]
         else:
@@ -218,21 +233,37 @@ def features_dataframe(
     Each row also carries identification (detector / well / fov / channel /
     cell_label / y / x) so rows can be joined back to detections after
     classification or threshold filtering.
+
+    Per-cell statistics are computed once per cell on its bounding-box
+    crop — a full-frame mask comparison per focus made this the
+    dominant cost on large FOVs (O(image area × n_foci)).
     """
-    cell_pixel_cache: dict[int, np.ndarray] = {}
+    from scipy import ndimage
+
+    cell_slices = ndimage.find_objects(labeled_mask) if foci else []
+    cell_stats_cache: dict[int, Optional[dict[str, float]]] = {}
+
+    def _stats_for(cid: int) -> Optional[dict[str, float]]:
+        if cid in cell_stats_cache:
+            return cell_stats_cache[cid]
+        stats: Optional[dict[str, float]] = None
+        if 0 < cid <= len(cell_slices) and cell_slices[cid - 1] is not None:
+            sl = cell_slices[cid - 1]
+            in_cell = labeled_mask[sl] == cid
+            if in_cell.any():
+                stats = cell_stats_from_values(
+                    image[sl][in_cell].astype(np.float64)
+                )
+        cell_stats_cache[cid] = stats
+        return stats
+
     rows: list[dict] = []
     for f in foci:
         cid = int(f.cell_label)
-        cell_pixels = None
-        if cid > 0:
-            if cid not in cell_pixel_cache:
-                cell_pixel_cache[cid] = labeled_mask == cid
-            cell_pixels = cell_pixel_cache[cid]
-
         feats = compute_features(
             image, f,
             patch_half_size=patch_half_size,
-            cell_pixels=cell_pixels,
+            cell_stats=_stats_for(cid) if cid > 0 else None,
         )
         feats.update({
             "detector":  detector,
