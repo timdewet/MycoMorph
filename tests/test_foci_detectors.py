@@ -86,6 +86,29 @@ def test_hmax_empty_image():
     assert det.detect(np.zeros((64, 64)), None, DetectorOpts()) == []
 
 
+def test_hmax_bounded_on_clipped_speckle_field():
+    """A channel reduced to sparse single-pixel spikes on an exact-zero
+    background (the residue a clipped over-subtraction leaves behind).
+    The image-wide MAD is ~0 there, which used to collapse the
+    prominence h to ~0 — every spike became a detection (observed in
+    production: ~59k on one FOV, ~8 h of split-refit grinding), and the
+    flat background made local SNR useless as a stop. The threshold
+    floor plus the sub-PSF impulse gate must keep this bounded."""
+    rng = np.random.default_rng(1)
+    img = np.zeros((512, 512))
+    n_speck = 3000
+    ys = rng.integers(0, 512, n_speck)
+    xs = rng.integers(0, 512, n_speck)
+    img[ys, xs] = rng.uniform(50.0, 500.0, n_speck)
+
+    det = REGISTRY["hmax"]()
+    foci = det.detect(img, None, DetectorOpts())
+    assert len(foci) < 0.05 * n_speck, (
+        f"speckle field exploded: {len(foci)} detections from "
+        f"{n_speck} noise spikes"
+    )
+
+
 # ── radial symmetry ──────────────────────────────────────────────────────────
 
 def test_radial_symmetry_detects_and_localises():
@@ -159,6 +182,30 @@ def test_split_respects_already_resolved_neighbours():
 def test_split_noop_on_empty_list():
     img, _ = _pair_image()
     assert split_merged_foci(img, [], DetectorOpts()) == []
+
+
+def test_split_leaves_speckle_junk_alone():
+    """Detections sitting on sub-PSF junk — a lone hot pixel, and a
+    speckle cluster whose patch is elongated enough to reach the
+    two-Gaussian machinery — must pass through unchanged (via the
+    elongation pre-screen, the degenerate-σ gate, or the acceptance
+    criteria; whichever fires, nothing may be split)."""
+    rng = np.random.default_rng(9)
+    img = rng.normal(0.0, 0.5, (64, 64))
+    img[20, 20] = 200.0                       # lone hot pixel
+    yx = [(40, 40), (40, 41), (41, 43), (39, 44), (42, 40), (38, 42)]
+    for y, x in yx:                           # speckle cluster
+        img[y, x] = float(rng.uniform(90.0, 200.0))
+
+    parents = [
+        Focus(y=20.0, x=20.0, sigma=1.2, intensity=200.0, snr=50.0),
+        Focus(y=40.0, x=41.5, sigma=1.2, intensity=150.0, snr=50.0),
+    ]
+    opts = DetectorOpts(snr_min=2.0, split_merged=True)
+    out = split_merged_foci(img, parents, opts)
+    assert len(out) == 2
+    for parent, child in zip(parents, out):
+        assert child is parent
 
 
 def test_detector_plus_split_resolves_doublet():

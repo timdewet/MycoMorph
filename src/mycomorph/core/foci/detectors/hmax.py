@@ -25,11 +25,16 @@ Algorithm:
 
 1. Percentile-normalise, then lightly Gaussian-smooth (σ = ``min_sigma/2``)
    to suppress single-pixel salt noise.
-2. ``h = hmax_h_mad * robust_sigma_mad(smoothed)``.
+2. ``h = max(hmax_h_mad * robust_sigma_mad(smoothed), threshold)`` — the
+   ``opts.threshold`` floor keeps a degenerate (near-flat) channel from
+   collapsing h to ~0 and detecting every noise ripple.
 3. ``skimage.morphology.h_maxima`` → binary plateaus; connected-component
    centroids are the candidate peaks.
-4. Greedy min-distance suppression at ``2·min_sigma`` px (brightest wins).
-5. ``build_focus`` per candidate: optional 2D-Gaussian sub-pixel
+4. Sub-PSF impulse gate: drop candidates whose smoothed peak has no
+   4-neighbour ≥ 25% of its (median-subtracted) height — single-pixel
+   spikes are narrower than any real focus.
+5. Greedy min-distance suppression at ``2·min_sigma`` px (brightest wins).
+6. ``build_focus`` per candidate: optional 2D-Gaussian sub-pixel
    refinement, SNR gating, cell-label assignment.
 """
 
@@ -75,7 +80,15 @@ class HMaxDetector:
         sm = gaussian_filter(norm.astype(np.float64), sigma=smooth_sigma)
 
         noise = robust_sigma_mad(sm)
-        h = max(float(opts.hmax_h_mad) * noise, 1e-6)
+        # MAD scaling assumes the smoothed background has healthy
+        # texture. On a degenerate channel (e.g. mostly-zero residue
+        # left by an aggressive upstream subtraction) the MAD is ~0,
+        # which used to send h → ~0 and turn every noise ripple into a
+        # plateau (observed in production: 60k "detections" on one
+        # blank FOV). Floor the prominence at ``opts.threshold`` — the
+        # same fraction-of-normalised-range meaning that parameter has
+        # for the scale-space detectors.
+        h = max(float(opts.hmax_h_mad) * noise, float(opts.threshold), 1e-6)
 
         # Grayscale reconstruction runs ~1.5x faster on integers, and
         # the h threshold spans thousands of 16-bit quanta, so the
@@ -94,14 +107,36 @@ class HMaxDetector:
         lbl, n = ndimage.label(maxima, structure=np.ones((3, 3), dtype=int))
         centers = ndimage.center_of_mass(sm, lbl, index=range(1, n + 1))
 
+        pts = np.array([[float(y), float(x)] for y, x in centers])
+        yi = np.clip(np.round(pts[:, 0]).astype(int), 0, sm.shape[0] - 1)
+        xi = np.clip(np.round(pts[:, 1]).astype(int), 0, sm.shape[1] - 1)
+        scores = sm[yi, xi]
+
+        # Sub-PSF impulse gate: a diffraction-limited focus (σ ≳ 1 px)
+        # keeps well over half its smoothed peak in the immediate
+        # 4-neighbourhood, while a single-pixel spike (hot pixel, shot
+        # noise, clipped-subtraction residue) drops to ~exp(-2) ≈ 0.14
+        # under the σ = min_sigma/2 smoothing. Structure narrower than
+        # the PSF is not optical signal. Amplitudes are taken above the
+        # global median, which is exact on the flat-background images
+        # this targets; on elevated local background the ratio only
+        # grows, so the gate fails open and keeps the candidate.
+        med = float(np.median(sm))
+        neigh = np.maximum.reduce([
+            sm[np.clip(yi - 1, 0, sm.shape[0] - 1), xi],
+            sm[np.clip(yi + 1, 0, sm.shape[0] - 1), xi],
+            sm[yi, np.clip(xi - 1, 0, sm.shape[1] - 1)],
+            sm[yi, np.clip(xi + 1, 0, sm.shape[1] - 1)],
+        ])
+        solid = (neigh - med) >= 0.25 * np.maximum(scores - med, 1e-12)
+        pts = pts[solid]
+        scores = scores[solid]
+        if not len(pts):
+            return []
+
         # Greedy min-distance suppression, brightest plateau first
         # (KD-tree NMS — plateau counts explode on noisy images and a
         # naive pairwise scan goes quadratic).
-        pts = np.array([[float(y), float(x)] for y, x in centers])
-        scores = sm[
-            np.clip(np.round(pts[:, 0]).astype(int), 0, sm.shape[0] - 1),
-            np.clip(np.round(pts[:, 1]).astype(int), 0, sm.shape[1] - 1),
-        ]
         min_dist = max(1.0, 2.0 * float(opts.min_sigma))
         kept = [tuple(pts[i]) for i in greedy_nms_indices(pts, scores, min_dist)]
 

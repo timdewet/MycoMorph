@@ -883,7 +883,14 @@ class FluorescentNormalisationStage:
             signature = checkpoint_signature(
                 stage="fluor_norm",
                 input_path=tiff,
-                options=opts,
+                options={
+                    # rev 2: crosstalk subtracts the source's above-median
+                    # signal instead of raw frames, and auto estimation
+                    # refuses bleed-implausible slopes — outputs produced
+                    # by the old behaviour must not be reused.
+                    "algorithm_rev": 2,
+                    "opts": opts,
+                },
                 channels=ctx.channel_labels,
                 phase_channel=ctx.phase_channel,
             )
@@ -973,12 +980,40 @@ class FluorescentNormalisationStage:
                 corrected_tgt = subtract_crosstalk(
                     tgt_stack, src_stack, crosstalk_est.k,
                 )
-                progress_cb(
-                    i / n,
-                    f"[{i+1}/{n}] {tiff.name}: crosstalk k={crosstalk_est.k:.4f} "
-                    f"({crosstalk_est.mode}, {crosstalk_est.n_sites} sites) "
-                    f"subtracted ch {xt_src} → ch {xt_tgt}",
-                )
+                if crosstalk_est.mode == "implausible-slope":
+                    progress_cb(
+                        i / n,
+                        f"[{i+1}/{n}] {tiff.name}: auto crosstalk REFUSED — "
+                        f"fitted slope {crosstalk_est.fitted_slope:.3f} "
+                        f"({crosstalk_est.n_sites} sites) is far above any "
+                        f"plausible filter bleed; the reporters likely "
+                        f"colocalise. No subtraction applied — set a fixed "
+                        f"k measured on single-fluorophore controls.",
+                    )
+                else:
+                    progress_cb(
+                        i / n,
+                        f"[{i+1}/{n}] {tiff.name}: crosstalk k={crosstalk_est.k:.4f} "
+                        f"({crosstalk_est.mode}, {crosstalk_est.n_sites} sites) "
+                        f"subtracted ch {xt_src} → ch {xt_tgt}",
+                    )
+                # A correct bleed subtraction removes a few-percent ghost;
+                # it must never flatten the channel. A large jump in the
+                # exact-zero fraction means k is destroying signal (bad
+                # fixed k, or colocalising reporters) — the well that
+                # motivated this check went from 0% to 83% zeros and the
+                # downstream foci stage ground for hours on the residue.
+                zero_before = float(np.mean(tgt_stack == 0))
+                zero_after = float(np.mean(corrected_tgt == 0))
+                if zero_after > 0.5 and (zero_after - zero_before) > 0.25:
+                    progress_cb(
+                        i / n,
+                        f"[{i+1}/{n}] {tiff.name}: WARNING — crosstalk "
+                        f"subtraction (k={crosstalk_est.k:.4f}) zeroed "
+                        f"{zero_after:.0%} of channel {xt_tgt} "
+                        f"(was {zero_before:.0%}). The corrected channel "
+                        f"is likely unusable; lower k or disable crosstalk.",
+                    )
 
             # One normaliser per fluor channel; BaSiC's flat-field is
             # channel-specific so the instances cannot be shared.
@@ -1150,6 +1185,10 @@ class FociDetectionStage:
                     stage="foci_detection",
                     input_path=tiff,
                     options={
+                        # rev 2: hmax prominence floor + impulse gate,
+                        # degenerate-σ split gate, retuned refit — old
+                        # parquets are not comparable.
+                        "algorithm_rev": 2,
                         "detector_keys": detector_keys,
                         "detector_opts": det_opts,
                         "apply_to_channels": opts.apply_to_channels,
