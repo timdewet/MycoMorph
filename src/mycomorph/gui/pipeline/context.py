@@ -31,6 +31,15 @@ class FluorescentNormalisationOpts:
     # Channel selection. None → every channel that isn't phase or mask.
     apply_to_channels: Optional[list[int]] = None
 
+    # Spectral crosstalk subtraction, applied to the raw channels BEFORE
+    # the normaliser runs: target = max(target - k*source, 0). Guards
+    # against bright source-channel foci bleeding a proportional ghost
+    # into the target channel and being detected as phantom foci there.
+    crosstalk_enabled: bool = False
+    crosstalk_source_channel: Optional[int] = None   # bleed FROM this channel
+    crosstalk_target_channel: Optional[int] = None   # subtract from this one
+    crosstalk_k: Optional[float] = None              # None → auto-estimate per well
+
 
 @dataclass
 class FociDetectionOpts:

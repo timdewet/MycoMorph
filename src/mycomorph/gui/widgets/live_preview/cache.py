@@ -165,6 +165,10 @@ def fluor_norm_channels_key(
         getattr(fluor_opts, "rl_iterations", None),
         getattr(fluor_opts, "rl_psf_sigma", None),
         getattr(fluor_opts, "bm3d_sigma", None),
+        getattr(fluor_opts, "crosstalk_enabled", False),
+        getattr(fluor_opts, "crosstalk_source_channel", None),
+        getattr(fluor_opts, "crosstalk_target_channel", None),
+        getattr(fluor_opts, "crosstalk_k", None),
         tuple(int(c) for c in apply_to),
         int(phase_idx),
     )
@@ -210,6 +214,10 @@ def foci_preview_key(
         getattr(fluor_norm_opts, "rl_iterations", None),
         getattr(fluor_norm_opts, "rl_psf_sigma", None),
         getattr(fluor_norm_opts, "bm3d_sigma", None),
+        getattr(fluor_norm_opts, "crosstalk_enabled", False),
+        getattr(fluor_norm_opts, "crosstalk_source_channel", None),
+        getattr(fluor_norm_opts, "crosstalk_target_channel", None),
+        getattr(fluor_norm_opts, "crosstalk_k", None),
     )
 
 

@@ -13,12 +13,13 @@ succeeds without the ``[foci]`` optional extra installed.
 """
 
 from ._types import DetectorOpts, Focus, FovBundle
-from . import decompose, detectors, features, normalise, preprocess
+from . import crosstalk, decompose, detectors, features, normalise, preprocess
 
 __all__ = [
     "DetectorOpts",
     "Focus",
     "FovBundle",
+    "crosstalk",
     "decompose",
     "detectors",
     "features",

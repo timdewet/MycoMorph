@@ -24,11 +24,14 @@ from mycomorph.core.extract.feature_library import FeatureLibrary
 from mycomorph.core.provenance import (
     artifact_signature_matches,
     artifact_is_in_progress,
+    artifact_signature_path,
     atomic_output_path,
+    atomic_write_text,
     checkpoint_signature,
     validate_hdf5,
     validate_parquet,
     validate_tiff,
+    write_artifact_signature,
 )
 
 from .context import RunContext
@@ -808,6 +811,26 @@ class FluorescentNormalisationStage:
                 f"Unknown normalisation method {method!r}. "
                 f"Available: {sorted(NORMALISER_REGISTRY)}"
             ]
+        opts = ctx.fluorescent_normalisation_opts
+        if getattr(opts, "crosstalk_enabled", False):
+            src = opts.crosstalk_source_channel
+            tgt = opts.crosstalk_target_channel
+            if src is None or tgt is None:
+                return [
+                    "Crosstalk subtraction: pick both a source channel "
+                    "(the one that bleeds) and a target channel "
+                    "(the one to correct)."
+                ]
+            if src == tgt:
+                return [
+                    "Crosstalk subtraction: source and target channel "
+                    "must differ."
+                ]
+            k = opts.crosstalk_k
+            if k is not None and not (0.0 <= float(k) <= 1.0):
+                return [
+                    f"Crosstalk coefficient k={k} is outside [0, 1]."
+                ]
         return []
 
     def output_dir(self, ctx) -> Path:
@@ -860,14 +883,36 @@ class FluorescentNormalisationStage:
         n_skipped = 0
         for i, tiff in enumerate(inputs):
             out = ctx.fluorescent_normalisation_dir / tiff.name
-            if ctx.reuse_existing and out.exists() and validate_tiff(out):
-                progress_cb(
-                    (i + 1) / n,
-                    f"[{i+1}/{n}] Reused {tiff.name}",
+            signature = checkpoint_signature(
+                stage="fluor_norm",
+                input_path=tiff,
+                options=opts,
+                channels=ctx.channel_labels,
+                phase_channel=ctx.phase_channel,
+            )
+            if ctx.reuse_existing and out.exists():
+                # Legacy outputs (no provenance sidecar) predate both the
+                # signature scheme and the crosstalk option: rebuild them
+                # when crosstalk is requested (a legacy artifact cannot
+                # contain it) or when the input TIFF is newer.
+                has_sig = artifact_signature_path(out).exists()
+                legacy_stale = not has_sig and (
+                    bool(getattr(opts, "crosstalk_enabled", False))
+                    or out.stat().st_mtime_ns < tiff.stat().st_mtime_ns
                 )
-                outputs.append(out)
-                n_skipped += 1
-                continue
+                if legacy_stale:
+                    progress_cb(
+                        0.0,
+                        f"Options or input newer than {out.name}; rebuilding",
+                    )
+                elif _can_reuse(out, signature, validate_tiff, progress_cb):
+                    progress_cb(
+                        (i + 1) / n,
+                        f"[{i+1}/{n}] Reused {tiff.name}",
+                    )
+                    outputs.append(out)
+                    n_skipped += 1
+                    continue
 
             data, metadata = load_hyperstack(tiff)
             n_fov, n_channels, _, _ = data.shape
@@ -888,21 +933,74 @@ class FluorescentNormalisationStage:
                     f"[{i+1}/{n}] {tiff.name}: no fluor channels — copying through",
                 )
 
+            # Spectral crosstalk subtraction on the raw channels, before
+            # any normaliser runs, so the ghost never reaches detection.
+            crosstalk_est = None
+            xt_src = getattr(opts, "crosstalk_source_channel", None)
+            xt_tgt = getattr(opts, "crosstalk_target_channel", None)
+            do_crosstalk = (
+                bool(getattr(opts, "crosstalk_enabled", False))
+                and xt_src is not None and xt_tgt is not None
+                and xt_src != xt_tgt
+                and 0 <= xt_src < n_channels and 0 <= xt_tgt < n_channels
+                and xt_src != mask_channel and xt_tgt != mask_channel
+            )
+            if getattr(opts, "crosstalk_enabled", False) and not do_crosstalk:
+                progress_cb(
+                    i / n,
+                    f"[{i+1}/{n}] {tiff.name}: crosstalk subtraction skipped "
+                    f"(invalid channel pair {xt_src} → {xt_tgt})",
+                )
+            corrected_tgt = None
+            if do_crosstalk:
+                from mycomorph.core.foci.crosstalk import (
+                    CrosstalkEstimate,
+                    estimate_crosstalk_k,
+                    subtract_crosstalk,
+                )
+                src_stack = data[:, xt_src, :, :]
+                tgt_stack = data[:, xt_tgt, :, :]
+                if opts.crosstalk_k is not None:
+                    crosstalk_est = CrosstalkEstimate(
+                        k=float(opts.crosstalk_k), mode="fixed",
+                    )
+                else:
+                    progress_cb(
+                        i / n,
+                        f"[{i+1}/{n}] {tiff.name}: estimating crosstalk "
+                        f"ch {xt_src} → ch {xt_tgt}...",
+                    )
+                    crosstalk_est = estimate_crosstalk_k(
+                        src_stack, tgt_stack, data[:, mask_channel, :, :],
+                    )
+                corrected_tgt = subtract_crosstalk(
+                    tgt_stack, src_stack, crosstalk_est.k,
+                )
+                progress_cb(
+                    i / n,
+                    f"[{i+1}/{n}] {tiff.name}: crosstalk k={crosstalk_est.k:.4f} "
+                    f"({crosstalk_est.mode}, {crosstalk_est.n_sites} sites) "
+                    f"subtracted ch {xt_src} → ch {xt_tgt}",
+                )
+
             # One normaliser per fluor channel; BaSiC's flat-field is
             # channel-specific so the instances cannot be shared.
             per_channel_norm = {
                 c: build_normaliser(method, norm_opts)
                 for c in fluor_indices
             }
-            if needs_run_fit:
-                for c, normaliser in per_channel_norm.items():
-                    stack = data[:, c, :, :].astype(np.float32, copy=False)
-                    normaliser.fit(stack)
 
             out_data = data.astype(np.float32, copy=True)
+            if corrected_tgt is not None:
+                out_data[:, xt_tgt, :, :] = corrected_tgt
+            # Normalisers read from out_data so the target channel's
+            # normalisation sees the crosstalk-corrected image.
+            if needs_run_fit:
+                for c, normaliser in per_channel_norm.items():
+                    normaliser.fit(out_data[:, c, :, :])
             for fov_idx in range(n_fov):
                 for c in fluor_indices:
-                    img = data[fov_idx, c, :, :]
+                    img = out_data[fov_idx, c, :, :]
                     out_data[fov_idx, c, :, :] = per_channel_norm[c].apply(img)
                 progress_cb(
                     (i + (fov_idx + 1) / max(n_fov, 1)) / n,
@@ -930,6 +1028,20 @@ class FluorescentNormalisationStage:
                 tmp_out.replace(out)
             finally:
                 tmp_out.unlink(missing_ok=True)
+            write_artifact_signature(out, signature)
+            if crosstalk_est is not None:
+                import json as _json
+                atomic_write_text(
+                    out.with_name(out.stem + "__crosstalk.json"),
+                    _json.dumps(
+                        {
+                            "source_channel": int(xt_src),
+                            "target_channel": int(xt_tgt),
+                            **crosstalk_est.as_dict(),
+                        },
+                        indent=2,
+                    ),
+                )
             outputs.append(out)
 
         progress_cb(
@@ -1020,14 +1132,41 @@ class FociDetectionStage:
         n_skipped = 0
         for i, tiff in enumerate(inputs):
             out = ctx.foci_detection_dir / (tiff.stem + ".parquet")
-            if ctx.reuse_existing and out.exists() and validate_parquet(out):
-                progress_cb(
-                    (i + 1) / n,
-                    f"[{i+1}/{n}] Reused {tiff.name}",
+            signature = checkpoint_signature(
+                stage="foci_detection",
+                input_path=tiff,
+                options={
+                    "detector_keys": detector_keys,
+                    "detector_opts": det_opts,
+                    "apply_to_channels": opts.apply_to_channels,
+                    "normalisation": normalisation_method,
+                },
+                channels=ctx.channel_labels,
+                phase_channel=ctx.phase_channel,
+            )
+            if ctx.reuse_existing and out.exists():
+                # Legacy parquets (no provenance sidecar): fall back to a
+                # make-style mtime check so a rebuilt normalisation TIFF
+                # still forces re-detection instead of silently reusing
+                # stale foci.
+                has_sig = artifact_signature_path(out).exists()
+                legacy_stale = (
+                    not has_sig
+                    and out.stat().st_mtime_ns < tiff.stat().st_mtime_ns
                 )
-                outputs.append(out)
-                n_skipped += 1
-                continue
+                if legacy_stale:
+                    progress_cb(
+                        0.0,
+                        f"Input newer than {out.name}; re-detecting",
+                    )
+                elif _can_reuse(out, signature, validate_parquet, progress_cb):
+                    progress_cb(
+                        (i + 1) / n,
+                        f"[{i+1}/{n}] Reused {tiff.name}",
+                    )
+                    outputs.append(out)
+                    n_skipped += 1
+                    continue
 
             data, _metadata = load_hyperstack(tiff)
             n_fov, n_channels, _, _ = data.shape
@@ -1104,6 +1243,7 @@ class FociDetectionStage:
                 tmp_out.replace(out)
             finally:
                 tmp_out.unlink(missing_ok=True)
+            write_artifact_signature(out, signature)
             outputs.append(out)
 
         progress_cb(
