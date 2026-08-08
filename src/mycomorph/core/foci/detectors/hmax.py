@@ -42,6 +42,7 @@ import numpy as np
 from .._types import DetectorOpts, Focus
 from ._common import (
     build_focus,
+    greedy_nms_indices,
     normalise_image,
     robust_sigma_mad,
     suppress_close_foci,
@@ -76,24 +77,33 @@ class HMaxDetector:
         noise = robust_sigma_mad(sm)
         h = max(float(opts.hmax_h_mad) * noise, 1e-6)
 
-        maxima = h_maxima(sm, h)
+        # Grayscale reconstruction runs ~1.5x faster on integers, and
+        # the h threshold spans thousands of 16-bit quanta, so the
+        # quantisation step is far below the noise floor the threshold
+        # is defined in — detections are unchanged up to sub-noise
+        # boundary wobble.
+        sm_max = float(sm.max())
+        if sm_max <= 0.0:
+            return []
+        scale = 65535.0 / sm_max
+        sm_q = (np.clip(sm, 0.0, None) * scale).astype(np.uint16)
+        h_q = max(1, int(round(h * scale)))
+        maxima = h_maxima(sm_q, h_q)
         if not maxima.any():
             return []
         lbl, n = ndimage.label(maxima, structure=np.ones((3, 3), dtype=int))
         centers = ndimage.center_of_mass(sm, lbl, index=range(1, n + 1))
 
-        # Greedy min-distance suppression, brightest plateau first.
-        peaks = sorted(
-            ((float(y), float(x)) for y, x in centers),
-            key=lambda p: sm[int(round(p[0])), int(round(p[1]))],
-            reverse=True,
-        )
+        # Greedy min-distance suppression, brightest plateau first
+        # (KD-tree NMS — plateau counts explode on noisy images and a
+        # naive pairwise scan goes quadratic).
+        pts = np.array([[float(y), float(x)] for y, x in centers])
+        scores = sm[
+            np.clip(np.round(pts[:, 0]).astype(int), 0, sm.shape[0] - 1),
+            np.clip(np.round(pts[:, 1]).astype(int), 0, sm.shape[1] - 1),
+        ]
         min_dist = max(1.0, 2.0 * float(opts.min_sigma))
-        kept: list[tuple[float, float]] = []
-        for y, x in peaks:
-            if any((y - ky) ** 2 + (x - kx) ** 2 < min_dist ** 2 for ky, kx in kept):
-                continue
-            kept.append((y, x))
+        kept = [tuple(pts[i]) for i in greedy_nms_indices(pts, scores, min_dist)]
 
         out: list[Focus] = []
         init_sigma = max(float(opts.min_sigma), 1.2)
