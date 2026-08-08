@@ -38,23 +38,24 @@ def normalise_image(image: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.9) ->
     return np.clip(out, 0.0, 1.0)
 
 
-def suppress_close_foci(foci: list[Focus], min_dist: float) -> list[Focus]:
-    """Greedy near-duplicate suppression — the brightest focus wins and
-    anything within ``min_dist`` of an already-kept focus is dropped.
+def greedy_nms_indices(
+    points: np.ndarray,
+    scores: np.ndarray,
+    min_dist: float,
+) -> list[int]:
+    """Indices kept by greedy non-maximum suppression on 2D points.
 
-    Sub-pixel refinement can converge two nearby candidates onto (almost)
-    the same peak, e.g. both flanks of an unresolved doublet; run this
-    *after* refinement to collapse them back into one detection.
+    Walk candidates in descending ``scores`` order; keeping one
+    suppresses every other point strictly closer than ``min_dist``.
+    KD-tree adjacency makes this O(n log n) instead of the naive O(n²)
+    pairwise scan, with identical output.
     """
-    if len(foci) <= 1:
-        return list(foci)
+    n = len(points)
+    if n <= 1:
+        return list(range(n))
     from scipy.spatial import cKDTree
 
-    # Greedy NMS via KD-tree adjacency (O(n log n) instead of the naive
-    # O(n²) pairwise scan): walking candidates brightest-first, keeping
-    # one suppresses its neighbours — identical output to checking each
-    # candidate against the kept list.
-    pts = np.array([[f.y, f.x] for f in foci], dtype=np.float64)
+    pts = np.asarray(points, dtype=np.float64)
     pairs = cKDTree(pts).query_pairs(float(min_dist), output_type="ndarray")
     if pairs.size:
         # query_pairs includes distance == min_dist; the suppression
@@ -66,18 +67,31 @@ def suppress_close_foci(foci: list[Focus], min_dist: float) -> list[Focus]:
         adjacency.setdefault(int(a), []).append(int(b))
         adjacency.setdefault(int(b), []).append(int(a))
 
-    order = sorted(
-        range(len(foci)), key=lambda i: foci[i].intensity, reverse=True,
-    )
-    suppressed = np.zeros(len(foci), dtype=bool)
-    kept: list[Focus] = []
+    order = sorted(range(n), key=lambda i: scores[i], reverse=True)
+    suppressed = np.zeros(n, dtype=bool)
+    kept: list[int] = []
     for i in order:
         if suppressed[i]:
             continue
-        kept.append(foci[i])
+        kept.append(i)
         for j in adjacency.get(i, ()):
             suppressed[j] = True
     return kept
+
+
+def suppress_close_foci(foci: list[Focus], min_dist: float) -> list[Focus]:
+    """Greedy near-duplicate suppression — the brightest focus wins and
+    anything within ``min_dist`` of an already-kept focus is dropped.
+
+    Sub-pixel refinement can converge two nearby candidates onto (almost)
+    the same peak, e.g. both flanks of an unresolved doublet; run this
+    *after* refinement to collapse them back into one detection.
+    """
+    if len(foci) <= 1:
+        return list(foci)
+    pts = np.array([[f.y, f.x] for f in foci], dtype=np.float64)
+    scores = np.array([f.intensity for f in foci], dtype=np.float64)
+    return [foci[i] for i in greedy_nms_indices(pts, scores, min_dist)]
 
 
 def robust_sigma_mad(image: np.ndarray) -> float:

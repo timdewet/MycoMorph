@@ -1096,10 +1096,11 @@ class FociDetectionStage:
         return ctx.foci_detection_dir
 
     def run(self, ctx, progress_cb: ProgressCB) -> list[Path]:
+        import concurrent.futures as cf
+        import multiprocessing as mp
+
         import pandas as pd
-        from mycomorph.core.foci.decompose import split_merged_foci
-        from mycomorph.core.foci.detectors import REGISTRY as DETECTOR_REGISTRY
-        from mycomorph.core.foci.features import features_dataframe
+        from mycomorph.core.foci.batch import detect_unit, resolve_worker_count
         from mycomorph.core.label_cells import (
             get_labeled_mask_from_fov,
             load_hyperstack,
@@ -1130,121 +1131,177 @@ class FociDetectionStage:
         outputs: list[Path] = []
         n = len(inputs)
         n_skipped = 0
-        for i, tiff in enumerate(inputs):
-            out = ctx.foci_detection_dir / (tiff.stem + ".parquet")
-            signature = checkpoint_signature(
-                stage="foci_detection",
-                input_path=tiff,
-                options={
-                    "detector_keys": detector_keys,
-                    "detector_opts": det_opts,
-                    "apply_to_channels": opts.apply_to_channels,
-                    "normalisation": normalisation_method,
-                },
-                channels=ctx.channel_labels,
-                phase_channel=ctx.phase_channel,
-            )
-            if ctx.reuse_existing and out.exists():
-                # Legacy parquets (no provenance sidecar): fall back to a
-                # make-style mtime check so a rebuilt normalisation TIFF
-                # still forces re-detection instead of silently reusing
-                # stale foci.
-                has_sig = artifact_signature_path(out).exists()
-                legacy_stale = (
-                    not has_sig
-                    and out.stat().st_mtime_ns < tiff.stat().st_mtime_ns
+        # One worker pool for the whole stage run (created lazily on the
+        # first file that actually needs computing). Detection +
+        # per-focus features are pure-CPU and GIL-bound, so units fan
+        # out to processes; spawn keeps macOS/Qt safe.
+        n_workers = resolve_worker_count(n_tasks=10**6)
+        executor: Optional[cf.ProcessPoolExecutor] = None
+
+        def _pool() -> cf.ProcessPoolExecutor:
+            nonlocal executor
+            if executor is None:
+                executor = cf.ProcessPoolExecutor(
+                    max_workers=n_workers,
+                    mp_context=mp.get_context("spawn"),
                 )
-                if legacy_stale:
-                    progress_cb(
-                        0.0,
-                        f"Input newer than {out.name}; re-detecting",
+            return executor
+
+        try:
+            for i, tiff in enumerate(inputs):
+                out = ctx.foci_detection_dir / (tiff.stem + ".parquet")
+                signature = checkpoint_signature(
+                    stage="foci_detection",
+                    input_path=tiff,
+                    options={
+                        "detector_keys": detector_keys,
+                        "detector_opts": det_opts,
+                        "apply_to_channels": opts.apply_to_channels,
+                        "normalisation": normalisation_method,
+                    },
+                    channels=ctx.channel_labels,
+                    phase_channel=ctx.phase_channel,
+                )
+                if ctx.reuse_existing and out.exists():
+                    # Legacy parquets (no provenance sidecar): fall back to a
+                    # make-style mtime check so a rebuilt normalisation TIFF
+                    # still forces re-detection instead of silently reusing
+                    # stale foci.
+                    has_sig = artifact_signature_path(out).exists()
+                    legacy_stale = (
+                        not has_sig
+                        and out.stat().st_mtime_ns < tiff.stat().st_mtime_ns
                     )
-                elif _can_reuse(out, signature, validate_parquet, progress_cb):
+                    if legacy_stale:
+                        progress_cb(
+                            0.0,
+                            f"Input newer than {out.name}; re-detecting",
+                        )
+                    elif _can_reuse(out, signature, validate_parquet, progress_cb):
+                        progress_cb(
+                            (i + 1) / n,
+                            f"[{i+1}/{n}] Reused {tiff.name}",
+                        )
+                        outputs.append(out)
+                        n_skipped += 1
+                        continue
+
+                data, _metadata = load_hyperstack(tiff)
+                n_fov, n_channels, _, _ = data.shape
+
+                mask_channel = n_channels - 1
+                phase_channel = (
+                    ctx.phase_channel if ctx.phase_channel is not None else 0
+                )
+                requested = opts.apply_to_channels
+                fluor_indices = [
+                    c for c in range(n_channels)
+                    if c != mask_channel and c != phase_channel
+                    and (requested is None or c in requested)
+                ]
+                if not fluor_indices:
                     progress_cb(
                         (i + 1) / n,
-                        f"[{i+1}/{n}] Reused {tiff.name}",
+                        f"[{i+1}/{n}] {tiff.name}: no fluor channels — skipping",
                     )
-                    outputs.append(out)
-                    n_skipped += 1
                     continue
 
-            data, _metadata = load_hyperstack(tiff)
-            n_fov, n_channels, _, _ = data.shape
+                well_stem = tiff.stem
 
-            mask_channel = n_channels - 1
-            phase_channel = (
-                ctx.phase_channel if ctx.phase_channel is not None else 0
-            )
-            requested = opts.apply_to_channels
-            fluor_indices = [
-                c for c in range(n_channels)
-                if c != mask_channel and c != phase_channel
-                and (requested is None or c in requested)
-            ]
-            if not fluor_indices:
-                progress_cb(
-                    (i + 1) / n,
-                    f"[{i+1}/{n}] {tiff.name}: no fluor channels — skipping",
-                )
-                continue
-
-            well_stem = tiff.stem
-            total_units = max(n_fov * len(fluor_indices) * len(detector_keys), 1)
-            unit = 0
-            rows: list[pd.DataFrame] = []
-            for fov_idx in range(n_fov):
-                labeled_mask, _ = get_labeled_mask_from_fov(
-                    data[fov_idx], mask_channel,
-                )
-                for c in fluor_indices:
-                    image = data[fov_idx, c, :, :]
-                    channel_name = ""
-                    if ctx.channel_labels and c < len(ctx.channel_labels):
-                        channel_name = str(ctx.channel_labels[c])
-                    for det_key in detector_keys:
-                        detector = DETECTOR_REGISTRY[det_key]()
-                        foci = detector.detect(image, labeled_mask, det_opts)
-                        if det_opts.split_merged:
-                            foci = split_merged_foci(
-                                image, foci, det_opts,
+                # One task per (FOV, channel, detector); masks extracted
+                # once per FOV in the parent.
+                tasks: list[dict] = []
+                for fov_idx in range(n_fov):
+                    labeled_mask, _ = get_labeled_mask_from_fov(
+                        data[fov_idx], mask_channel,
+                    )
+                    for c in fluor_indices:
+                        channel_name = ""
+                        if ctx.channel_labels and c < len(ctx.channel_labels):
+                            channel_name = str(ctx.channel_labels[c])
+                        for det_key in detector_keys:
+                            tasks.append(dict(
+                                image=data[fov_idx, c, :, :],
                                 labeled_mask=labeled_mask,
-                            )
-                        # Stable focus_id per (well, fov, channel, detector).
-                        for fid, f in enumerate(foci):
-                            f.focus_id = fid
-                        df = features_dataframe(
-                            image, labeled_mask, foci,
-                            detector=det_key,
-                            well=well_stem,
-                            fov_index=fov_idx,
-                            channel=channel_name,
-                        )
-                        if not df.empty:
-                            df["fov"] = int(fov_idx)
-                            df["channel_index"] = int(c)
-                            df["channel_name"] = channel_name
-                            df["normalisation"] = normalisation_method
-                            df["cell_id"] = df["cell_label"].astype(int)
-                            df["focus_id"] = [int(f.focus_id) for f in foci]
-                            rows.append(df)
-                        unit += 1
+                                det_key=det_key,
+                                fov_index=fov_idx,
+                                channel_index=c,
+                                channel_name=channel_name,
+                            ))
+
+                total_units = max(len(tasks), 1)
+
+                def _run_task(task: dict) -> pd.DataFrame:
+                    return detect_unit(
+                        task["image"], task["labeled_mask"],
+                        task["det_key"], det_opts,
+                        well=well_stem,
+                        fov_index=task["fov_index"],
+                        channel_index=task["channel_index"],
+                        channel_name=task["channel_name"],
+                        normalisation=normalisation_method,
+                    )
+
+                results: dict[int, pd.DataFrame] = {}
+                if n_workers <= 1 or len(tasks) <= 1:
+                    for k, task in enumerate(tasks):
+                        results[k] = _run_task(task)
                         progress_cb(
-                            (i + unit / total_units) / n,
-                            f"[{i+1}/{n}] {tiff.name} FOV {fov_idx+1}/{n_fov} "
-                            f"ch {c} det {det_key}: {len(foci)} foci",
+                            (i + (k + 1) / total_units) / n,
+                            f"[{i+1}/{n}] {tiff.name} "
+                            f"FOV {task['fov_index']+1}/{n_fov} "
+                            f"ch {task['channel_index']} det {task['det_key']}: "
+                            f"{len(results[k])} foci",
+                        )
+                else:
+                    futures = {
+                        _pool().submit(
+                            detect_unit,
+                            task["image"], task["labeled_mask"],
+                            task["det_key"], det_opts,
+                            well=well_stem,
+                            fov_index=task["fov_index"],
+                            channel_index=task["channel_index"],
+                            channel_name=task["channel_name"],
+                            normalisation=normalisation_method,
+                        ): k
+                        for k, task in enumerate(tasks)
+                    }
+                    done = 0
+                    for fut in cf.as_completed(futures):
+                        k = futures[fut]
+                        results[k] = fut.result()
+                        done += 1
+                        task = tasks[k]
+                        progress_cb(
+                            (i + done / total_units) / n,
+                            f"[{i+1}/{n}] {tiff.name} "
+                            f"FOV {task['fov_index']+1}/{n_fov} "
+                            f"ch {task['channel_index']} det {task['det_key']}: "
+                            f"{len(results[k])} foci "
+                            f"({n_workers} workers)",
                         )
 
-            df_all = (
-                pd.concat(rows, ignore_index=True) if rows else pd.DataFrame()
-            )
-            tmp_out = atomic_output_path(out)
-            try:
-                df_all.to_parquet(tmp_out, index=False)
-                tmp_out.replace(out)
-            finally:
-                tmp_out.unlink(missing_ok=True)
-            write_artifact_signature(out, signature)
-            outputs.append(out)
+                # Deterministic parquet order: original task order.
+                rows = [
+                    results[k] for k in range(len(tasks))
+                    if not results[k].empty
+                ]
+                df_all = (
+                    pd.concat(rows, ignore_index=True)
+                    if rows else pd.DataFrame()
+                )
+                tmp_out = atomic_output_path(out)
+                try:
+                    df_all.to_parquet(tmp_out, index=False)
+                    tmp_out.replace(out)
+                finally:
+                    tmp_out.unlink(missing_ok=True)
+                write_artifact_signature(out, signature)
+                outputs.append(out)
+        finally:
+            if executor is not None:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         progress_cb(
             1.0,

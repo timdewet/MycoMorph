@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 import tifffile
 
+from mycomorph.core.foci import DetectorOpts
 from mycomorph.core.foci.crosstalk import (
     estimate_crosstalk_k,
     subtract_crosstalk,
@@ -208,6 +209,55 @@ def test_fluor_norm_stage_reuse_honours_crosstalk_options(tmp_path: Path):
     got, _ = load_hyperstack(outputs[0])
     expected_green = np.clip(data[:, 2] - 0.2 * data[:, 1], 0, None)
     np.testing.assert_allclose(got[:, 2], expected_green, atol=1e-3)
+
+
+def test_foci_detection_signature_survives_parallel_path(
+    tmp_path: Path, monkeypatch,
+):
+    """Foci Detection writes a provenance signature and honours it on
+    reuse. Guards the merge of signature-checked reuse into the
+    process-pool detection path (single worker keeps the test fast)."""
+    from mycomorph.gui.pipeline.context import (
+        FluorescentNormalisationOpts, FociDetectionOpts,
+    )
+    from mycomorph.gui.pipeline.stages import FociDetectionStage
+
+    monkeypatch.setenv("MYCOMORPH_FOCI_WORKERS", "1")
+
+    rng = np.random.default_rng(3)
+    z, c, h, w = 1, 4, 64, 64
+    data = np.zeros((z, c, h, w), dtype=np.float32)
+    data[:, 1] = rng.normal(10, 1, (z, h, w))
+    data[:, 2] = rng.normal(10, 1, (z, h, w))
+    _add_spot(data[0, 2], 32, 32, 400)
+    data[:, 3] = 1.0  # single cell covering the frame
+
+    ctx = _stage_ctx(tmp_path, FluorescentNormalisationOpts(method="none"))
+    ctx.do_foci_detection = True
+    ctx.foci_detection_dir = tmp_path / "04c_foci_detection"
+    ctx.foci_detection_opts = FociDetectionOpts(detector_keys=["hmax"])
+    ctx.fluorescent_normalisation_dir.mkdir(parents=True)
+    _write_hyperstack(ctx.fluorescent_normalisation_dir / "well.tif", data)
+
+    stage = FociDetectionStage()
+    outputs = stage.run(ctx, lambda f, m: None)
+    assert len(outputs) == 1
+    assert artifact_signature_path(outputs[0]).exists()
+
+    # Same options + reuse → skip.
+    ctx.reuse_existing = True
+    messages: list[str] = []
+    stage.run(ctx, lambda f, m: messages.append(m))
+    assert any("Reused" in m for m in messages)
+
+    # Changed detector opts + reuse → rebuild.
+    ctx.foci_detection_opts = FociDetectionOpts(
+        detector_keys=["hmax"],
+        detector_opts=DetectorOpts(hmax_h_mad=6.0),
+    )
+    messages.clear()
+    stage.run(ctx, lambda f, m: messages.append(m))
+    assert not any("Reused" in m for m in messages)
 
 
 def test_fluor_norm_validate_rejects_bad_crosstalk_config(tmp_path: Path):
