@@ -57,6 +57,15 @@ class CacheEntry:
     foci_key: Optional[tuple] = None
     foci_df: Optional[pd.DataFrame] = None
 
+    # Normalised fluorescence channels for the fluor-norm / foci-det
+    # tabs. Recomputing these (Richardson-Lucy, BM3D, …) on every tab
+    # switch / repaint stalls the GUI thread for seconds, so the result
+    # is cached against the focus key + normaliser options. Kept for at
+    # most ONE entry at a time (the controller clears the others) since
+    # a full float32 channel stack is tens of MB per FOV.
+    norm_key: Optional[tuple] = None
+    norm_channels: Optional[np.ndarray] = None
+
 
 # ---------------------------------------------------------------------------
 # Key builders — explicit tuples of the option fields that affect each stage.
@@ -128,6 +137,36 @@ def classify_key(seg_k: SegmentKey, classify_opts: Any) -> ClassifyKey:
         getattr(classify_opts, "confidence_threshold", None),
         tuple(getattr(classify_opts, "keep_classes", ()) or ()),
         getattr(classify_opts, "pixels_per_um", None),
+    )
+
+
+def fluor_norm_channels_key(
+    focus_key: Any,
+    fluor_opts: Any,
+    n_channels: int,
+    phase_idx: int,
+) -> tuple:
+    """Key for the cached normalised channel stack (CacheEntry.norm_*).
+
+    Built from the focus key (a new FOV/focus invalidates it) plus every
+    FluorescentNormalisationOpts field that changes the output, plus the
+    effective channel list. Shared by the worker (which computes the
+    stack) and the controller (which validates the cache on repaint).
+    """
+    apply_to = list(getattr(fluor_opts, "apply_to_channels", None) or [])
+    if not apply_to:
+        apply_to = [c for c in range(int(n_channels)) if c != int(phase_idx)]
+    return (
+        "fluor_norm",
+        focus_key,
+        getattr(fluor_opts, "method", "none"),
+        getattr(fluor_opts, "tophat_radius_px", None),
+        getattr(fluor_opts, "gaussian_lp_sigma", None),
+        getattr(fluor_opts, "rl_iterations", None),
+        getattr(fluor_opts, "rl_psf_sigma", None),
+        getattr(fluor_opts, "bm3d_sigma", None),
+        tuple(int(c) for c in apply_to),
+        int(phase_idx),
     )
 
 
