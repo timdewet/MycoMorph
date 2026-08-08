@@ -351,24 +351,27 @@ class PreviewWorker(QThread):
         if opts is None:
             return None
         method = getattr(opts, "method", "none")
-        if method in ("", "none"):
+        crosstalk_on = bool(getattr(opts, "crosstalk_enabled", False))
+        if method in ("", "none") and not crosstalk_on:
             return None
         from mycomorph.core.foci.normalise import (
             NormaliserOpts, build, requires_run_level_fit,
         )
-        if requires_run_level_fit(method):
-            return None
-        norm_opts = NormaliserOpts(
-            tophat_radius_px=getattr(opts, "tophat_radius_px", 5),
-            gaussian_lp_sigma=getattr(opts, "gaussian_lp_sigma", None),
-            rl_iterations=getattr(opts, "rl_iterations", 30),
-            rl_psf_sigma=getattr(opts, "rl_psf_sigma", 1.5),
-            bm3d_sigma=getattr(opts, "bm3d_sigma", None),
-        )
-        try:
-            normaliser = build(method, norm_opts)
-        except Exception:  # noqa: BLE001
-            return None
+        normaliser = None
+        if method not in ("", "none"):
+            if requires_run_level_fit(method):
+                return None
+            norm_opts = NormaliserOpts(
+                tophat_radius_px=getattr(opts, "tophat_radius_px", 5),
+                gaussian_lp_sigma=getattr(opts, "gaussian_lp_sigma", None),
+                rl_iterations=getattr(opts, "rl_iterations", 30),
+                rl_psf_sigma=getattr(opts, "rl_psf_sigma", 1.5),
+                bm3d_sigma=getattr(opts, "bm3d_sigma", None),
+            )
+            try:
+                normaliser = build(method, norm_opts)
+            except Exception:  # noqa: BLE001
+                return None
         phase_idx = (
             req.phase_channel if isinstance(req.phase_channel, int) else 0
         )
@@ -378,14 +381,35 @@ class PreviewWorker(QThread):
             apply_to = [c for c in range(n_ch) if c != phase_idx]
         announce()
         out = np.array(channels, dtype=np.float32, copy=True)
-        for c in apply_to:
-            if not (0 <= c < n_ch):
-                continue
+        # Crosstalk subtraction first, mirroring the pipeline stage: the
+        # normaliser then runs on the corrected target channel. Preview
+        # is single-FOV, so auto-k is a per-FOV estimate (the pipeline
+        # writes the authoritative per-well fit).
+        xt_src = getattr(opts, "crosstalk_source_channel", None)
+        xt_tgt = getattr(opts, "crosstalk_target_channel", None)
+        if (crosstalk_on and xt_src is not None and xt_tgt is not None
+                and xt_src != xt_tgt
+                and 0 <= xt_src < n_ch and 0 <= xt_tgt < n_ch):
             self._check_cancel()
             try:
-                out[c] = normaliser.apply(channels[c])
+                from mycomorph.core.foci.crosstalk import (
+                    estimate_crosstalk_k, subtract_crosstalk,
+                )
+                k = getattr(opts, "crosstalk_k", None)
+                if k is None:
+                    k = estimate_crosstalk_k(out[xt_src], out[xt_tgt]).k
+                out[xt_tgt] = subtract_crosstalk(out[xt_tgt], out[xt_src], float(k))
             except Exception:  # noqa: BLE001
                 pass
+        if normaliser is not None:
+            for c in apply_to:
+                if not (0 <= c < n_ch):
+                    continue
+                self._check_cancel()
+                try:
+                    out[c] = normaliser.apply(out[c])
+                except Exception:  # noqa: BLE001
+                    pass
         return out
 
     def _maybe_run_foci(

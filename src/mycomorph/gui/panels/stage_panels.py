@@ -716,6 +716,51 @@ class FluorescentNormalisationPanel(QWidget):
             "Empty → every channel that isn't phase or mask.",
         ))
 
+        # Spectral crosstalk subtraction (independent of the normaliser
+        # method — applied to the raw channels before it).
+        self.crosstalk_enabled = QCheckBox("Subtract channel crosstalk")
+        form.addRow("", _with_helper(
+            self.crosstalk_enabled,
+            "Remove spectral bleed-through before normalisation: "
+            "target = max(target − k·source, 0). Bright source-channel "
+            "foci otherwise leave proportional ghosts in the target "
+            "channel that detectors report as phantom foci sitting "
+            "exactly on the source foci.",
+        ))
+        self.crosstalk_source = QComboBox()
+        form.addRow("Bleed source:", _with_helper(
+            self.crosstalk_source,
+            "Channel whose signal leaks into the other (usually the "
+            "brighter reporter).",
+        ))
+        self.crosstalk_target = QComboBox()
+        form.addRow("Correct channel:", _with_helper(
+            self.crosstalk_target,
+            "Channel the scaled source is subtracted from.",
+        ))
+        self.crosstalk_k = QDoubleSpinBox()
+        self.crosstalk_k.setRange(0.0, 1.0)
+        self.crosstalk_k.setDecimals(4)
+        self.crosstalk_k.setSingleStep(0.005)
+        self.crosstalk_k.setValue(0.05)
+        self.crosstalk_k_auto = QCheckBox("auto (estimate per well)")
+        self.crosstalk_k_auto.setChecked(True)
+        self.crosstalk_k_auto.setToolTip(
+            "Fit k per well from bright source-channel peaks: robust "
+            "(Theil–Sen) slope of target vs source local amplitude. "
+            "Genuinely colocalised foci are outliers and don't bias "
+            "the median slope. The fitted k is logged and written to "
+            "a __crosstalk.json sidecar next to each output TIFF."
+        )
+        xt_k_row = QHBoxLayout()
+        xt_k_row.setContentsMargins(0, 0, 0, 0)
+        xt_k_row.addWidget(self.crosstalk_k)
+        xt_k_row.addWidget(self.crosstalk_k_auto)
+        xt_k_row.addStretch(1)
+        self._xt_k_wrap = QWidget()
+        self._xt_k_wrap.setLayout(xt_k_row)
+        form.addRow("Crosstalk k:", self._xt_k_wrap)
+
         # All params present on the form — track widget pairs so we can
         # show/hide whole rows by method.
         self._param_rows: dict[str, tuple[QWidget, QWidget]] = {
@@ -735,9 +780,12 @@ class FluorescentNormalisationPanel(QWidget):
         )
         self.gaussian_lp_sigma.setEnabled(not self.gaussian_lp_auto.isChecked())
         self.bm3d_sigma.setEnabled(not self.bm3d_auto.isChecked())
+        self.crosstalk_enabled.toggled.connect(self._refresh_crosstalk_enabled)
+        self.crosstalk_k_auto.toggled.connect(self._refresh_crosstalk_enabled)
+        self._refresh_crosstalk_enabled()
         self._refresh_param_visibility(self.method.currentText())
 
-        for w in (self.method,):
+        for w in (self.method, self.crosstalk_source, self.crosstalk_target):
             w.currentIndexChanged.connect(self._emit_options_changed)
         for w in (
             self.tophat_radius_px, self.rl_iterations,
@@ -745,11 +793,22 @@ class FluorescentNormalisationPanel(QWidget):
             w.valueChanged.connect(self._emit_options_changed)
         for w in (
             self.gaussian_lp_sigma, self.rl_psf_sigma, self.bm3d_sigma,
+            self.crosstalk_k,
         ):
             w.valueChanged.connect(self._emit_options_changed)
-        for w in (self.gaussian_lp_auto, self.bm3d_auto):
+        for w in (
+            self.gaussian_lp_auto, self.bm3d_auto,
+            self.crosstalk_enabled, self.crosstalk_k_auto,
+        ):
             w.toggled.connect(self._emit_options_changed)
         self.channels._list.itemSelectionChanged.connect(self._emit_options_changed)
+
+    def _refresh_crosstalk_enabled(self, *_args) -> None:
+        on = self.crosstalk_enabled.isChecked()
+        for w in (self.crosstalk_source, self.crosstalk_target,
+                  self.crosstalk_k_auto):
+            w.setEnabled(on)
+        self.crosstalk_k.setEnabled(on and not self.crosstalk_k_auto.isChecked())
 
     def _emit_options_changed(self, *_args) -> None:
         if not self._loading:
@@ -776,6 +835,28 @@ class FluorescentNormalisationPanel(QWidget):
         if isinstance(self._phase_channel, int):
             exclude.append(self._phase_channel)
         self.channels.set_channels(self._channel_names, exclude_indices=exclude)
+        self._repopulate_crosstalk_combos(exclude)
+
+    def _repopulate_crosstalk_combos(self, exclude: list[int]) -> None:
+        """Rebuild the source/target combos from the channel names,
+        keeping the previous selection when it still exists. Defaults:
+        source = first fluor channel, target = second."""
+        for combo, default_pos in (
+            (self.crosstalk_source, 0), (self.crosstalk_target, 1),
+        ):
+            prev = combo.currentData()
+            combo.blockSignals(True)
+            combo.clear()
+            for idx, name in enumerate(self._channel_names):
+                if idx in exclude:
+                    continue
+                combo.addItem(f"{idx}: {name or f'channel {idx}'}", idx)
+            pos = combo.findData(prev) if prev is not None else -1
+            if pos < 0:
+                pos = min(default_pos, combo.count() - 1)
+            if pos >= 0:
+                combo.setCurrentIndex(pos)
+            combo.blockSignals(False)
 
     # ── opts / persistence ──────────────────────────────────────────
     def opts(self) -> FluorescentNormalisationOpts:
@@ -794,6 +875,13 @@ class FluorescentNormalisationPanel(QWidget):
                 else float(self.bm3d_sigma.value())
             ),
             apply_to_channels=selected or None,
+            crosstalk_enabled=self.crosstalk_enabled.isChecked(),
+            crosstalk_source_channel=self.crosstalk_source.currentData(),
+            crosstalk_target_channel=self.crosstalk_target.currentData(),
+            crosstalk_k=(
+                None if self.crosstalk_k_auto.isChecked()
+                else float(self.crosstalk_k.value())
+            ),
         )
 
     def state(self) -> dict:
@@ -807,6 +895,11 @@ class FluorescentNormalisationPanel(QWidget):
             "bm3d_sigma": float(self.bm3d_sigma.value()),
             "bm3d_auto": self.bm3d_auto.isChecked(),
             "apply_to_channels": self.channels.selected_indices(),
+            "crosstalk_enabled": self.crosstalk_enabled.isChecked(),
+            "crosstalk_source_channel": self.crosstalk_source.currentData(),
+            "crosstalk_target_channel": self.crosstalk_target.currentData(),
+            "crosstalk_k": float(self.crosstalk_k.value()),
+            "crosstalk_k_auto": self.crosstalk_k_auto.isChecked(),
         }
 
     def restore_state(self, s: dict) -> None:
@@ -836,11 +929,26 @@ class FluorescentNormalisationPanel(QWidget):
                 self.channels.set_selected_indices(
                     list(s["apply_to_channels"] or [])
                 )
+            if "crosstalk_enabled" in s:
+                self.crosstalk_enabled.setChecked(bool(s["crosstalk_enabled"]))
+            for key, combo in (
+                ("crosstalk_source_channel", self.crosstalk_source),
+                ("crosstalk_target_channel", self.crosstalk_target),
+            ):
+                if s.get(key) is not None:
+                    pos = combo.findData(int(s[key]))
+                    if pos >= 0:
+                        combo.setCurrentIndex(pos)
+            if "crosstalk_k" in s:
+                self.crosstalk_k.setValue(float(s["crosstalk_k"]))
+            if "crosstalk_k_auto" in s:
+                self.crosstalk_k_auto.setChecked(bool(s["crosstalk_k_auto"]))
             self._refresh_param_visibility(self.method.currentText())
             self.gaussian_lp_sigma.setEnabled(
                 not self.gaussian_lp_auto.isChecked()
             )
             self.bm3d_sigma.setEnabled(not self.bm3d_auto.isChecked())
+            self._refresh_crosstalk_enabled()
         finally:
             self._loading = False
 
