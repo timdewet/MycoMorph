@@ -1174,6 +1174,8 @@ class MainWindow(QMainWindow):
         "Segment":    "segment",
         "Classify":   "segment",
         "Features":   "features",
+        "Fluorescent Normalisation": "fluor_norm",
+        "Foci Detection": "foci_det",
         "Embeddings": "embeddings",
     }
 
