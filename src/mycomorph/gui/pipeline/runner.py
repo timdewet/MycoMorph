@@ -12,7 +12,17 @@ from PyQt6.QtCore import QObject, QThread, pyqtSignal
 from .bulk_layout import _output_filename
 from .cancellation import CancellationToken, StopRequested
 from .context import BulkRunContext, RunContext
-from .stages import ALL_STAGES, ClassifyStage, ExtractStage, SegmentStage, Stage, _iter_tiffs
+from .stages import (
+    ALL_STAGES,
+    ClassifyStage,
+    EmbeddingsStage,
+    ExtractStage,
+    FluorescentNormalisationStage,
+    FociDetectionStage,
+    SegmentStage,
+    Stage,
+    _iter_tiffs,
+)
 
 
 class PipelineRunner(QObject):
@@ -612,6 +622,12 @@ class BulkPipelineRunner(QObject):
                 planned.append("Classify")
             if getattr(ctx, "do_features", False):
                 planned.append("Features")
+            if getattr(ctx, "do_fluorescent_normalisation", False):
+                planned.append("Fluorescent Normalisation")
+            if getattr(ctx, "do_foci_detection", False):
+                planned.append("Foci Detection")
+            if getattr(ctx, "do_embeddings", False):
+                planned.append("Embeddings")
             self.stagesPlanned.emit(planned)
 
             # ── Focus stage: per-CZI ──────────────────────────────────
@@ -691,8 +707,18 @@ class BulkPipelineRunner(QObject):
                 else:
                     self.stageFinished.emit("Focus", len(focus_outputs))
 
-            # ── Segment + Classify + Features: reuse existing stage objects ────
-            for stage_obj in (SegmentStage(), ClassifyStage(), ExtractStage()):
+            # ── Segment onwards: reuse the plate-mode stage objects ────
+            # Keep this tuple in sync with the post-Focus portion of
+            # ALL_STAGES — a stage missing here silently never runs in
+            # Single-file / Bulk mode even when its checkbox is ticked.
+            for stage_obj in (
+                SegmentStage(),
+                ClassifyStage(),
+                ExtractStage(),
+                FluorescentNormalisationStage(),
+                FociDetectionStage(),
+                EmbeddingsStage(),
+            ):
                 if self._stop_requested:
                     break
                 if not stage_obj.enabled(ctx):  # type: ignore[arg-type]
@@ -789,6 +815,11 @@ def _stage_opts_bulk(ctx: BulkRunContext, name: str) -> dict:
         "Segment": ctx.segment_opts,
         "Classify": ctx.classify_opts,
         "Features": getattr(ctx, "features_opts", None),
+        "Fluorescent Normalisation": getattr(
+            ctx, "fluorescent_normalisation_opts", None
+        ),
+        "Foci Detection": getattr(ctx, "foci_detection_opts", None),
+        "Embeddings": getattr(ctx, "embeddings_opts", None),
     }
     o = opts_map.get(name)
     if o is None:
@@ -805,6 +836,11 @@ def _stage_opts(ctx: RunContext, name: str) -> dict:
         "Segment": ctx.segment_opts,
         "Classify": ctx.classify_opts,
         "Features": getattr(ctx, "features_opts", None),
+        "Fluorescent Normalisation": getattr(
+            ctx, "fluorescent_normalisation_opts", None
+        ),
+        "Foci Detection": getattr(ctx, "foci_detection_opts", None),
+        "Embeddings": getattr(ctx, "embeddings_opts", None),
     }
     o = opts_map.get(name)
     if o is None:
