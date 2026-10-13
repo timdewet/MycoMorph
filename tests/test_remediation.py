@@ -359,6 +359,10 @@ def test_library_uses_safe_storage_keys_for_display_names(tmp_path: Path):
 
 
 def test_bulk_duplicate_names_match_downstream_stage_filter(tmp_path: Path):
+    """Rows sharing labels are pooled into one sample, so the Focus
+    runner's grouping and the downstream stage filter must agree on a
+    single stem."""
+    from mycomorph.gui.pipeline.bulk_layout import group_entries
     from mycomorph.gui.pipeline.stages import _expected_stems_for_layout
 
     entries = [
@@ -375,9 +379,11 @@ def test_bulk_duplicate_names_match_downstream_stage_filter(tmp_path: Path):
         SimpleNamespace(czi_entries=entries),
         focus_suffix="_focused",
     )
-    assert len(expected) == 2
-    assert all(stem.endswith("_focused") for stem in expected)
-    assert all("__W" in stem for stem in expected)
+    groups = group_entries(entries)
+    assert len(groups) == 1
+    stem, paths = groups[0]
+    assert [p.name for p in paths] == ["one.czi", "two.czi"]
+    assert expected == {stem + "_focused"}
 
 
 @pytest.mark.parametrize("batch_correct", [False, True])

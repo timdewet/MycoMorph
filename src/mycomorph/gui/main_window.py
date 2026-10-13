@@ -730,7 +730,10 @@ class MainWindow(QMainWindow):
                     f"segment output exists at {seg_dir}."
                 )
 
-        if enables.get("Segment") and not enables.get("Focus"):
+        # Split alone produces unfocused per-sample TIFFs (single-plane
+        # inputs need no focus picking), so it also satisfies Segment.
+        if (enables.get("Segment") and not enables.get("Focus")
+                and not enables.get("Split")):
             focus_candidates = [
                 out / "01_split_and_focused",
                 out / "01_focus",
@@ -739,8 +742,8 @@ class MainWindow(QMainWindow):
             has_focus = any(d.exists() and any(d.iterdir()) for d in focus_candidates)
             if not has_focus:
                 blocking.append(
-                    "Segment is enabled but Focus is disabled and no focused "
-                    "output exists in any of:\n  "
+                    "Segment is enabled but Focus and Split are both "
+                    "disabled, and no earlier output exists in any of:\n  "
                     + "\n  ".join(str(d) for d in focus_candidates)
                 )
 
@@ -998,8 +1001,8 @@ class MainWindow(QMainWindow):
 
     def _on_czi_selected(self, czi_path) -> None:
         try:
-            from mycomorph.core.split_czi_plate import _read_czi_pixels_per_um
-            px = _read_czi_pixels_per_um(czi_path)
+            from mycomorph.core.focus.io_source import pixels_per_um
+            px = pixels_per_um(czi_path)
         except Exception:  # noqa: BLE001
             px = None
         self.segclass_panel.set_detected_pixels_per_um(px)
@@ -1318,6 +1321,7 @@ class MainWindow(QMainWindow):
             ctx = BulkRunContext(
                 czi_entries=entries,
                 output_dir=out,
+                do_split=enables["Split"],
                 do_focus=enables["Focus"],
                 do_segment=enables["Segment"],
                 do_classify=enables["Classify"],

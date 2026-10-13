@@ -85,6 +85,16 @@ class RunPanel(QWidget):
             "produced by the Features stage. Requires Features to be "
             "ticked (and its 'Save HDF5 crops' sub-option enabled)."
         )
+        self.checks["Split"].setToolTip(
+            "Write one TIFF per sample (per well in plate mode) without "
+            "focus picking. Use with Focus unticked when your images are "
+            "single-plane; Z-stacks need Focus. Skipped when Focus is ticked, "
+            "since Focus writes the same per-sample TIFFs."
+        )
+        self.checks["Focus"].setToolTip(
+            "Collapse each Z-stack to one in-focus image per field of view. "
+            "Not needed for single-plane images: untick it and keep Split."
+        )
 
         self.stepper = Stepper(STAGE_NAMES)
 

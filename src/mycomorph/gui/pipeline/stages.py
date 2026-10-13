@@ -162,34 +162,16 @@ def _expected_stems_for_layout(ctx, focus_suffix: str = "") -> set[str]:
       ``ctx.czi_entries`` — each row already carries condition /
       reporter / mutant / replica.
     """
-    from mycomorph.core.split_czi_plate import build_output_filename
-
     if hasattr(ctx, "czi_entries"):
+        # Rows sharing labels are pooled into one sample, so each distinct
+        # label set yields exactly one stem.
+        from .bulk_layout import sample_stem
         entries = list(getattr(ctx, "czi_entries", []) or [])
-        base_names = [
-            build_output_filename(
-                str(entry.get("condition", "")),
-                str(entry.get("reporter", "")),
-                str(entry.get("mutant_or_drug", "")),
-                str(entry.get("replica", "")),
-            )
-            for entry in entries
-        ]
-        stems: set[str] = set()
-        for entry, base_name in zip(entries, base_names):
-            stem = build_output_filename(
-                str(entry.get("condition", "")),
-                str(entry.get("reporter", "")),
-                str(entry.get("mutant_or_drug", "")),
-                str(entry.get("replica", "")),
-                stable_identifier=(
-                    str(Path(entry["czi_path"]).resolve())
-                    if base_names.count(base_name) > 1 else None
-                ),
-            ).removesuffix(".tif")
-            if stem:
-                stems.add(stem + focus_suffix)
-        return stems
+        return {
+            stem + focus_suffix
+            for stem in (sample_stem(entry) for entry in entries)
+            if stem
+        }
 
     active = ctx.layout.disambiguated_active_rows()
     stems = set()
@@ -204,6 +186,30 @@ def _expected_stems_for_layout(ctx, focus_suffix: str = "") -> set[str]:
         for s in _expected_stems_for_czi(sub, Path(czi).name, focus_suffix=focus_suffix):
             stems.add(s)
     return stems
+
+
+def _segment_source(ctx) -> tuple[Path, str]:
+    """``(dir, filename suffix)`` of the per-sample TIFFs that feed Segment.
+
+    Whatever this run produces wins: Focus output (stems carry
+    ``focus_opts.filename_suffix``, ``_focused`` by default), else Split
+    output (bare stems). A Segment-only re-run falls back to whichever
+    earlier output exists, Focus first.
+    """
+    focus = (ctx.focus_dir, ctx.focus_opts.filename_suffix or "")
+    split = (ctx.split_dir, "")
+    if ctx.do_focus:
+        return focus
+    if ctx.do_split:
+        return split
+    if ctx.focus_dir.exists() and _iter_tiffs(ctx.focus_dir):
+        return focus
+    return split
+
+
+def _source_suffix(ctx) -> str:
+    """Suffix every downstream stage expects on its input stems."""
+    return _segment_source(ctx)[1]
 
 
 def _filter_to_layout(
@@ -389,15 +395,10 @@ class SegmentStage:
         return ctx.segment_dir
 
     def run(self, ctx: RunContext, progress_cb: ProgressCB) -> list[Path]:
-        # Prefer focus output if it exists on disk, else split output. We
-        # accept either regardless of whether do_focus / do_split are set
-        # for THIS run — the user may be running Segment alone against
-        # outputs produced by an earlier run.
-        inputs: list[Path] = []
-        if ctx.focus_dir.exists():
-            inputs = _iter_tiffs(ctx.focus_dir)
-        if not inputs and ctx.split_dir.exists():
-            inputs = _iter_tiffs(ctx.split_dir)
+        # Use the output of whichever of Focus / Split this run performs;
+        # a Segment-only run picks up an earlier run's output instead.
+        source_dir, source_suffix = _segment_source(ctx)
+        inputs = _iter_tiffs(source_dir) if source_dir.exists() else []
 
         if not inputs:
             raise RuntimeError(
@@ -409,8 +410,7 @@ class SegmentStage:
         # Filter to TIFFs the current layout actually expects so we don't
         # process stale orphans from a previous experiment that may still
         # be sitting in 01_split_and_focused/.
-        focus_suffix = ctx.focus_opts.filename_suffix or ""
-        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        expected = _expected_stems_for_layout(ctx, focus_suffix=source_suffix)
         inputs = _filter_to_layout(inputs, expected, progress_cb)
         if not inputs:
             raise RuntimeError(
@@ -489,8 +489,7 @@ class ClassifyStage:
         if not inputs:
             raise RuntimeError("ClassifyStage has no segmented TIFFs to process.")
 
-        focus_suffix = ctx.focus_opts.filename_suffix or ""
-        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        expected = _expected_stems_for_layout(ctx, focus_suffix=_source_suffix(ctx))
         inputs = _filter_to_layout(inputs, expected, progress_cb)
         if not inputs:
             raise RuntimeError(
@@ -584,8 +583,7 @@ class ExtractStage:
                 "(and optionally Classify) first."
             )
 
-        focus_suffix = ctx.focus_opts.filename_suffix or ""
-        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        expected = _expected_stems_for_layout(ctx, focus_suffix=_source_suffix(ctx))
         inputs = _filter_to_layout(inputs, expected, progress_cb)
         if not inputs:
             raise RuntimeError(
@@ -858,8 +856,7 @@ class FluorescentNormalisationStage:
                 "Run Segment (and optionally Classify) first."
             )
 
-        focus_suffix = ctx.focus_opts.filename_suffix or ""
-        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        expected = _expected_stems_for_layout(ctx, focus_suffix=_source_suffix(ctx))
         inputs = _filter_to_layout(inputs, expected, progress_cb)
         if not inputs:
             raise RuntimeError(
@@ -1113,8 +1110,7 @@ class FociDetectionStage:
                 "Run Fluorescent Normalisation first."
             )
         inputs = _iter_tiffs(ctx.fluorescent_normalisation_dir)
-        focus_suffix = ctx.focus_opts.filename_suffix or ""
-        expected = _expected_stems_for_layout(ctx, focus_suffix=focus_suffix)
+        expected = _expected_stems_for_layout(ctx, focus_suffix=_source_suffix(ctx))
         inputs = _filter_to_layout(inputs, expected, progress_cb)
         if not inputs:
             raise RuntimeError(

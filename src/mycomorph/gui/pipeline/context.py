@@ -204,15 +204,18 @@ class BulkRunContext:
     """Run context for non-plate (Single file or Bulk) modes.
 
     A list of (czi_path, label-fields) entries that all share the same
-    output directory and stage options. The Focus stage is invoked once
-    per entry; Segment and Classify run once each over the resulting
-    per-CZI TIFFs.
+    output directory and stage options. Entries sharing labels form one
+    sample. Focus (or, for single-plane inputs, Split without Focus) runs
+    once per sample; Segment and Classify run once each over the
+    resulting per-sample TIFFs.
     """
 
     czi_entries: list[dict[str, Any]]
     output_dir: Path
 
-    # Stage enables (Split is unused in bulk mode — each CZI is one sample).
+    # Stage enables. As in plate mode, Focus subsumes Split; Split alone
+    # writes each sample's single-plane FOVs without focus picking.
+    do_split: bool = False
     do_focus: bool = True
     do_segment: bool = True
     do_classify: bool = True
@@ -237,17 +240,11 @@ class BulkRunContext:
     phase_channel: Optional[int] = None
     channel_labels: Optional[list[str]] = None
 
-    # ── duck-type compatibility with RunContext ──────────────────────
-    # SegmentStage and ClassifyStage read these; provide stable values so
-    # the existing stage code can be reused without branching on context
-    # type.
-    do_split: bool = False     # bulk mode never splits
     reuse_existing: bool = False   # set by BulkPipelineRunner from its own flag
 
     @property
     def split_dir(self) -> Path:
-        # Path that never exists, so SegmentStage's split-fallback skips it.
-        return self.output_dir / "_split_unused_in_bulk_mode"
+        return self.output_dir / "01_split"
 
     # Same flat directory layout as the plate flow so downstream tools
     # don't have to special-case anything.

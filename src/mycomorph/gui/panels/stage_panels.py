@@ -246,7 +246,7 @@ class SegmentPanel(QWidget):
         self.pixels_per_um.setRange(0.0, 10000.0)
         self.pixels_per_um.setValue(13.8767)
         self.pixels_per_um.setDecimals(4)
-        self._pixel_hint = QLabel("(auto-detect from CZI once a file is loaded)")
+        self._pixel_hint = QLabel("(auto-detected from the input file once one is loaded)")
         self._pixel_hint.setObjectName("muted")
         self._user_overrode_pixels = False
         self.pixels_per_um.valueChanged.connect(self._mark_user_override)
@@ -342,9 +342,9 @@ class SegmentPanel(QWidget):
     def set_detected_pixels_per_um(self, value: float | None) -> None:
         """Called from the Input panel when a CZI is selected."""
         if value is None:
-            self._pixel_hint.setText("(pixel size could not be read from CZI)")
+            self._pixel_hint.setText("(pixel size could not be read from the input file)")
             return
-        self._pixel_hint.setText(f"(auto-detected from CZI: {value:.3f} px/µm)")
+        self._pixel_hint.setText(f"(auto-detected from input file: {value:.3f} px/µm)")
         if not self._user_overrode_pixels:
             self.pixels_per_um.blockSignals(True)
             self.pixels_per_um.setValue(value)

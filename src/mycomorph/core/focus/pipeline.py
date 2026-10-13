@@ -1,4 +1,7 @@
-"""Per-CZI orchestration: read, score, pick, write OME-TIFF, log scores, archive."""
+"""Per-input orchestration: read, score, pick, write TIFF, log scores, archive.
+
+Inputs are CZIs or TIFFs; both are read through :mod:`io_source`.
+"""
 
 from __future__ import annotations
 
@@ -12,9 +15,12 @@ from typing import Literal
 import numpy as np
 import tifffile
 
-from . import archive, channel_id, focus, io_czi, io_ometiff, tiling
+from . import archive, channel_id, focus, io_ometiff, io_source, tiling
+from .io_czi import Scene
 
-FocusMode = Literal["whole", "tiles", "edf"]
+# "none" writes single-plane inputs through unchanged (no focus picking);
+# it refuses Z-stacks rather than silently choosing a plane.
+FocusMode = Literal["whole", "tiles", "edf", "none"]
 
 
 @dataclass
@@ -45,7 +51,7 @@ class SceneResult:
     scene_index: int
     chosen_z: int
     output_path: Path
-    scores_csv: Path
+    scores_csv: Path | None
     well: str | None = None
 
 
@@ -55,7 +61,7 @@ class WellResult:
     scene_indices: list[int]
     chosen_z: list[int]
     output_path: Path
-    scores_csv: Path
+    scores_csv: Path | None
 
 
 @dataclass
@@ -246,21 +252,27 @@ def _write_acquisition_sidecar(
     plate_acquisition_datetime: str | None,
     fov_acquisition_times: list[str | None],
     scene_indices: list[int] | None = None,
+    fov_source_files: list[str] | None = None,
 ) -> None:
-    """Write a JSON sidecar carrying CZI provenance for downstream stages.
+    """Write a JSON sidecar carrying source-file provenance for downstream stages.
 
     The Features stage reads this to populate per-cell ``source_czi`` and
     ``acquisition_time`` columns. Path is ``<tiff_stem>__acquisition.json``
-    next to the TIFF.
+    next to the TIFF. ``source_czi`` keeps its historical name but may be
+    a TIFF; when a sample pools FOVs from several files, it lists them all
+    and ``fov_source_files`` records the file each FOV came from.
     """
     sidecar = tiff_path.with_name(tiff_path.stem + "__acquisition.json")
+    sources = list(dict.fromkeys(fov_source_files or [])) or [source_czi.name]
     payload: dict = {
-        "source_czi": source_czi.name,
+        "source_czi": "; ".join(sources),
         "plate_acquisition_datetime": plate_acquisition_datetime,
         "fov_acquisition_times": list(fov_acquisition_times),
     }
     if scene_indices is not None:
         payload["scene_indices"] = list(scene_indices)
+    if fov_source_files is not None:
+        payload["fov_source_files"] = list(fov_source_files)
     try:
         from ..provenance import atomic_write_text
         atomic_write_text(sidecar, json.dumps(payload, indent=2))
@@ -307,7 +319,7 @@ class _ProcessedScene:
 
 
 def _process_scene(
-    scene: io_czi.Scene,
+    scene: Scene,
     phase_idx: int,
     opts: Options,
 ) -> _ProcessedScene:
@@ -372,7 +384,185 @@ def _process_scene(
             description_extra=f"mode=edf z_min={z_min} z_max={z_max} mean_z={summary_z}",
         )
 
+    if opts.focus_mode == "none":
+        if scene.array_zcyx.shape[0] != 1:
+            raise ValueError(
+                f"scene {scene.index} has {scene.array_zcyx.shape[0]} Z-planes; "
+                "focus_mode 'none' only accepts single-plane images"
+            )
+        return _ProcessedScene(
+            planes=scene.array_zcyx[0],
+            channel_names=list(scene.channel_names),
+            mode="none",
+            summary_z=0,
+            description_extra="mode=none",
+        )
+
     raise ValueError(f"unknown focus_mode {opts.focus_mode!r}")
+
+
+@dataclass(frozen=True)
+class _SceneRef:
+    """One field of view: a scene inside a specific input file."""
+
+    path: Path
+    index: int
+
+
+def _resolve_phase_idx(
+    refs: list[_SceneRef],
+    opts: Options,
+    scene_cache: dict[_SceneRef, Scene],
+) -> int:
+    """Decide the phase channel once for a set of FOVs.
+
+    Scenes read along the way are left in ``scene_cache`` for reuse.
+    """
+    if opts.phase_channel is not None:
+        first = io_source.read_scene(refs[0].path, refs[0].index)
+        scene_cache[refs[0]] = first
+        return channel_id.resolve_phase_channel(
+            first.array_zcyx, first.channel_names, opts.phase_channel
+        )
+    # Pool stats from scenes spread evenly across the inputs rather than the
+    # first N — corner-of-plate FOVs can have unrepresentative channel
+    # statistics (e.g. weak fluorescence that mimics phase contrast).
+    sample_count = min(10, len(refs))
+    step = max(1, len(refs) // sample_count)
+    positions = sorted({min(i * step, len(refs) - 1) for i in range(sample_count)})
+    sample_refs = [refs[p] for p in positions]
+    sample = [io_source.read_scene(r.path, r.index) for r in sample_refs]
+    scene_cache.update(zip(sample_refs, sample))
+    return channel_id.detect_phase_channel_multi([s.array_zcyx for s in sample])
+
+
+def _well_base(well_filenames: dict[str, str] | None, well: str, filename_suffix: str) -> str:
+    """Output stem for a well: caller-supplied name → well id, plus suffix."""
+    base = (well_filenames or {}).get(well, well)
+    # Strip any caller-supplied extension; we own the suffix.
+    for ext in (".ome.tiff", ".tiff", ".tif"):
+        if base.endswith(ext):
+            base = base[:-len(ext)]
+            break
+    return base + filename_suffix
+
+
+def _process_well(
+    well: str,
+    refs: list[_SceneRef],
+    *,
+    well_dir: Path,
+    base: str,
+    phase_idx: int,
+    opts: Options,
+    scene_cache: dict[_SceneRef, Scene],
+    per_scene_times: dict[Path, dict[int, str]],
+    save_zmaps: bool,
+    on_fov,
+) -> WellResult:
+    """Focus every FOV in ``refs`` and write them as one per-well TIFF."""
+    fov_planes: list[np.ndarray] = []
+    channel_names_out: list[str] | None = None
+    first_ref: _SceneRef | None = None
+    chosen_zs: list[int] = []
+    whole_score_rows: list[tuple[int, int, dict[str, np.ndarray], int]] = []
+    tile_score_rows: list[tuple[int, dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]]]] = []
+    edf_z_maps: list[np.ndarray] = []
+    pixel_size = (None, None)
+    fov_acq_times: list[str | None] = []
+    fov_sources: list[str] = []
+    plate_acq_dt: str | None = None
+
+    for ref in refs:
+        scene = scene_cache.pop(ref, None) or io_source.read_scene(ref.path, ref.index)
+        n_z = scene.array_zcyx.shape[0]
+        if opts.focus_mode == "none" and n_z != 1:
+            raise ValueError(
+                f"{ref.path.name} (scene {ref.index}) has {n_z} Z-planes. "
+                "Enable Focus to collapse Z-stacks; Split without Focus only "
+                "accepts single-plane images."
+            )
+        processed = _process_scene(scene, phase_idx, opts)
+        if first_ref is None:
+            first_ref = ref
+            channel_names_out = processed.channel_names
+        elif processed.planes.shape != fov_planes[0].shape:
+            raise ValueError(
+                f"Cannot combine fields of view for {base}: "
+                f"{ref.path.name} (scene {ref.index}) is {processed.planes.shape} "
+                f"(channels, Y, X) but {first_ref.path.name} is "
+                f"{fov_planes[0].shape}. Files pooled into one sample must "
+                "have the same channels and image size."
+            )
+        fov_planes.append(processed.planes)
+        chosen_zs.append(processed.summary_z)
+        # Prefer the per-scene subblock timestamp; fall back to the
+        # file-level master if the subblock didn't carry one.
+        per_scene_t = per_scene_times.get(ref.path, {}).get(int(ref.index))
+        fov_acq_times.append(per_scene_t or scene.acquisition_time)
+        fov_sources.append(ref.path.name)
+        if plate_acq_dt is None:
+            plate_acq_dt = scene.acquisition_time
+        if processed.mode == "whole":
+            whole_score_rows.append(
+                (ref.index, processed.summary_z, processed.scores, processed.summary_z)
+            )
+        elif processed.mode == "tiles":
+            tile_score_rows.append((ref.index, processed.tile_picks))
+        elif processed.mode == "edf":
+            edf_z_maps.append(processed.z_map)
+        pixel_size = scene.pixel_size_um
+        on_fov(len(chosen_zs))
+
+    stack_tcyx = np.stack(fov_planes, axis=0)  # (T, C, Y, X)
+    out_path = well_dir / f"{base}.tif"
+    sources = list(dict.fromkeys(fov_sources))
+
+    mode_tag = opts.focus_mode
+    if mode_tag == "tiles":
+        rows, cols = opts.tile_grid
+        mode_tag = f"tiles({rows}x{cols})"
+    description = (
+        f"FocusPicker source={', '.join(sources)} well={well} "
+        f"n_fov={len(refs)} metric={opts.metric} mode={mode_tag}"
+    )
+    io_ometiff.write_tcyx(
+        out_path,
+        stack_tcyx,
+        channel_names_out or [],
+        pixel_size,
+        description=description,
+    )
+
+    _write_acquisition_sidecar(
+        out_path,
+        source_czi=refs[0].path,
+        plate_acquisition_datetime=plate_acq_dt,
+        fov_acquisition_times=fov_acq_times,
+        scene_indices=[r.index for r in refs],
+        fov_source_files=fov_sources if len(sources) > 1 else None,
+    )
+
+    if opts.focus_mode == "whole":
+        scores_path = well_dir / f"{base}_focus_scores.csv"
+        _write_well_scores_csv(scores_path, well, whole_score_rows)
+    elif opts.focus_mode == "tiles":
+        scores_path = well_dir / f"{base}_focus_scores.csv"
+        _write_well_tile_scores_csv(scores_path, well, tile_score_rows, opts.tile_grid)
+    elif opts.focus_mode == "edf":
+        scores_path = well_dir / f"{base}_zmaps.tif"
+        if save_zmaps:
+            _write_well_zmaps_tif(scores_path, edf_z_maps)
+    else:  # none — nothing was scored
+        scores_path = None
+
+    return WellResult(
+        well=well,
+        scene_indices=[r.index for r in refs],
+        chosen_z=chosen_zs,
+        output_path=out_path,
+        scores_csv=scores_path,
+    )
 
 
 def process_czi(
@@ -385,10 +575,10 @@ def process_czi(
     progress_cb=None,
     single_bucket_label: str | None = None,
 ) -> ProcessResult:
-    """Process every scene of a CZI.
+    """Process every scene of a CZI (or TIFF).
 
     Args:
-        czi_path: the CZI to read.
+        czi_path: the CZI or TIFF to read.
         opts: focus-picking options.
         out_dir: where to write output. If None, write next to the CZI and
             nest under a per-CZI folder (legacy behaviour). If given, files
@@ -404,10 +594,22 @@ def process_czi(
             label, regardless of any plate metadata in the file. Output is
             ``out_dir / f"{single_bucket_label}{filename_suffix}.tif"``.
             Use this for CZIs that aren't multi-well plates (each one is
-            its own sample).
+            its own sample). See :func:`process_sample` to pool several
+            files into one sample.
     """
-    opts = opts or Options()
     czi_path = Path(czi_path)
+    if single_bucket_label is not None:
+        return process_sample(
+            [czi_path],
+            single_bucket_label,
+            opts=opts,
+            out_dir=out_dir if out_dir is not None else czi_path.parent / czi_path.stem,
+            save_zmaps=save_zmaps,
+            filename_suffix=filename_suffix,
+            progress_cb=progress_cb,
+        )
+
+    opts = opts or Options()
     flat_out = out_dir is not None
     out_dir = Path(out_dir) if out_dir is not None else czi_path.parent
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -418,7 +620,7 @@ def process_czi(
         if progress_cb is not None:
             progress_cb(frac, msg)
 
-    all_indices = io_czi.list_scene_indices(czi_path)
+    all_indices = io_source.list_scene_indices(czi_path)
     if not all_indices:
         return result
 
@@ -428,167 +630,62 @@ def process_czi(
     # (the master CZI XML only carries the plate-level AcquisitionDateAndTime,
     # which is identical for every scene). Empty dict on any failure;
     # downstream code falls back to the file-level timestamp.
-    try:
-        from ..split_czi_plate import _read_czi_per_scene_acquisition_times
-        per_scene_times = _read_czi_per_scene_acquisition_times(czi_path)
-    except Exception:  # noqa: BLE001
-        per_scene_times = {}
+    per_scene_times = {czi_path: io_source.per_scene_acquisition_times(czi_path)}
 
-    well_map = io_czi.list_scene_wells(czi_path)
+    well_map = io_source.list_scene_wells(czi_path)
     use_wells = bool(well_map)
 
-    # Bulk-mode override: pretend every scene belongs to one virtual well
-    # so the existing per-well grouping / naming code does the right thing.
-    if single_bucket_label is not None:
-        bucket_id = "_BULK_"
-        well_map = {idx: bucket_id for idx in all_indices}
-        use_wells = True
-        if well_filenames is None:
-            well_filenames = {}
-        well_filenames = {**well_filenames, bucket_id: single_bucket_label}
-
-    # Decide phase channel once for the whole file, with up to 5 scenes pooled.
-    if opts.phase_channel is not None:
-        first = io_czi.read_scene(czi_path, all_indices[0])
-        phase_idx = channel_id.resolve_phase_channel(
-            first.array_zcyx, first.channel_names, opts.phase_channel
-        )
-        scene_cache: dict[int, io_czi.Scene] = {first.index: first}
-    else:
-        # Pool stats from scenes spread evenly across the file rather than the
-        # first N — corner-of-plate FOVs can have unrepresentative channel
-        # statistics (e.g. weak fluorescence that mimics phase contrast).
-        sample_count = min(10, len(all_indices))
-        step = max(1, len(all_indices) // sample_count)
-        sample_positions = [min(i * step, len(all_indices) - 1) for i in range(sample_count)]
-        sample_indices = sorted({all_indices[p] for p in sample_positions})
-        sample = [io_czi.read_scene(czi_path, idx) for idx in sample_indices]
-        phase_idx = channel_id.detect_phase_channel_multi([s.array_zcyx for s in sample])
-        scene_cache = {s.index: s for s in sample}
+    # Decide phase channel once for the whole file, with up to 10 scenes pooled.
+    all_refs = [_SceneRef(czi_path, idx) for idx in all_indices]
+    scene_cache: dict[_SceneRef, Scene] = {}
+    phase_idx = _resolve_phase_idx(all_refs, opts, scene_cache)
 
     if use_wells:
         # Group scene indices by well, preserving original ordering.
-        wells: dict[str, list[int]] = defaultdict(list)
-        for idx in all_indices:
-            well = well_map.get(idx) or "unassigned"
-            wells[well].append(idx)
+        wells: dict[str, list[_SceneRef]] = defaultdict(list)
+        for ref in all_refs:
+            wells[well_map.get(ref.index) or "unassigned"].append(ref)
         # When an explicit out_dir was supplied (the GUI case), write files
         # flat into it. Otherwise use the legacy per-CZI nested folder.
         well_dir = out_dir if flat_out else (out_dir / stem)
         well_dir.mkdir(parents=True, exist_ok=True)
 
         well_list = sorted(wells)
-        total_scenes = sum(len(wells[w]) for w in well_list)
+        total_scenes = len(all_refs)
         done_scenes = 0
         for w_idx, well in enumerate(well_list):
-            indices = wells[well]
+            refs = wells[well]
             _emit(0.05 + 0.9 * (done_scenes / max(total_scenes, 1)),
                   f"Processing well {well} ({w_idx+1}/{len(well_list)})")
-            fov_planes: list[np.ndarray] = []
-            channel_names_out: list[str] | None = None
-            chosen_zs: list[int] = []
-            whole_score_rows: list[tuple[int, int, dict[str, np.ndarray], int]] = []
-            tile_score_rows: list[tuple[int, dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]]]] = []
-            edf_z_maps: list[np.ndarray] = []
-            pixel_size = (None, None)
-            fov_acq_times: list[str | None] = []
-            plate_acq_dt: str | None = None
 
-            for scene_index in indices:
-                scene = scene_cache.pop(scene_index, None) or io_czi.read_scene(
-                    czi_path, scene_index
-                )
-                processed = _process_scene(scene, phase_idx, opts)
-                if channel_names_out is None:
-                    channel_names_out = processed.channel_names
-                fov_planes.append(processed.planes)
-                chosen_zs.append(processed.summary_z)
-                # Prefer the per-scene subblock timestamp; fall back to the
-                # file-level master if the subblock didn't carry one.
-                per_scene_t = per_scene_times.get(int(scene_index))
-                fov_acq_times.append(per_scene_t or scene.acquisition_time)
-                if plate_acq_dt is None:
-                    plate_acq_dt = scene.acquisition_time
-                if processed.mode == "whole":
-                    whole_score_rows.append(
-                        (scene_index, processed.summary_z, processed.scores, processed.summary_z)
-                    )
-                elif processed.mode == "tiles":
-                    tile_score_rows.append((scene_index, processed.tile_picks))
-                elif processed.mode == "edf":
-                    edf_z_maps.append(processed.z_map)
-                pixel_size = scene.pixel_size_um
-                done_scenes += 1
-                _emit(0.05 + 0.9 * (done_scenes / max(total_scenes, 1)),
-                      f"Well {well}: FOV {len(chosen_zs)}/{len(indices)}")
-
-            stack_tcyx = np.stack(fov_planes, axis=0)  # (T, C, Y, X)
-
-            # Resolve output filename: caller-supplied name → {well}.ome.tiff.
-            base = (well_filenames or {}).get(well, well)
-            # Strip any caller-supplied extension; we own the suffix.
-            if base.endswith(".ome.tiff"):
-                base = base[:-len(".ome.tiff")]
-            elif base.endswith(".tiff"):
-                base = base[:-len(".tiff")]
-            elif base.endswith(".tif"):
-                base = base[:-len(".tif")]
-            base = base + filename_suffix
-            out_path = well_dir / f"{base}.tif"
-
-            mode_tag = opts.focus_mode
-            if mode_tag == "tiles":
-                rows, cols = opts.tile_grid
-                mode_tag = f"tiles({rows}x{cols})"
-            description = (
-                f"FocusPicker source={czi_path.name} well={well} "
-                f"n_fov={len(indices)} metric={opts.metric} mode={mode_tag}"
-            )
-            io_ometiff.write_tcyx(
-                out_path,
-                stack_tcyx,
-                channel_names_out or [],
-                pixel_size,
-                description=description,
-            )
-
-            _write_acquisition_sidecar(
-                out_path,
-                source_czi=czi_path,
-                plate_acquisition_datetime=plate_acq_dt,
-                fov_acquisition_times=fov_acq_times,
-                scene_indices=list(indices),
-            )
-
-            if opts.focus_mode == "whole":
-                scores_path = well_dir / f"{base}_focus_scores.csv"
-                _write_well_scores_csv(scores_path, well, whole_score_rows)
-            elif opts.focus_mode == "tiles":
-                scores_path = well_dir / f"{base}_focus_scores.csv"
-                _write_well_tile_scores_csv(scores_path, well, tile_score_rows, opts.tile_grid)
-            else:  # edf
-                scores_path = well_dir / f"{base}_zmaps.tif"
-                if save_zmaps:
-                    _write_well_zmaps_tif(scores_path, edf_z_maps)
+            def on_fov(n: int, _well=well, _n=len(refs), _done=done_scenes) -> None:
+                _emit(0.05 + 0.9 * ((_done + n) / max(total_scenes, 1)),
+                      f"Well {_well}: FOV {n}/{_n}")
 
             result.well_results.append(
-                WellResult(
-                    well=well,
-                    scene_indices=list(indices),
-                    chosen_z=chosen_zs,
-                    output_path=out_path,
-                    scores_csv=scores_path,
+                _process_well(
+                    well,
+                    refs,
+                    well_dir=well_dir,
+                    base=_well_base(well_filenames, well, filename_suffix),
+                    phase_idx=phase_idx,
+                    opts=opts,
+                    scene_cache=scene_cache,
+                    per_scene_times=per_scene_times,
+                    save_zmaps=save_zmaps,
+                    on_fov=on_fov,
                 )
             )
+            done_scenes += len(refs)
     else:
         for scene_pos, scene_index in enumerate(all_indices):
             _emit(
                 0.05 + 0.9 * (scene_pos / max(len(all_indices), 1)),
                 f"Processing FOV {scene_pos + 1}/{len(all_indices)}",
             )
-            scene = scene_cache.pop(scene_index, None) or io_czi.read_scene(
-                czi_path, scene_index
-            )
+            scene = scene_cache.pop(
+                _SceneRef(czi_path, scene_index), None
+            ) or io_source.read_scene(czi_path, scene_index)
             processed = _process_scene(scene, phase_idx, opts)
 
             scene_tag = f"_scene{scene.index:02d}"
@@ -616,10 +713,12 @@ def process_czi(
                 _write_tile_scores_csv(
                     scores_path, scene.index, processed.tile_picks, opts.tile_grid
                 )
-            else:  # edf
+            elif processed.mode == "edf":
                 scores_path = out_dir / f"{stem}{scene_tag}_zmap.tif"
                 if save_zmaps:
                     _write_zmap_tif(scores_path, processed.z_map)
+            else:  # none — nothing was scored
+                scores_path = None
 
             result.scene_results.append(
                 SceneResult(
@@ -636,5 +735,72 @@ def process_czi(
 
     if opts.archive_original and (result.scene_results or result.well_results):
         archive.move_to_raw(czi_path)
+
+    return result
+
+
+def process_sample(
+    paths: list[Path],
+    label: str,
+    *,
+    out_dir: Path,
+    opts: Options | None = None,
+    save_zmaps: bool = True,
+    filename_suffix: str = "",
+    progress_cb=None,
+) -> ProcessResult:
+    """Focus one sample whose FOVs come from one or more input files.
+
+    Every scene of every file in ``paths`` (CZI or TIFF, in order) becomes
+    a field of view of a single virtual well, written to
+    ``out_dir / f"{label}{filename_suffix}.tif"``. Plate-well metadata is
+    ignored. Used by bulk mode, where batch rows sharing the same labels
+    are pooled into one sample.
+    """
+    opts = opts or Options()
+    paths = [Path(p) for p in paths]
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    result = ProcessResult()
+
+    def _emit(frac: float, msg: str) -> None:
+        if progress_cb is not None:
+            progress_cb(frac, msg)
+
+    refs = [_SceneRef(p, idx) for p in paths for idx in io_source.list_scene_indices(p)]
+    if not refs:
+        return result
+
+    if opts.focus_mode != "none":
+        _emit(0.02, f"Resolving phase channel over {min(10, len(refs))} sample FOVs")
+    per_scene_times = {p: io_source.per_scene_acquisition_times(p) for p in paths}
+    scene_cache: dict[_SceneRef, Scene] = {}
+    # Without focus picking nothing reads the phase channel.
+    phase_idx = 0 if opts.focus_mode == "none" else _resolve_phase_idx(refs, opts, scene_cache)
+
+    files_note = f" from {len(paths)} files" if len(paths) > 1 else ""
+    _emit(0.05, f"Processing {len(refs)} FOV(s){files_note}")
+
+    def on_fov(n: int) -> None:
+        _emit(0.05 + 0.9 * (n / len(refs)), f"FOV {n}/{len(refs)}{files_note}")
+
+    result.well_results.append(
+        _process_well(
+            "_BULK_",
+            refs,
+            well_dir=out_dir,
+            base=_well_base(None, label, filename_suffix),
+            phase_idx=phase_idx,
+            opts=opts,
+            scene_cache=scene_cache,
+            per_scene_times=per_scene_times,
+            save_zmaps=save_zmaps,
+            on_fov=on_fov,
+        )
+    )
+
+    if opts.archive_original:
+        for p in paths:
+            archive.move_to_raw(p)
 
     return result
