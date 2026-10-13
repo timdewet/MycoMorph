@@ -68,6 +68,7 @@ def _read_pixels_per_um(tiff_path: Path) -> Optional[float]:
             tags = first_page.tags if first_page is not None else {}
             xres = tags.get("XResolution")
             resunit = tags.get("ResolutionUnit")
+            ij_unit = str((tif.imagej_metadata or {}).get("unit", "")).strip().lower()
     except Exception:  # noqa: BLE001
         return None
 
@@ -101,6 +102,16 @@ def _read_pixels_per_um(tiff_path: Path) -> Optional[float]:
             return px_per_unit / 10_000.0
         if unit == 2:       # px/inch → px/µm
             return px_per_unit / 25_400.0
+        if unit == 1:
+            # Fiji/ImageJ calibration: no TIFF unit, the ImageJ header's
+            # ``unit`` names what XResolution counts pixels per.
+            # ImageJ headers are ASCII, so Fiji escapes the micro sign: "\u00B5m".
+            if ij_unit in {"micron", "microns", "um", "\\u00b5m", "µm", "μm"}:
+                return px_per_unit
+            if ij_unit in {"nm", "nanometer", "nanometre"}:
+                return px_per_unit * 1000.0
+            if ij_unit in {"mm", "millimeter", "millimetre"}:
+                return px_per_unit / 1000.0
     return None
 
 
@@ -238,6 +249,48 @@ def run_focus(
     )
     progress_cb(1.0, f"Focus-picked output written to {out_dir}")
     return out_dir
+
+
+def run_focus_sample(
+    paths: Iterable[Path],
+    out_dir: Path,
+    label: str,
+    opts: FocusOpts | None = None,
+    progress_cb: ProgressCB = _noop,
+) -> Path:
+    """Run FocusPicker on one sample whose FOVs span one or more files.
+
+    Each file may be a CZI or a TIFF; every scene of every file becomes a
+    field of view of the sample. Writes ``out_dir / f"{label}{suffix}.tif"``
+    and returns its path.
+    """
+    from .focus.pipeline import Options, process_sample
+
+    opts = opts or FocusOpts()
+    paths = [Path(p) for p in paths]
+    opts_obj = Options(
+        metric=opts.metric,
+        focus_mode=opts.mode,
+        tile_grid=opts.tile_grid,
+        phase_channel=opts.phase_channel,
+        save_mip=opts.save_mip,
+    )
+    out_dir = Path(out_dir)
+    names = ", ".join(p.name for p in paths[:3]) + (
+        f" (+{len(paths) - 3} more)" if len(paths) > 3 else ""
+    )
+    progress_cb(0.0, f"Focus picking on {names} (mode={opts.mode})")
+    process_sample(
+        paths,
+        label,
+        out_dir=out_dir,
+        opts=opts_obj,
+        save_zmaps=opts.save_zmaps,
+        filename_suffix=opts.filename_suffix,
+        progress_cb=progress_cb,
+    )
+    progress_cb(1.0, f"Focus-picked output written to {out_dir}")
+    return out_dir / f"{label}{opts.filename_suffix}.tif"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
-from .bulk_layout import _output_filename
+from .bulk_layout import group_entries
 from .cancellation import CancellationToken, StopRequested
 from .context import BulkRunContext, RunContext
 from .stages import (
@@ -581,7 +581,7 @@ class BulkPipelineRunner(QObject):
     # --------------------------------------------------------------------------
 
     def _run(self) -> None:
-        from mycomorph.core.api import run_focus
+        from mycomorph.core.api import run_focus_sample
 
         try:
             self.runStarted.emit()
@@ -594,14 +594,14 @@ class BulkPipelineRunner(QObject):
 
             entries = list(ctx.czi_entries)
             if not entries:
-                raise RuntimeError("Validation failed: no CZIs with conditions assigned.")
+                raise RuntimeError("Validation failed: no files with conditions assigned.")
 
             # Existence check up front so we don't half-run.
             issues: list[str] = []
             for e in entries:
                 p = Path(e["czi_path"])
                 if not p.exists():
-                    issues.append(f"CZI not found: {p}")
+                    issues.append(f"File not found: {p}")
             if issues:
                 raise RuntimeError("Validation failed:\n  - " + "\n  - ".join(issues))
 
@@ -640,31 +640,14 @@ class BulkPipelineRunner(QObject):
                 t0 = time.time()
                 ctx.focus_dir.mkdir(parents=True, exist_ok=True)
                 focus_outputs: list[Path] = []
-                n = len(entries)
-                base_names = [
-                    _output_filename(
-                        str(e.get("condition", "")),
-                        str(e.get("reporter", "")),
-                        str(e.get("mutant_or_drug", "")),
-                        str(e.get("replica", "")),
-                    )
-                    for e in entries
-                ]
+                # Rows with identical labels are one sample: their files'
+                # FOVs are pooled into a single output TIFF.
+                samples = group_entries(entries)
+                n = len(samples)
 
-                for i, entry in enumerate(entries):
+                for i, (label, paths) in enumerate(samples):
                     if self._stop_requested:
                         break
-
-                    label = _output_filename(
-                        str(entry.get("condition", "")),
-                        str(entry.get("reporter", "")),
-                        str(entry.get("mutant_or_drug", "")),
-                        str(entry.get("replica", "")),
-                        stable_identifier=(
-                            str(Path(entry["czi_path"]).resolve())
-                            if base_names.count(base_names[i]) > 1 else None
-                        ),
-                    ).removesuffix(".tif")
 
                     out_file = ctx.focus_dir / f"{label}{ctx.focus_opts.filename_suffix}.tif"
 
@@ -674,8 +657,10 @@ class BulkPipelineRunner(QObject):
                         focus_outputs.append(out_file)
                         continue
 
-                    def per_czi_cb(frac: float, msg: str, _i=i, _n=n,
-                                   _name=Path(entry["czi_path"]).name) -> None:
+                    name = paths[0].name if len(paths) == 1 else f"{label} ({len(paths)} files)"
+
+                    def per_sample_cb(frac: float, msg: str, _i=i, _n=n,
+                                      _name=name) -> None:
                         if self._stop_requested:
                             raise StopRequested()
                         outer_frac = (_i + frac) / _n
@@ -684,12 +669,12 @@ class BulkPipelineRunner(QObject):
                         )
 
                     try:
-                        run_focus(
-                            czi_path=Path(entry["czi_path"]),
+                        run_focus_sample(
+                            paths,
                             out_dir=ctx.focus_dir,
+                            label=label,
                             opts=ctx.focus_opts,
-                            single_bucket_label=label,
-                            progress_cb=per_czi_cb,
+                            progress_cb=per_sample_cb,
                         )
                     except StopRequested:
                         break

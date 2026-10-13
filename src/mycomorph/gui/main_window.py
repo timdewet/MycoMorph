@@ -998,8 +998,8 @@ class MainWindow(QMainWindow):
 
     def _on_czi_selected(self, czi_path) -> None:
         try:
-            from mycomorph.core.split_czi_plate import _read_czi_pixels_per_um
-            px = _read_czi_pixels_per_um(czi_path)
+            from mycomorph.core.focus.io_source import pixels_per_um
+            px = pixels_per_um(czi_path)
         except Exception:  # noqa: BLE001
             px = None
         self.segclass_panel.set_detected_pixels_per_um(px)

@@ -100,6 +100,20 @@ def _read_acquisition_sidecar(tiff_path: Path) -> tuple[Optional[str], list[Opti
     return plate, list(fov_times), source
 
 
+def _read_fov_source_files(tiff_path: Path) -> list[str]:
+    """Per-FOV source filenames for samples pooled from several files.
+
+    Empty when the sidecar is missing or the sample came from one file
+    (its ``source_czi`` then applies to every FOV).
+    """
+    sidecar = tiff_path.with_name(tiff_path.stem + "__acquisition.json")
+    try:
+        payload = json.loads(sidecar.read_text())
+    except Exception:  # noqa: BLE001
+        return []
+    return [str(s) for s in payload.get("fov_source_files") or []]
+
+
 def _resolve_intensity_channels(
     n_image_channels: int,
     requested: Optional[list[int]],
@@ -270,6 +284,7 @@ def extract_features_tiff(
 
     plate_acq_dt, fov_acq_times, sidecar_source = _read_acquisition_sidecar(tiff_path)
     source_czi = sidecar_source or tiff_path.name
+    fov_sources = _read_fov_source_files(tiff_path)
     well = tiff_path.stem
     if run_id is None:
         run_id = out_path.parent.parent.name or "run"
@@ -405,7 +420,7 @@ def extract_features_tiff(
                 pixels_per_um=pixels_per_um,
                 run_id=run_id,
                 well=well,
-                source_czi=source_czi,
+                source_czi=fov_sources[i] if i < len(fov_sources) else source_czi,
                 plate_acq_dt=plate_acq_dt,
                 fov_acq_time=fov_acq_time,
                 intensity_channels=intensity_channels,

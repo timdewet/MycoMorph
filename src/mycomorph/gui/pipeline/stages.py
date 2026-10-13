@@ -162,34 +162,16 @@ def _expected_stems_for_layout(ctx, focus_suffix: str = "") -> set[str]:
       ``ctx.czi_entries`` — each row already carries condition /
       reporter / mutant / replica.
     """
-    from mycomorph.core.split_czi_plate import build_output_filename
-
     if hasattr(ctx, "czi_entries"):
+        # Rows sharing labels are pooled into one sample, so each distinct
+        # label set yields exactly one stem.
+        from .bulk_layout import sample_stem
         entries = list(getattr(ctx, "czi_entries", []) or [])
-        base_names = [
-            build_output_filename(
-                str(entry.get("condition", "")),
-                str(entry.get("reporter", "")),
-                str(entry.get("mutant_or_drug", "")),
-                str(entry.get("replica", "")),
-            )
-            for entry in entries
-        ]
-        stems: set[str] = set()
-        for entry, base_name in zip(entries, base_names):
-            stem = build_output_filename(
-                str(entry.get("condition", "")),
-                str(entry.get("reporter", "")),
-                str(entry.get("mutant_or_drug", "")),
-                str(entry.get("replica", "")),
-                stable_identifier=(
-                    str(Path(entry["czi_path"]).resolve())
-                    if base_names.count(base_name) > 1 else None
-                ),
-            ).removesuffix(".tif")
-            if stem:
-                stems.add(stem + focus_suffix)
-        return stems
+        return {
+            stem + focus_suffix
+            for stem in (sample_stem(entry) for entry in entries)
+            if stem
+        }
 
     active = ctx.layout.disambiguated_active_rows()
     stems = set()
