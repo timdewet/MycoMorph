@@ -293,6 +293,33 @@ def run_focus_sample(
     return out_dir / f"{label}{opts.filename_suffix}.tif"
 
 
+def split_sample(
+    paths: Iterable[Path],
+    out_dir: Path,
+    label: str,
+    progress_cb: ProgressCB = _noop,
+) -> Path:
+    """Write one sample's FOVs, pooled across files, without focus picking.
+
+    For single-plane CZI / TIFF inputs, where there is nothing to focus.
+    Raises ``ValueError`` if any FOV is a Z-stack. Writes
+    ``out_dir / f"{label}.tif"`` (no focus suffix, like Split output) and
+    returns its path.
+    """
+    from .focus.pipeline import Options, process_sample
+
+    paths = [Path(p) for p in paths]
+    out_dir = Path(out_dir)
+    process_sample(
+        paths,
+        label,
+        out_dir=out_dir,
+        opts=Options(focus_mode="none"),
+        progress_cb=progress_cb,
+    )
+    return out_dir / f"{label}.tif"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Stage 3: Cellpose-SAM segmentation
 # ─────────────────────────────────────────────────────────────────────────────

@@ -580,8 +580,69 @@ class BulkPipelineRunner(QObject):
 
     # --------------------------------------------------------------------------
 
+    def _run_per_sample(
+        self,
+        stage: str,
+        samples: list[tuple[str, list[Path]]],
+        out_dir: Path,
+        suffix: str,
+        write_sample,
+        manifest: dict,
+    ) -> None:
+        """Write one TIFF per pooled sample (the bulk-mode Focus / Split step).
+
+        ``write_sample(paths, label, progress_cb)`` produces
+        ``out_dir / f"{label}{suffix}.tif"``.
+        """
+        self.stageStarted.emit(stage)
+        t0 = time.time()
+        out_dir.mkdir(parents=True, exist_ok=True)
+        outputs: list[Path] = []
+        n = len(samples)
+
+        for i, (label, paths) in enumerate(samples):
+            if self._stop_requested:
+                break
+
+            out_file = out_dir / f"{label}{suffix}.tif"
+
+            if self._reuse_existing and out_file.exists():
+                cb_msg = f"[{i+1}/{n}] Reused existing {out_file.name}"
+                self.stageProgress.emit(stage, (i + 1) / n, cb_msg)
+                outputs.append(out_file)
+                continue
+
+            name = paths[0].name if len(paths) == 1 else f"{label} ({len(paths)} files)"
+
+            def per_sample_cb(frac: float, msg: str, _i=i, _n=n,
+                              _name=name) -> None:
+                if self._stop_requested:
+                    raise StopRequested()
+                outer_frac = (_i + frac) / _n
+                self.stageProgress.emit(
+                    stage, outer_frac, f"[{_i+1}/{_n}] {_name}: {msg}",
+                )
+
+            try:
+                write_sample(paths, label, per_sample_cb)
+            except StopRequested:
+                break
+            outputs.append(out_file)
+
+        manifest["stages"].append({
+            "name": stage,
+            "stopped": self._stop_requested,
+            "elapsed_s": round(time.time() - t0, 2),
+            "opts": _stage_opts_bulk(self._ctx, stage),
+            "outputs": [str(p) for p in outputs],
+        })
+        if self._stop_requested:
+            self.stageCancelled.emit(stage)
+        else:
+            self.stageFinished.emit(stage, len(outputs))
+
     def _run(self) -> None:
-        from mycomorph.core.api import run_focus_sample
+        from mycomorph.core.api import run_focus_sample, split_sample
 
         try:
             self.runStarted.emit()
@@ -613,7 +674,11 @@ class BulkPipelineRunner(QObject):
                 "stages": [],
             }
 
+            # As in plate mode, Focus subsumes Split.
+            do_split = ctx.do_split and not ctx.do_focus
             planned: list[str] = []
+            if do_split:
+                planned.append("Split")
             if ctx.do_focus:
                 planned.append("Focus")
             if ctx.do_segment:
@@ -630,67 +695,34 @@ class BulkPipelineRunner(QObject):
                 planned.append("Embeddings")
             self.stagesPlanned.emit(planned)
 
-            # ── Focus stage: per-CZI ──────────────────────────────────
-            if ctx.do_focus:
+            # ── Focus / Split: one TIFF per sample ─────────────────────
+            # Rows with identical labels are one sample: their files'
+            # FOVs are pooled into a single output TIFF. Split writes
+            # single-plane inputs as-is; Focus collapses Z-stacks.
+            if ctx.do_focus or do_split:
                 if self._stop_requested:
                     self._finalise(manifest, stopped=True)
                     return
-
-                self.stageStarted.emit("Focus")
-                t0 = time.time()
-                ctx.focus_dir.mkdir(parents=True, exist_ok=True)
-                focus_outputs: list[Path] = []
-                # Rows with identical labels are one sample: their files'
-                # FOVs are pooled into a single output TIFF.
                 samples = group_entries(entries)
-                n = len(samples)
-
-                for i, (label, paths) in enumerate(samples):
-                    if self._stop_requested:
-                        break
-
-                    out_file = ctx.focus_dir / f"{label}{ctx.focus_opts.filename_suffix}.tif"
-
-                    if self._reuse_existing and out_file.exists():
-                        cb_msg = f"[{i+1}/{n}] Reused existing {out_file.name}"
-                        self.stageProgress.emit("Focus", (i + 1) / n, cb_msg)
-                        focus_outputs.append(out_file)
-                        continue
-
-                    name = paths[0].name if len(paths) == 1 else f"{label} ({len(paths)} files)"
-
-                    def per_sample_cb(frac: float, msg: str, _i=i, _n=n,
-                                      _name=name) -> None:
-                        if self._stop_requested:
-                            raise StopRequested()
-                        outer_frac = (_i + frac) / _n
-                        self.stageProgress.emit(
-                            "Focus", outer_frac, f"[{_i+1}/{_n}] {_name}: {msg}",
-                        )
-
-                    try:
-                        run_focus_sample(
-                            paths,
-                            out_dir=ctx.focus_dir,
-                            label=label,
-                            opts=ctx.focus_opts,
-                            progress_cb=per_sample_cb,
-                        )
-                    except StopRequested:
-                        break
-                    focus_outputs.append(out_file)
-
-                manifest["stages"].append({
-                    "name": "Focus",
-                    "stopped": self._stop_requested,
-                    "elapsed_s": round(time.time() - t0, 2),
-                    "opts": _stage_opts_bulk(ctx, "Focus"),
-                    "outputs": [str(p) for p in focus_outputs],
-                })
-                if self._stop_requested:
-                    self.stageCancelled.emit("Focus")
+                if ctx.do_focus:
+                    self._run_per_sample(
+                        "Focus", samples, ctx.focus_dir,
+                        ctx.focus_opts.filename_suffix,
+                        lambda paths, label, cb: run_focus_sample(
+                            paths, out_dir=ctx.focus_dir, label=label,
+                            opts=ctx.focus_opts, progress_cb=cb,
+                        ),
+                        manifest,
+                    )
                 else:
-                    self.stageFinished.emit("Focus", len(focus_outputs))
+                    self._run_per_sample(
+                        "Split", samples, ctx.split_dir, "",
+                        lambda paths, label, cb: split_sample(
+                            paths, out_dir=ctx.split_dir, label=label,
+                            progress_cb=cb,
+                        ),
+                        manifest,
+                    )
 
             # ── Segment onwards: reuse the plate-mode stage objects ────
             # Keep this tuple in sync with the post-Focus portion of

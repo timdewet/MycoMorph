@@ -105,6 +105,10 @@ def _stage_ctx(tmp_path: Path, opts) -> SimpleNamespace:
     return SimpleNamespace(
         czi_entries=[],  # bulk-style context → layout filter passes all
         do_fluorescent_normalisation=True,
+        do_split=False,
+        do_focus=False,
+        split_dir=tmp_path / "01_split",
+        focus_dir=tmp_path / "01_focus",
         classify_dir=tmp_path / "03_classify",
         segment_dir=tmp_path / "02_segment",
         fluorescent_normalisation_dir=tmp_path / "04b_fluorescent_normalisation",
