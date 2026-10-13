@@ -122,6 +122,7 @@ def segment_key(focus_k: FocusKey, segment_opts: Any, phase_channel: Any,
         getattr(segment_opts, "min_size", None),
         getattr(segment_opts, "gpu", None),
         getattr(segment_opts, "pixels_per_um", None),
+        getattr(segment_opts, "model", None),
         _phase_part(phase_channel),
         tuple(roi) if roi is not None else None,
     )

@@ -243,9 +243,11 @@ def test_segmentation_tiff_adapter_preserves_fovs_and_scale(monkeypatch, tmp_pat
     _synthetic_segmented_tiff(source)
     output = tmp_path / "segmented.tif"
 
+    constructed: dict[str, object] = {}
+
     class FakeModel:
-        def __init__(self, gpu: bool):
-            self.gpu = gpu
+        def __init__(self, gpu: bool, pretrained_model: str):
+            constructed.update(gpu=gpu, pretrained_model=pretrained_model)
 
     fake_models = types.ModuleType("cellpose.models")
     fake_models.CellposeModel = FakeModel
@@ -267,6 +269,9 @@ def test_segmentation_tiff_adapter_preserves_fovs_and_scale(monkeypatch, tmp_pat
     loaded, _ = load_hyperstack(output)
     assert loaded.shape == (2, 2, 16, 16)
     assert api._read_pixels_per_um(output) == pytest.approx(2.0)
+    # Named explicitly: Cellpose >= 4.2 would otherwise default to cpsam_v2.
+    assert constructed["pretrained_model"] == "cpsam"
+    assert api.segmentation_model_of(output) == "cpsam"
 
 
 def test_classification_adapter_uses_physical_scale(monkeypatch, tmp_path: Path):

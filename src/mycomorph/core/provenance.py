@@ -54,6 +54,10 @@ def checkpoint_signature(
     phase_channel: int | None = None,
     model_path: Path | None = None,
 ) -> dict[str, Any]:
+    # Options objects can choose what they hash (e.g. leave out a new field
+    # at its default so older signatures stay valid).
+    if hasattr(options, "signature_payload"):
+        options = options.signature_payload()
     payload: dict[str, Any] = {
         "schema_version": CHECKPOINT_SCHEMA_VERSION,
         "stage": stage,

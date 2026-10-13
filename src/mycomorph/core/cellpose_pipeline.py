@@ -76,6 +76,12 @@ import tifffile
 # Re-exported from ``api.PRESET_MODELS`` so the CLI and the GUI resolve
 # through one source of truth (importlib.resources-backed package data).
 from .api import PRESET_MODELS as CLASSIFY_PRESETS  # noqa: E402
+from .api import (  # noqa: E402
+    CELLPOSE_MODELS,
+    CLASSIFIER_TRAINING_CELLPOSE_MODEL,
+    CPSAM_V2_CLASSIFIER_WARNING,
+    DEFAULT_CELLPOSE_MODEL,
+)
 
 
 def read_czi(filepath):
@@ -510,6 +516,13 @@ def main():
         help="Use GPU for Cellpose-SAM (recommended for batch processing)"
     )
     parser.add_argument(
+        "--model",
+        choices=CELLPOSE_MODELS,
+        default=DEFAULT_CELLPOSE_MODEL,
+        help="Cellpose weights. The quality classifiers were trained on cpsam "
+             "masks; their calls on cpsam_v2 masks are untested."
+    )
+    parser.add_argument(
         "--flow-threshold",
         type=float,
         default=0.4,
@@ -664,10 +677,13 @@ def main():
             print(f"GPU: none detected, using CPU")
     print()
 
-    # Initialise Cellpose model (cellpose 4.x ships only cpsam)
-    print("Loading Cellpose model (cpsam)...")
+    # Initialise Cellpose model, always by name: Cellpose 4.2 changed its
+    # own default from cpsam to cpsam_v2.
+    if args.model != CLASSIFIER_TRAINING_CELLPOSE_MODEL and (args.classify or args.classify_preset):
+        print(f"WARNING: {CPSAM_V2_CLASSIFIER_WARNING}")
+    print(f"Loading Cellpose model ({args.model})...")
     from cellpose import models
-    model = models.CellposeModel(gpu=args.gpu)
+    model = models.CellposeModel(gpu=args.gpu, pretrained_model=args.model)
     print(f"  Model loaded (GPU: {args.gpu})")
     print()
 
