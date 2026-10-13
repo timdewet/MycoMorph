@@ -37,7 +37,7 @@ def run(
     from mycomorph.core.focus import (
         channel_id,
         focus as focus_metrics,
-        io_czi,
+        io_source,
         tiling,
     )
     from mycomorph.core.focus.pipeline import (
@@ -47,7 +47,7 @@ def run(
         _assemble_tiled_planes,
     )
 
-    scene = io_czi.read_scene(Path(czi_path), int(fov_index))
+    scene = io_source.read_scene(Path(czi_path), int(fov_index))
     phase_override = phase_channel if phase_channel not in (None, -1) else None
     phase_idx = channel_id.resolve_phase_channel(
         scene.array_zcyx, scene.channel_names, phase_override

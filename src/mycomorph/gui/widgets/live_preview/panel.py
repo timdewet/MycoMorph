@@ -1537,6 +1537,9 @@ def _list_czi_scene_indices(path: Path) -> list[int]:
     indices are not always ``0..N-1``.
     """
     try:
+        from mycomorph.core.focus import io_source
+        if io_source.is_tiff(path):
+            return io_source.list_scene_indices(path)
         from mycomorph.core.focus.io_czi import list_scene_indices
         # ``list_scene_indices`` falls back to ``[0]`` for non-scene
         # CZIs (single-position files); strip that sentinel here so

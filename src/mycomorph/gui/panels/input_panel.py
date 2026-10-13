@@ -1,11 +1,13 @@
-"""Input panel: pick CZI(s) + output dir + channel config.
+"""Input panel: pick input image(s) + output dir + channel config.
 
 Three modes are available, switched via radio buttons at the top:
 
 - **Single plate**  — one multi-position CZI with Zeiss well metadata.
                       The Plate-layout tab handles condition labelling.
-- **Single file**   — one CZI without plate metadata; inline labels.
-- **Bulk**          — many CZIs, each with its own labels (table editor).
+- **Single file**   — one CZI or TIFF without plate metadata; inline labels.
+- **Bulk**          — many CZIs / TIFFs, each with its own labels (table
+                      editor). Rows sharing labels are pooled into one
+                      sample.
 
 Single-file and Bulk both feed the shared ``BulkLayout`` model, so the
 runtime path is identical for them. Single-plate is the legacy flow and
@@ -38,6 +40,8 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mycomorph.core.focus import io_source
 
 from ..pipeline.bulk_layout import COLUMNS as BULK_COLS
 from ..pipeline.bulk_layout import BulkLayout
@@ -220,8 +224,8 @@ class InputPanel(QWidget):
         self._reset_btn = QPushButton("Reset")
         self._reset_btn.setObjectName("ghost")
         self._reset_btn.setToolTip(
-            "Clear the current CZI, output directory, channel labels, and "
-            "any per-file labels — start a new run from scratch."
+            "Clear the current input files, output directory, channel labels, "
+            "and any per-file labels — start a new run from scratch."
         )
         self._reset_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self._reset_btn.clicked.connect(self._on_reset_clicked)
@@ -370,7 +374,7 @@ class InputPanel(QWidget):
     def _build_single_file_page(self) -> QWidget:
         page = QWidget()
         v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0)
-        box = QGroupBox("Single CZI file")
+        box = QGroupBox("Single image file (CZI or TIFF)")
         form = QFormLayout(box)
         form.setHorizontalSpacing(14)
         form.setVerticalSpacing(10)
@@ -383,7 +387,7 @@ class InputPanel(QWidget):
         btn.clicked.connect(self._pick_single_file_czi)
         row.addWidget(self._sf_czi_edit); row.addWidget(btn)
         wrap = QWidget(); wrap.setLayout(row)
-        form.addRow("Input CZI:", wrap)
+        form.addRow("Input file:", wrap)
 
         # Inline labels — same fields as the bulk row
         self._sf_condition = QLineEdit()
@@ -410,8 +414,17 @@ class InputPanel(QWidget):
         v = QVBoxLayout(page); v.setContentsMargins(0, 0, 0, 0)
         v.setSpacing(8)
 
-        box = QGroupBox("Bulk CZI batch")
+        box = QGroupBox("Batch of image files (CZI or TIFF)")
         bv = QVBoxLayout(box)
+
+        hint = QLabel(
+            "One row per file. Rows with identical labels (condition, "
+            "reporter, mutant / drug, replica) are pooled into one sample, "
+            "so one-file-per-field-of-view exports can be combined."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        bv.addWidget(hint)
 
         # Toolbar
         bar = QHBoxLayout(); bar.setSpacing(8)
@@ -625,13 +638,13 @@ class InputPanel(QWidget):
 
     def _pick_single_file_czi(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
-            self, "Select a CZI file", "", "CZI files (*.czi);;All files (*)"
+            self, "Select an image file", "", io_source.FILE_DIALOG_FILTER
         )
         if not path:
             return
         self._sf_czi_edit.setText(path)
         self._sync_single_file_to_layout()
-        # Single-file CZI also drives the same metadata-detection paths as
+        # The single file also drives the same metadata-detection paths as
         # plate mode (channel names + pixel size), so emit cziSelected too.
         self._czi_path = Path(path)
         self._refresh_info_and_channels()
@@ -658,7 +671,7 @@ class InputPanel(QWidget):
 
     def _bulk_add_files(self) -> None:
         paths, _ = QFileDialog.getOpenFileNames(
-            self, "Add CZI files", "", "CZI files (*.czi);;All files (*)"
+            self, "Add image files", "", io_source.FILE_DIALOG_FILTER
         )
         if not paths:
             return
@@ -669,7 +682,7 @@ class InputPanel(QWidget):
         self.channelsChanged.emit()
 
     def _bulk_add_folder(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select folder of CZIs")
+        folder = QFileDialog.getExistingDirectory(self, "Select folder of CZI / TIFF files")
         if not folder:
             return
         n = self._bulk_layout.add_folder(Path(folder))
@@ -690,7 +703,7 @@ class InputPanel(QWidget):
         self.channelsChanged.emit()
 
     def _bulk_remap_paths(self) -> None:
-        """Re-base CZI paths in the bulk table from a user-picked root.
+        """Re-base file paths in the bulk table from a user-picked root.
 
         Finds every row whose ``czi_path`` is not currently a file and
         prompts for a new root folder. For each missing row we look for
@@ -717,26 +730,26 @@ class InputPanel(QWidget):
         if not missing_idx:
             QMessageBox.information(
                 self, "All paths resolve",
-                "Every CZI path in the table already points at an existing file.",
+                "Every path in the table already points at an existing file.",
             )
             return
 
         prompt = (
-            f"{len(missing_idx)} of {len(df)} CZI path(s) cannot be found.\n\n"
+            f"{len(missing_idx)} of {len(df)} file path(s) cannot be found.\n\n"
         )
         if sample_missing:
             prompt += f"Example: {sample_missing}\n\n"
         prompt += (
-            "Pick a folder that contains those CZIs (or one of their "
+            "Pick a folder that contains those files (or one of their "
             "parent folders) and the table will be rewritten using "
             "the matching filenames it finds."
         )
-        QMessageBox.information(self, "Remap CZI paths", prompt)
+        QMessageBox.information(self, "Remap file paths", prompt)
 
         # Default the dialog to the output dir if we have one.
         start = str(self._out_dir) if self._out_dir else str(Path.home())
         new_root = QFileDialog.getExistingDirectory(
-            self, "Select folder containing the CZIs", start,
+            self, "Select folder containing the files", start,
         )
         if not new_root:
             return
@@ -748,12 +761,12 @@ class InputPanel(QWidget):
         index: dict[str, Path] = {}
         try:
             for child in new_root_path.iterdir():
-                if child.is_file() and child.suffix.lower() == ".czi":
+                if child.is_file() and io_source.is_supported(child):
                     index.setdefault(child.name, child)
             for sub in new_root_path.iterdir():
                 if sub.is_dir():
                     for child in sub.iterdir():
-                        if child.is_file() and child.suffix.lower() == ".czi":
+                        if child.is_file() and io_source.is_supported(child):
                             index.setdefault(child.name, child)
         except OSError as e:
             QMessageBox.warning(self, "Folder unreadable", str(e))
@@ -761,8 +774,8 @@ class InputPanel(QWidget):
 
         if not index:
             QMessageBox.warning(
-                self, "No CZIs found",
-                f"No .czi files were found directly under {new_root_path} "
+                self, "No image files found",
+                f"No CZI or TIFF files were found directly under {new_root_path} "
                 "or its immediate subdirectories.",
             )
             return
@@ -820,7 +833,11 @@ class InputPanel(QWidget):
     def _refresh_bulk_status(self, extra: str = "") -> None:
         n_total = len(self._bulk_layout.df)
         n_active = len(self._bulk_layout.active_rows())
-        msg = f"{n_total} CZIs · {n_active} with conditions assigned."
+        n_samples = len(self._bulk_layout.samples())
+        msg = f"{n_total} files · {n_active} with conditions assigned"
+        if n_samples != n_active:
+            msg += f" → {n_samples} samples"
+        msg += "."
         if extra:
             msg += "  " + extra
         self._bulk_status.setText(msg)
@@ -836,9 +853,9 @@ class InputPanel(QWidget):
         self.outputDirSelected.emit(self._out_dir)
 
     def _refresh_info_and_channels(self) -> None:
-        # Source CZI for metadata detection: the explicit single-CZI path
-        # in plate or single-file mode; otherwise the first CZI in the bulk
-        # batch (so channel labels still get detected for batch mode).
+        # Source file for metadata detection: the explicit single-CZI path
+        # in plate mode or the single file; otherwise the first file in the
+        # bulk batch (so channel labels still get detected for batch mode).
         czi: Path | None = None
         if self._mode == InputMode.SINGLE_PLATE:
             czi = self._czi_path
@@ -854,6 +871,9 @@ class InputPanel(QWidget):
             self._info_label.setText("")
             self._info_label.setVisible(False)
             self._clear_channel_rows()
+            return
+        if io_source.is_tiff(czi):
+            self._refresh_info_from_tiff(czi)
             return
         try:
             from mycomorph.core.split_czi_plate import (
@@ -882,6 +902,23 @@ class InputPanel(QWidget):
             self._info_label.setVisible(True)
             self._clear_channel_rows()
 
+    def _refresh_info_from_tiff(self, path: Path) -> None:
+        try:
+            from mycomorph.core.focus.io_tiff import read_layout
+            layout = read_layout(path)
+        except Exception as e:  # noqa: BLE001
+            self._info_label.setText(f"(could not read TIFF: {e})")
+            self._info_label.setVisible(True)
+            self._clear_channel_rows()
+            return
+        parts = [f"{layout.n_scenes} field(s) of view"]
+        if layout.n_z > 1:
+            parts.append(f"{layout.n_z} Z-planes")
+        parts.append(f"{layout.n_channels} channels detected")
+        self._info_label.setText(f"{path.name}: " + " · ".join(parts))
+        self._info_label.setVisible(True)
+        self._populate_channel_rows(list(layout.channel_names))
+
     # ───────────────────────────────────────────────── channel row helpers
 
     def _clear_channel_rows(self) -> None:
@@ -897,8 +934,8 @@ class InputPanel(QWidget):
         confirm = QMessageBox.question(
             self,
             "Reset inputs?",
-            "Clear the current CZI, output directory, channel labels, and "
-            "any per-file labels? Settings on other tabs are not affected.",
+            "Clear the current input files, output directory, channel labels, "
+            "and any per-file labels? Settings on other tabs are not affected.",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel,
             QMessageBox.StandardButton.Cancel,
         )

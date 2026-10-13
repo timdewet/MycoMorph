@@ -67,6 +67,28 @@ class TestReadPixelsPerUm:
         result = _read_pixels_per_um(path)
         assert result == pytest.approx(1.0, rel=1e-3)
 
+    @pytest.mark.parametrize("unit, expected", [
+        ("micron", 15.0), ("um", 15.0), ("\\u00B5m", 15.0), ("nm", 15_000.0),
+    ])
+    def test_fiji_calibration_without_tiff_unit(self, tmp_path, unit, expected):
+        # Fiji writes XResolution in px per ImageJ ``unit`` with
+        # ResolutionUnit = NONE.
+        path = tmp_path / "fiji.tif"
+        tifffile.imwrite(
+            str(path), np.zeros((2, 8, 8), dtype=np.uint16), imagej=True,
+            metadata={"axes": "CYX", "unit": unit},
+            resolution=(15.0, 15.0), resolutionunit="NONE",
+        )
+        assert _read_pixels_per_um(path) == pytest.approx(expected)
+
+    def test_unitless_resolution_without_imagej_unit_returns_none(self, tmp_path):
+        path = tmp_path / "unitless.tif"
+        tifffile.imwrite(
+            str(path), np.zeros((8, 8), dtype=np.uint16),
+            resolution=(15.0, 15.0), resolutionunit="NONE",
+        )
+        assert _read_pixels_per_um(path) is None
+
     def test_missing_metadata_returns_none(self, tmp_path):
         # Plain TIFF, no ImageJ metadata at all.
         path = tmp_path / "plain.tif"
