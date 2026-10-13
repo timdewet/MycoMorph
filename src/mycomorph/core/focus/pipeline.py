@@ -18,7 +18,9 @@ import tifffile
 from . import archive, channel_id, focus, io_ometiff, io_source, tiling
 from .io_czi import Scene
 
-FocusMode = Literal["whole", "tiles", "edf"]
+# "none" writes single-plane inputs through unchanged (no focus picking);
+# it refuses Z-stacks rather than silently choosing a plane.
+FocusMode = Literal["whole", "tiles", "edf", "none"]
 
 
 @dataclass
@@ -49,7 +51,7 @@ class SceneResult:
     scene_index: int
     chosen_z: int
     output_path: Path
-    scores_csv: Path
+    scores_csv: Path | None
     well: str | None = None
 
 
@@ -59,7 +61,7 @@ class WellResult:
     scene_indices: list[int]
     chosen_z: list[int]
     output_path: Path
-    scores_csv: Path
+    scores_csv: Path | None
 
 
 @dataclass
@@ -382,6 +384,20 @@ def _process_scene(
             description_extra=f"mode=edf z_min={z_min} z_max={z_max} mean_z={summary_z}",
         )
 
+    if opts.focus_mode == "none":
+        if scene.array_zcyx.shape[0] != 1:
+            raise ValueError(
+                f"scene {scene.index} has {scene.array_zcyx.shape[0]} Z-planes; "
+                "focus_mode 'none' only accepts single-plane images"
+            )
+        return _ProcessedScene(
+            planes=scene.array_zcyx[0],
+            channel_names=list(scene.channel_names),
+            mode="none",
+            summary_z=0,
+            description_extra="mode=none",
+        )
+
     raise ValueError(f"unknown focus_mode {opts.focus_mode!r}")
 
 
@@ -459,6 +475,13 @@ def _process_well(
 
     for ref in refs:
         scene = scene_cache.pop(ref, None) or io_source.read_scene(ref.path, ref.index)
+        n_z = scene.array_zcyx.shape[0]
+        if opts.focus_mode == "none" and n_z != 1:
+            raise ValueError(
+                f"{ref.path.name} (scene {ref.index}) has {n_z} Z-planes. "
+                "Enable Focus to collapse Z-stacks; Split without Focus only "
+                "accepts single-plane images."
+            )
         processed = _process_scene(scene, phase_idx, opts)
         if first_ref is None:
             first_ref = ref
@@ -526,10 +549,12 @@ def _process_well(
     elif opts.focus_mode == "tiles":
         scores_path = well_dir / f"{base}_focus_scores.csv"
         _write_well_tile_scores_csv(scores_path, well, tile_score_rows, opts.tile_grid)
-    else:  # edf
+    elif opts.focus_mode == "edf":
         scores_path = well_dir / f"{base}_zmaps.tif"
         if save_zmaps:
             _write_well_zmaps_tif(scores_path, edf_z_maps)
+    else:  # none — nothing was scored
+        scores_path = None
 
     return WellResult(
         well=well,
@@ -688,10 +713,12 @@ def process_czi(
                 _write_tile_scores_csv(
                     scores_path, scene.index, processed.tile_picks, opts.tile_grid
                 )
-            else:  # edf
+            elif processed.mode == "edf":
                 scores_path = out_dir / f"{stem}{scene_tag}_zmap.tif"
                 if save_zmaps:
                     _write_zmap_tif(scores_path, processed.z_map)
+            else:  # none — nothing was scored
+                scores_path = None
 
             result.scene_results.append(
                 SceneResult(
@@ -744,10 +771,12 @@ def process_sample(
     if not refs:
         return result
 
-    _emit(0.02, f"Resolving phase channel over {min(10, len(refs))} sample FOVs")
+    if opts.focus_mode != "none":
+        _emit(0.02, f"Resolving phase channel over {min(10, len(refs))} sample FOVs")
     per_scene_times = {p: io_source.per_scene_acquisition_times(p) for p in paths}
     scene_cache: dict[_SceneRef, Scene] = {}
-    phase_idx = _resolve_phase_idx(refs, opts, scene_cache)
+    # Without focus picking nothing reads the phase channel.
+    phase_idx = 0 if opts.focus_mode == "none" else _resolve_phase_idx(refs, opts, scene_cache)
 
     files_note = f" from {len(paths)} files" if len(paths) > 1 else ""
     _emit(0.05, f"Processing {len(refs)} FOV(s){files_note}")
