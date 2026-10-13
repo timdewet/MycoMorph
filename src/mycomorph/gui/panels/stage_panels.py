@@ -29,6 +29,9 @@ from PyQt6.QtWidgets import (
 )
 
 from mycomorph.core.api import (
+    CELLPOSE_MODELS,
+    CLASSIFIER_TRAINING_CELLPOSE_MODEL,
+    CPSAM_V2_CLASSIFIER_WARNING,
     PRESET_MODELS,
     ClassifyOpts,
     FocusOpts,
@@ -263,6 +266,24 @@ class SegmentPanel(QWidget):
         self.min_size.setRange(0, 5000); self.min_size.setValue(15)
         self.min_size.setToolTip("Minimum mask area in pixels. Default 15. Set to 0 to disable.")
 
+        # Cellpose weights. cpsam stays the default: the quality
+        # classifiers were trained on its masks.
+        self.model = QComboBox()
+        self.model.addItem("cpsam (default)", "cpsam")
+        self.model.addItem("cpsam_v2 (Cellpose ≥ 4.2)", "cpsam_v2")
+        self._model_warning = QLabel(CPSAM_V2_CLASSIFIER_WARNING)
+        self._model_warning.setWordWrap(True)
+        self._model_warning.setStyleSheet(
+            f"color: {tokens.active().warning}; font-size: {tokens.FS_CAPTION}px;"
+        )
+        self._model_warning.setVisible(False)
+        model_holder = _with_helper(
+            self.model,
+            "Cellpose weights. cpsam matches the bundled quality classifiers.",
+        )
+        model_holder.layout().addWidget(self._model_warning)
+        form.addRow("Model:", model_holder)
+
         form.addRow("Diameter (px):", _with_helper(
             self.diameter,
             "Median cell diameter in pixels; 0 = let Cellpose estimate.",
@@ -296,6 +317,8 @@ class SegmentPanel(QWidget):
         root.addStretch(1)
 
         # Fan in option-widget signals → optionsChanged.
+        self.model.currentIndexChanged.connect(self._update_model_warning)
+        self.model.currentIndexChanged.connect(self._emit_options_changed)
         self.diameter.valueChanged.connect(self._emit_options_changed)
         self.min_size.valueChanged.connect(self._emit_options_changed)
         self.gpu.toggled.connect(self._emit_options_changed)
@@ -310,6 +333,11 @@ class SegmentPanel(QWidget):
     def _mark_user_override(self, _value: float) -> None:
         # Any manual edit sticks; auto-detection from CZI won't clobber it.
         self._user_overrode_pixels = True
+
+    def _update_model_warning(self, *_args) -> None:
+        self._model_warning.setVisible(
+            self.model.currentData() != CLASSIFIER_TRAINING_CELLPOSE_MODEL
+        )
 
     def set_detected_pixels_per_um(self, value: float | None) -> None:
         """Called from the Input panel when a CZI is selected."""
@@ -331,10 +359,12 @@ class SegmentPanel(QWidget):
             min_size=self.min_size.value(),
             gpu=self.gpu.isChecked(),
             pixels_per_um=self.pixels_per_um.value(),
+            model=self.model.currentData(),
         )
 
     def state(self) -> dict:
         return {
+            "model": self.model.currentData(),
             "diameter": self.diameter.value(),
             "flow_threshold": self.flow_threshold.value(),
             "cellprob_threshold": self.cellprob_threshold.value(),
@@ -349,8 +379,11 @@ class SegmentPanel(QWidget):
             return
         self._loading = True
         try:
-            # ``model_type`` was a dropdown in older builds; ignore it if
-            # present in saved state — cellpose 4.x ships only cpsam.
+            # ``model_type`` was a dropdown in older (Cellpose 3) builds;
+            # ignore it. Only ``model`` names Cellpose 4 weights.
+            if s.get("model") in CELLPOSE_MODELS:
+                self.model.setCurrentIndex(self.model.findData(s["model"]))
+                self._update_model_warning()
             if "diameter" in s:
                 self.diameter.setValue(float(s["diameter"]))
             if "flow_threshold" in s:

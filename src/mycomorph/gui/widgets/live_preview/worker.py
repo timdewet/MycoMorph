@@ -199,9 +199,9 @@ class PreviewWorker(QThread):
     cancelled = pyqtSignal()
 
     # Cellpose models are expensive to construct (~3-5 s) — share one
-    # across worker instances per gpu setting so re-renders don't
-    # re-pay that cost. Cleared when the app exits.
-    _cellpose_cache: dict[bool, Any] = {}
+    # across worker instances per (gpu setting, weights) so re-renders
+    # don't re-pay that cost. Cleared when the app exits.
+    _cellpose_cache: dict[tuple[bool, str], Any] = {}
 
     def __init__(self, request: RenderRequest, parent=None) -> None:
         super().__init__(parent)
@@ -571,10 +571,13 @@ class PreviewWorker(QThread):
         from cellpose.models import CellposeModel
         from mycomorph.core.cellpose_pipeline import segment_phase
 
-        model_key = bool(req.segment_opts.gpu)
+        from mycomorph.core.api import DEFAULT_CELLPOSE_MODEL
+
+        model_name = getattr(req.segment_opts, "model", DEFAULT_CELLPOSE_MODEL)
+        model_key = (bool(req.segment_opts.gpu), model_name)
         model = self._cellpose_cache.get(model_key)
         if model is None:
-            model = CellposeModel(gpu=req.segment_opts.gpu)
+            model = CellposeModel(gpu=req.segment_opts.gpu, pretrained_model=model_name)
             self._cellpose_cache[model_key] = model
 
         # If the user has set an ROI, crop the phase plane before

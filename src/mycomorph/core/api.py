@@ -324,6 +324,23 @@ def split_sample(
 # Stage 3: Cellpose-SAM segmentation
 # ─────────────────────────────────────────────────────────────────────────────
 
+# Cellpose weights MycoMorph can segment with, named explicitly so a Cellpose
+# upgrade can't change them silently (4.2 switched its own default to
+# cpsam_v2). ``cpsam`` is MycoMorph's default and the model the bundled
+# quality classifiers were trained on. ``cpsam_v2`` splits clumps differently
+# and draws slightly larger masks, so CNN quality calls on its masks are
+# outside the classifiers' training distribution.
+CELLPOSE_MODELS: tuple[str, ...] = ("cpsam", "cpsam_v2")
+DEFAULT_CELLPOSE_MODEL = "cpsam"
+CLASSIFIER_TRAINING_CELLPOSE_MODEL = "cpsam"
+CPSAM_V2_CLASSIFIER_WARNING = (
+    "cpsam_v2 masks: the quality classifiers were trained on cpsam masks, so "
+    "their good/bad calls on cpsam_v2 masks are untested and cell counts and "
+    "sizes won't be comparable with cpsam-processed data. Use cpsam unless "
+    "you've validated the classifier on cpsam_v2 masks."
+)
+
+
 @dataclass
 class SegmentOpts:
     diameter: Optional[float] = None
@@ -335,6 +352,58 @@ class SegmentOpts:
     flow_threshold: float = 0.4
     cellprob_threshold: float = 0.0
     min_size: int = 15
+    # Cellpose weights; one of CELLPOSE_MODELS.
+    model: str = DEFAULT_CELLPOSE_MODEL
+
+    def signature_payload(self) -> dict:
+        """Options as hashed into provenance signatures.
+
+        ``model`` is left out when it's the default so outputs signed before
+        the option existed (all cpsam) still count as reusable.
+        """
+        from dataclasses import asdict
+
+        payload = asdict(self)
+        if payload["model"] == DEFAULT_CELLPOSE_MODEL:
+            del payload["model"]
+        return payload
+
+
+def _validate_cellpose_model(name: str) -> None:
+    if name not in CELLPOSE_MODELS:
+        raise ValueError(
+            f"Unknown Cellpose model {name!r}. Known: {', '.join(CELLPOSE_MODELS)}"
+        )
+
+
+def _cellpose_version() -> Optional[str]:
+    from importlib.metadata import PackageNotFoundError, version
+
+    try:
+        return version("cellpose")
+    except PackageNotFoundError:
+        return None
+
+
+def segmentation_model_of(segmented_tiff: Path) -> Optional[str]:
+    """Cellpose model recorded for a ``segment_tiff`` output, or None if unknown.
+
+    Outputs written before the model was recorded return None; those were
+    all made with cpsam.
+    """
+    import json
+
+    from .provenance import artifact_signature_path
+
+    sidecar = artifact_signature_path(Path(segmented_tiff))
+    try:
+        signature = json.loads(sidecar.read_text())
+    except (OSError, ValueError):
+        return None
+    recorded = (signature.get("segmentation") or {}).get("cellpose_model")
+    if recorded:
+        return str(recorded)
+    return (signature.get("options") or {}).get("model")
 
 
 def segment_tiff(
@@ -357,12 +426,18 @@ def segment_tiff(
     )
 
     opts = opts or SegmentOpts()
+    _validate_cellpose_model(opts.model)
     tiff_path = Path(tiff_path)
     out_path = Path(out_path)
     signature_channels = channel_labels
     mark_artifact_in_progress(out_path)
-    progress_cb(0.0, f"Loading Cellpose model (cpsam, gpu={opts.gpu})")
-    model = CellposeModel(gpu=opts.gpu)
+    if opts.model != CLASSIFIER_TRAINING_CELLPOSE_MODEL:
+        import warnings
+
+        warnings.warn(CPSAM_V2_CLASSIFIER_WARNING, UserWarning, stacklevel=2)
+        progress_cb(0.0, f"WARNING: {CPSAM_V2_CLASSIFIER_WARNING}")
+    progress_cb(0.0, f"Loading Cellpose model ({opts.model}, gpu={opts.gpu})")
+    model = CellposeModel(gpu=opts.gpu, pretrained_model=opts.model)
 
     progress_cb(0.1, f"Segmenting FOVs in {tiff_path.name}")
     stacked, fov_names, total_cells = process_tiff_unit(
@@ -419,6 +494,12 @@ def segment_tiff(
         channels=signature_channels,
         phase_channel=phase_channel,
     )
+    # Recorded outside the digest, so it documents the run without
+    # affecting reuse.
+    signature["segmentation"] = {
+        "cellpose_model": opts.model,
+        "cellpose_version": _cellpose_version(),
+    }
     write_artifact_signature(out_path, signature)
     clear_artifact_in_progress(out_path)
 
@@ -498,6 +579,14 @@ def classify_filter_tiff(
     tiff_path = Path(tiff_path)
     out_path = Path(out_path)
     mark_artifact_in_progress(out_path)
+    seg_model = segmentation_model_of(tiff_path)
+    if (opts.model_path is not None and seg_model is not None
+            and seg_model != CLASSIFIER_TRAINING_CELLPOSE_MODEL):
+        import warnings
+
+        warnings.warn(CPSAM_V2_CLASSIFIER_WARNING, UserWarning, stacklevel=2)
+        progress_cb(0.0, f"WARNING: {tiff_path.name} was segmented with "
+                         f"{seg_model}. {CPSAM_V2_CLASSIFIER_WARNING}")
     progress_cb(0.0, f"Loading segmented hyperstack {tiff_path.name}")
     data, _meta = load_hyperstack(tiff_path)        # (N_FOV, C, Y, X)
     n_fov = data.shape[0]

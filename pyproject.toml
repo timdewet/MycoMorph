@@ -17,7 +17,8 @@ dependencies = [
     "pylibCZIrw>=4.1",
     "matplotlib>=3.7",
     "typer>=0.12",
-    "cellpose",
+    # >=4.2.1 for the cpsam_v2 option; MycoMorph names its model explicitly.
+    "cellpose>=4.2.1",
     "torch",
     "torchvision",
     "pandas",
