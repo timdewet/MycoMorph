@@ -1,3 +1,4 @@
 """MycoMorph core: bacterial microscopy pre-processing (focus, split, segment, classify)."""
 
-__version__ = "0.1.0"
+# One version for the whole package, kept current by release-please.
+from mycomorph import __version__  # noqa: F401

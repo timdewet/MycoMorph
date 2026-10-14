@@ -86,6 +86,7 @@ def test_runner_cancels_while_worker_event_loop_is_busy(tmp_path: Path, monkeypa
     assert runner._stop_requested
     assert cancelled == [ctx.manifest_path]
     assert ctx.manifest_path.exists()
+    _assert_manifest_records_version(ctx.manifest_path)
 
 
 def test_bulk_runner_executes_post_features_stages(tmp_path: Path, monkeypatch):
@@ -150,6 +151,7 @@ def test_bulk_runner_executes_post_features_stages(tmp_path: Path, monkeypatch):
 
     assert not failures, failures
     assert finished == [ctx.manifest_path]
+    _assert_manifest_records_version(ctx.manifest_path)
     assert planned and planned[0] == [
         "Features", "Fluorescent Normalisation", "Foci Detection", "Embeddings",
     ]
@@ -178,3 +180,12 @@ def test_close_event_requests_stop_and_defers_close(monkeypatch):
 
     assert fake._close_when_run_ends is True
     assert calls == ["stop", "ignore"]
+
+
+def _assert_manifest_records_version(manifest_path: Path) -> None:
+    import json
+
+    import mycomorph
+
+    manifest = json.loads(manifest_path.read_text())
+    assert manifest["software"]["mycomorph"] == mycomorph.__version__

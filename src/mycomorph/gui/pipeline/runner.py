@@ -9,6 +9,8 @@ from pathlib import Path
 
 from PyQt6.QtCore import QObject, QThread, pyqtSignal
 
+from mycomorph.core.provenance import software_info
+
 from .bulk_layout import group_entries
 from .cancellation import CancellationToken, StopRequested
 from .context import BulkRunContext, RunContext
@@ -436,6 +438,7 @@ class PipelineRunner(QObject):
             self._ctx.reuse_existing = self._reuse_existing
             manifest: dict = {
                 "started_at": time.time(),
+                "software": software_info(),
                 "czi": str(self._ctx.czi_path),
                 "output_dir": str(self._ctx.output_dir),
                 "stages": [],
@@ -669,6 +672,7 @@ class BulkPipelineRunner(QObject):
             ctx.output_dir.mkdir(parents=True, exist_ok=True)
             manifest: dict = {
                 "started_at": time.time(),
+                "software": software_info(),
                 "mode": "bulk",
                 "output_dir": str(ctx.output_dir),
                 "stages": [],
