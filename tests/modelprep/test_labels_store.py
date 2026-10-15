@@ -176,6 +176,30 @@ def test_eval_dataset_empty_without_test_rows(tmp_path: Path, synthetic_h5):
     assert crops.shape[0] == 0
 
 
+def test_uids_by_split_and_restore_holdout(tmp_path: Path, synthetic_h5):
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(
+        source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0",
+    )
+    store.append_batch([
+        _row("cell_0000", "good", split=SPLIT_TEST),
+        _row("cell_0001", "bad", split=SPLIT_TEST),
+        _row("cell_0002", "good", split=SPLIT_TRAIN),
+    ])
+    assert store.uids_by_split(SPLIT_TEST) == {"cell_0000", "cell_0001"}
+
+    # A hold-out cell gets accidentally moved to train and relabelled (as review did).
+    store.append_batch([_row("cell_0000", "bad", split=SPLIT_TRAIN)])
+    assert store.uids_by_split(SPLIT_TEST) == {"cell_0001"}
+
+    # Restore it: back in test, keeping its *current* (corrected) label.
+    assert store.restore_split(["cell_0000"], SPLIT_TEST) == 1
+    assert store.uids_by_split(SPLIT_TEST) == {"cell_0000", "cell_0001"}
+    assert store.load().latest_by_uid()["cell_0000"].label_name == "bad"  # correction kept
+    # Already-test cells are a no-op.
+    assert store.restore_split(["cell_0001"], SPLIT_TEST) == 0
+
+
 def test_legacy_csv_without_split_migrates_in_place(tmp_path: Path):
     """A labels.csv written before the 'split' column upgrades on the next
     append: header gains 'split', old rows become 'train', new row keeps its

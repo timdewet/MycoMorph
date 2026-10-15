@@ -1057,11 +1057,14 @@ class LabelTrainPanel(QWidget):
         self._review_mode = review
 
         # Review audits the model on cells not yet seen this session — including
-        # already-labelled ones, so earlier mistakes can be corrected. Normal
-        # labelling (and test-set building) skips every cell already labelled on
-        # disk, so train and test splits can never overlap.
+        # already-labelled training cells, so earlier mistakes can be corrected.
+        # But it must NEVER surface hold-out test cells, or saving would move
+        # them into the training split and silently shrink the frozen hold-out.
+        # Normal labelling (and test-set building) already skips every labelled
+        # cell, so train and test can't overlap there.
         if review:
-            seen_uids = set(self._session_seen_uids)
+            seen_uids = (set(self._session_seen_uids)
+                         | self._store.uids_by_split(SPLIT_TEST))
         else:
             seen_uids = self._store.labeled_uids() | self._session_seen_uids
 
@@ -1317,10 +1320,15 @@ class LabelTrainPanel(QWidget):
 
         model_path = self._current_model_path()
         model_at_label = str(model_path) if model_path else "none"
-        split = SPLIT_TEST if self._test_mode else SPLIT_TRAIN
+        # Safety net: outside Test-set mode, never downgrade a cell that's
+        # currently in the hold-out to the training split (so a stray edit can't
+        # cannibalise the frozen test set). Test mode tags everything test.
+        protected_test = set() if self._test_mode else self._store.uids_by_split(SPLIT_TEST)
         rows: list[LabelRow] = []
         for pool_idx, lbl_name in to_save:
             rec, score = self._pool[pool_idx]
+            split = (SPLIT_TEST if (self._test_mode or rec.cell_uid in protected_test)
+                     else SPLIT_TRAIN)
             # With no model the "score" is a UI-ordering placeholder, not a real
             # P(good); persist NaN so it isn't mistaken for a 0.5 confidence.
             conf = score if model_path is not None else float("nan")

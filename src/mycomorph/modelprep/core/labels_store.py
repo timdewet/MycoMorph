@@ -280,6 +280,33 @@ class LabelsStore:
                 bucket[row.label_name] += 1
         return out
 
+    def uids_by_split(self, split: str) -> set[str]:
+        """Cell uids whose *current* label is in ``split`` (e.g. the frozen
+        hold-out's cells, so labelling/review can exclude them)."""
+        return {uid for uid, row in self.load().latest_by_uid().items()
+                if row.split == split}
+
+    def restore_split(self, uids: Iterable[str], split: str,
+                      session_id: str = "split-repair") -> int:
+        """Re-tag ``uids`` into ``split``, keeping each cell's current label.
+
+        Append-only (latest row wins), so this repairs a split without losing
+        history — used to rebuild a hold-out whose cells were accidentally moved
+        to the training set."""
+        latest = self.load().latest_by_uid()
+        rows = []
+        for uid in uids:
+            row = latest.get(uid)
+            if row is None or row.split == split:
+                continue
+            rows.append(LabelRow(
+                cell_uid=uid, label_idx=row.label_idx, label_name=row.label_name,
+                area_px=row.area_px, session_id=session_id,
+                source_h5=row.source_h5, model_at_label=row.model_at_label,
+                confidence_good_at_label=row.confidence_good_at_label, split=split,
+            ))
+        return self.append_batch(rows)
+
     # ── write ───────────────────────────────────────────────────────────
 
     @staticmethod
