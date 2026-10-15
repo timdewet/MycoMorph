@@ -36,7 +36,11 @@ app = typer.Typer(
 # ── Preset model registry ────────────────────────────────────────────────────
 
 def _bundled_models_dir() -> Path:
-    return Path(__file__).resolve().parent / "models"
+    """MycoMorph's bundled presets (``mycomorph/core/models/``): the same
+    weights Classify offers, so there is one copy of each preset."""
+    from importlib.resources import files
+
+    return Path(str(files("mycomorph.core") / "models"))
 
 
 def list_preset_models() -> dict[str, Path]:

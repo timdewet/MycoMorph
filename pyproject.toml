@@ -65,7 +65,8 @@ mycomorph-focus = "mycomorph.core.focus.cli:app"
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mycomorph.core" = ["models/*.pth"]
+"mycomorph.core" = ["models/*.pth", "models/*.json"]
+"mycomorph.modelprep.gui" = ["assets/logo/*.svg", "assets/logo/*.ico", "assets/logo/*.icns"]
 
 [tool.ruff]
 target-version = "py310"
