@@ -310,7 +310,7 @@ class MainWindow(QMainWindow):
         if not path.exists():
             return
         try:
-            data = json.loads(path.read_text())
+            data = json.loads(path.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             return
         name = data.get("last_model_name")
@@ -331,7 +331,7 @@ class MainWindow(QMainWindow):
             path.write_text(json.dumps({
                 "last_h5": str(h5) if h5 else "",
                 "last_model_name": self.source_panel.current_model_name(),
-            }, indent=2))
+            }, indent=2), encoding="utf-8")
         except Exception:  # noqa: BLE001
             pass
 

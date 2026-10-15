@@ -290,7 +290,7 @@ def save_crop_dataset(crops_dict, labels_dict, output_dir):
         if n_channels is None:
             n_channels = crop.shape[0]
 
-    with open(output_dir / "labels.csv", "w", newline="") as f:
+    with open(output_dir / "labels.csv", "w", encoding="utf-8", newline="") as f:
         writer = csv.writer(f)
         writer.writerow(["filename", "label_idx", "label_name"])
         writer.writerows(rows)
@@ -301,7 +301,7 @@ def save_crop_dataset(crops_dict, labels_dict, output_dir):
         "class_names": CLASS_NAMES,
         "n_samples": len(rows),
     }
-    with open(output_dir / "metadata.json", "w") as f:
+    with open(output_dir / "metadata.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
 
 
@@ -319,13 +319,16 @@ def load_crop_dataset(dataset_dir, phase_only=False, phase_channel_in_crop=0):
     """
     import json
     import csv
+    import io
+
+    from .labels_store import read_csv_text
 
     dataset_dir = Path(dataset_dir)
 
     # ── Load or infer metadata ─────────────────────────────────────────────
     meta_path = dataset_dir / "metadata.json"
     if meta_path.exists():
-        with open(meta_path) as f:
+        with open(meta_path, encoding="utf-8") as f:
             meta = json.load(f)
     else:
         crops_dir = dataset_dir / "crops"
@@ -358,7 +361,7 @@ def load_crop_dataset(dataset_dir, phase_only=False, phase_channel_in_crop=0):
     labels_list = []
     areas_list = []
 
-    with open(labels_csv) as f:
+    with io.StringIO(read_csv_text(labels_csv), newline="") as f:
         reader = csv.DictReader(f)
         has_area_col = "area_px" in (reader.fieldnames or [])
         for row in reader:

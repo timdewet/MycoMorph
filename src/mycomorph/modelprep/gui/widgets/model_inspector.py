@@ -118,7 +118,7 @@ class ModelInspector(QWidget):
         metrics_path = self._model_dir / "metrics.json"
         if metrics_path.exists():
             try:
-                self._metrics = json.loads(metrics_path.read_text())
+                self._metrics = json.loads(metrics_path.read_text(encoding="utf-8"))
             except Exception:  # noqa: BLE001
                 self._metrics = None
         if self._metrics and "decision_threshold" in self._metrics:
@@ -138,7 +138,7 @@ class ModelInspector(QWidget):
         stats_lines: list[str] = []
         if cfg_path.exists():
             try:
-                cfg = json.loads(cfg_path.read_text())
+                cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
                 split = cfg.get("eval_split", "val")
                 eval_acc = cfg.get("eval_acc")
                 best = cfg.get("best_val_acc")

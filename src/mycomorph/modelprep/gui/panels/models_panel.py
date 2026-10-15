@@ -567,7 +567,7 @@ class ModelsPanel(QWidget):
             out = Path.home() / ".modelprep" / "learning_curves" / f"{stem}_{human_timestamp()}"
             out.mkdir(parents=True, exist_ok=True)
             (out / "curve.json").write_text(json.dumps(
-                {"h5": str(self._h5_path), "points": points}, indent=2))
+                {"h5": str(self._h5_path), "points": points}, indent=2), encoding="utf-8")
             if self._lc_fig is not None:
                 self._lc_fig.savefig(out / "curve.png", dpi=150)
             return str(out)

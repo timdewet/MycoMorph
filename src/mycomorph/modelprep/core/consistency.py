@@ -142,7 +142,7 @@ def save_consistency_run(
     stamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
     out = Path(labels_dir) / "consistency" / stamp
     out.mkdir(parents=True, exist_ok=True)
-    with open(out / "results.csv", "w", newline="") as f:
+    with open(out / "results.csv", "w", encoding="utf-8", newline="") as f:
         w = csv.writer(f)
         w.writerow(["cell_uid", "original_label", "recheck_label"])
         w.writerows(rows)
@@ -150,5 +150,5 @@ def save_consistency_run(
         {"mode": mode, **{k: v for k, v in stats.items() if k != "disagreements"},
          "n_disagreements": len(stats.get("disagreements", []))},
         indent=2,
-    ))
+    ), encoding="utf-8")
     return out

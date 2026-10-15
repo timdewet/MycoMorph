@@ -84,7 +84,7 @@ def _read_config(d: Path) -> dict:
     cfg = d / "training_config.json"
     if cfg.exists():
         try:
-            return json.loads(cfg.read_text())
+            return json.loads(cfg.read_text(encoding="utf-8"))
         except Exception:  # noqa: BLE001
             return {}
     return {}

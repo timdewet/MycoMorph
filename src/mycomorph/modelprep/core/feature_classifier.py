@@ -238,7 +238,7 @@ def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
     (output_dir / "metrics.json").write_text(json.dumps({
         "num_classes": 2, "class_names": list(CLASS_NAMES), "eval_split": "holdout",
         "decision_threshold": 0.5, "binary": curves,
-    }, indent=2))
+    }, indent=2), encoding="utf-8")
 
     config = {
         "model_type": "features",
@@ -256,7 +256,7 @@ def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
         "dropped_reporter_features": s["dropped_reporter_features"],
         "provenance": provenance or {},
     }
-    (output_dir / "training_config.json").write_text(json.dumps(config, indent=2))
+    (output_dir / "training_config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
 
     s["model_path"] = str(output_dir / "feature_model.joblib")
     s["model_type"] = "features"

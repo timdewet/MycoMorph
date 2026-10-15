@@ -21,11 +21,15 @@ migrated in place on the next write (see ``_ensure_csv_schema``).
 
 from __future__ import annotations
 
+import codecs
 import csv
 import getpass
 import hashlib
+import io
 import json
+import locale
 import os
+import sys
 import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -113,6 +117,53 @@ def cell_uids_sha256(cell_uids: Iterable) -> str:
     return h.hexdigest()
 
 
+def _legacy_encoding() -> str:
+    """Encoding an older ModelPrep would have written with on this machine
+    (it used the platform default). Where that is UTF-8 (macOS, Linux, Windows
+    in UTF-8 mode) a non-UTF-8 file most likely came from Windows: cp1252."""
+    getenc = getattr(locale, "getencoding", None)  # 3.11+; ignores UTF-8 mode
+    enc = getenc() if getenc else locale.getpreferredencoding(False)
+    return "cp1252" if codecs.lookup(enc).name == "utf-8" else enc
+
+
+_warned_legacy: set[str] = set()
+
+
+def read_csv_text(path: os.PathLike | str) -> str:
+    """Decode a CSV ModelPrep wrote, for ``csv`` to parse via ``io.StringIO``.
+
+    Files are written as UTF-8, but versions before that used the platform
+    default, so a ``labels.csv`` shared via Dropbox may hold rows a Windows
+    machine wrote in its code page, mixed with UTF-8 rows from a Mac. Lines
+    that aren't valid UTF-8 are decoded with ``_legacy_encoding()`` instead,
+    with a one-line warning, so those labels still load. A UTF-8 BOM (Excel's
+    "CSV UTF-8") is dropped.
+    """
+    data = Path(path).read_bytes()
+    if data.startswith(codecs.BOM_UTF8):
+        data = data[len(codecs.BOM_UTF8):]
+    try:
+        return data.decode("utf-8")
+    except UnicodeDecodeError:
+        pass
+    legacy = _legacy_encoding()
+    lines, n_legacy = [], 0
+    # Line-by-line is safe: both encodings are ASCII-compatible, so a line
+    # break byte is never part of a multi-byte character.
+    for line in data.splitlines(keepends=True):
+        try:
+            lines.append(line.decode("utf-8"))
+        except UnicodeDecodeError:
+            lines.append(line.decode(legacy, errors="replace"))
+            n_legacy += 1
+    if str(path) not in _warned_legacy:
+        _warned_legacy.add(str(path))
+        print(f"[modelprep] WARNING: {path}: read {n_legacy} non-UTF-8 line(s) "
+              f"as {legacy} (written by an older ModelPrep on Windows?).",
+              file=sys.stderr)
+    return "".join(lines)
+
+
 class LabelsStore:
     """Read/write/merge for ``modelprep_labels/labels.csv``.
 
@@ -149,7 +200,7 @@ class LabelsStore:
         expected_uids = cell_uids_sha256(cell_uids) if cell_uids is not None else None
 
         if self.manifest_path.exists():
-            with open(self.manifest_path) as f:
+            with open(self.manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
             expected_head = _head_hash(source_h5)
             expected_total = int(total_cells)
@@ -204,20 +255,20 @@ class LabelsStore:
             "last_labeled_at": None,
             "sessions": [],
         }
-        with open(self.manifest_path, "w") as f:
+        with open(self.manifest_path, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
 
     def _read_manifest(self) -> dict:
         if not self.manifest_path.exists():
             return {}
-        with open(self.manifest_path) as f:
+        with open(self.manifest_path, encoding="utf-8") as f:
             return json.load(f)
 
     def _write_manifest(self, manifest: dict) -> None:
         # Atomic replace: the manifest holds the sampling provenance and is
         # rewritten after every save, so a crash mid-write must not corrupt it.
         tmp = self.manifest_path.with_suffix(".json.tmp")
-        with open(tmp, "w") as f:
+        with open(tmp, "w", encoding="utf-8") as f:
             json.dump(manifest, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
@@ -232,7 +283,7 @@ class LabelsStore:
         if not self.csv_path.exists():
             return LabelsFrame(rows=[])
 
-        with open(self.csv_path, newline="") as f:
+        with io.StringIO(read_csv_text(self.csv_path), newline="") as f:
             reader = csv.DictReader(f)
             for r in reader:
                 try:
@@ -343,21 +394,23 @@ class LabelsStore:
         """
         if not self.csv_path.exists():
             return
-        with open(self.csv_path, newline="") as f:
-            reader = csv.reader(f)
-            try:
-                header = next(reader)
-            except StopIteration:
-                return  # empty file — append_batch will write a fresh header
-            if list(header) == list(CSV_COLUMNS):
-                return
+        # Peek at the (ASCII) header alone so a normal append stays O(rows).
+        with open(self.csv_path, "rb") as f:
+            first = f.readline()
+        if not first:
+            return  # empty file — append_batch will write a fresh header
+        header = next(csv.reader([first.decode("utf-8-sig", errors="replace")]))
+        if list(header) == list(CSV_COLUMNS):
+            return
+        with io.StringIO(read_csv_text(self.csv_path), newline="") as f:
+            next(csv.reader(f))
             old_rows = list(csv.DictReader(f, fieldnames=header))
 
         defaults = {col: "" for col in CSV_COLUMNS}
         defaults["split"] = SPLIT_TRAIN
         defaults["model_at_label"] = "none"
         tmp = self.csv_path.with_suffix(".csv.tmp")
-        with open(tmp, "w", newline="") as f:
+        with open(tmp, "w", encoding="utf-8", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(CSV_COLUMNS)
             for r in old_rows:
@@ -381,7 +434,7 @@ class LabelsStore:
         self.dir.mkdir(parents=True, exist_ok=True)
         self._ensure_csv_schema()
 
-        with open(self.csv_path, "a", newline="") as f:
+        with open(self.csv_path, "a", encoding="utf-8", newline="") as f:
             self._lock(f)
             try:
                 # st_size under the lock is authoritative regardless of the

@@ -200,7 +200,7 @@ def verify_model(
     cfg = model_path.parent / "training_config.json"
     if cfg.exists():
         try:
-            c = json.loads(cfg.read_text())
+            c = json.loads(cfg.read_text(encoding="utf-8"))
             typer.echo(
                 f"   trained: eval_split={c.get('eval_split')} "
                 f"eval_acc={c.get('eval_acc')} auc={c.get('roc_auc')} "
@@ -269,7 +269,7 @@ def doctor() -> None:
         sidecar = p.with_suffix(".json")
         if sidecar.exists():
             try:
-                meta = _json.loads(sidecar.read_text())
+                meta = _json.loads(sidecar.read_text(encoding="utf-8"))
                 sha = hashlib.sha256(p.read_bytes()).hexdigest()
                 status = "OK" if sha == meta.get("sha256") else "SHA MISMATCH"
                 typer.echo(f"    {name}: integrity {status}")

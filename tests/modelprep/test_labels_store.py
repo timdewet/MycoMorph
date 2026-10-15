@@ -234,3 +234,62 @@ def test_legacy_csv_without_split_migrates_in_place(tmp_path: Path):
         "train": {"good": 1, "bad": 1},
         "test": {"good": 1, "bad": 0},
     }
+
+
+def test_non_ascii_labeler_and_model_round_trip(tmp_path: Path, synthetic_h5):
+    """labels.csv is shared Mac <-> Windows via Dropbox, so it is always UTF-8,
+    whatever the platform's default encoding."""
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(
+        source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0",
+    )
+    labeler = "Zoë Łukasiewicz-Müller"
+    model = "C:/Users/Zoë/ModelPrep/models/łódź_güt_v1.pth"
+    store.append_batch([_row("cell_0000", "good", labeler=labeler, model_at_label=model)])
+
+    row = store.load().latest_by_uid()["cell_0000"]
+    assert row.labeler == labeler
+    assert row.model_at_label == model
+    assert labeler in store.csv_path.read_bytes().decode("utf-8")
+
+
+@pytest.mark.parametrize("with_split", [True, False])
+def test_legacy_code_page_rows_still_load(tmp_path: Path, monkeypatch, capsys,
+                                          with_split):
+    """Rows an older ModelPrep wrote on Windows (cp1252), mixed with UTF-8
+    rows from a Mac, load with a one-line warning instead of crashing — and
+    keep loading after a new append (which migrates an old-schema file)."""
+    from modelprep.core import labels_store as ls
+
+    monkeypatch.setattr(ls, "_legacy_encoding", lambda: "cp1252")
+    labels_dir = tmp_path / "labels"
+    labels_dir.mkdir()
+    csv_path = labels_dir / "labels.csv"
+    cols = list(ls.CSV_COLUMNS) if with_split else list(ls.CSV_COLUMNS)[:-1]
+
+    def line(uid, labeler):
+        vals = [uid, 0, "good", 100, "2026-01-01", labeler, "s", "h5", "none", 0.9]
+        return ",".join(map(str, vals + (["train"] if with_split else []))) + "\r\n"
+
+    csv_path.write_bytes(
+        (",".join(cols) + "\r\n").encode("ascii")
+        + line("cell_A", "José").encode("cp1252")  # Windows, old ModelPrep
+        + line("cell_B", "Zoë").encode("utf-8")    # Mac
+    )
+
+    store = LabelsStore(labels_dir)
+    latest = store.load().latest_by_uid()
+    assert latest["cell_A"].labeler == "José"
+    assert latest["cell_B"].labeler == "Zoë"
+    err = capsys.readouterr().err
+    assert err.count("WARNING") == 1 and "cp1252" in err
+    store.load()
+    assert capsys.readouterr().err == ""  # warned once per file
+
+    store.append_batch([_row("cell_C", "bad", labeler="Łukasz")])
+    latest = store.load().latest_by_uid()
+    assert {uid: r.labeler for uid, r in latest.items()} == {
+        "cell_A": "José", "cell_B": "Zoë", "cell_C": "Łukasz",
+    }
+    if not with_split:  # the schema migration rewrote the whole file as UTF-8
+        csv_path.read_bytes().decode("utf-8")

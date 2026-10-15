@@ -49,7 +49,7 @@ def _setup_logging(output_dir: Path):
         if isinstance(h, logging.FileHandler):
             log.removeHandler(h)
             h.close()
-    fh = logging.FileHandler(Path(output_dir) / "train.log", mode="w")
+    fh = logging.FileHandler(Path(output_dir) / "train.log", mode="w", encoding="utf-8")
     fh.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(fh)
     return fh
@@ -682,7 +682,7 @@ def train(
         "trainer_version": _get_version(),
         "provenance": provenance or {},
     }
-    with open(output_dir / "training_config.json", "w") as f:
+    with open(output_dir / "training_config.json", "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2)
 
     metrics = {
@@ -693,7 +693,7 @@ def train(
         "val_optimal_threshold": (val_curves["optimal_threshold"] if val_curves else None),
         "binary": eval_curves,
     }
-    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    (output_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     # ── Plots ──────────────────────────────────────────────────────────────
     try:
