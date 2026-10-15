@@ -29,7 +29,7 @@ GOLDEN_SHA = "55b258ec61e63f1e77eaf72d8c6bdc217cfd8c97c7508f76f0ea96d6132f99cf"
 
 
 def _hash_shared_block(py_path: Path) -> str:
-    text = py_path.read_text()
+    text = py_path.read_text(encoding="utf-8")  # box-drawing markers; Windows defaults to cp1252
     begin = "# ── BEGIN SHARED MODEL DEFINITION ─"
     end = "# ── END SHARED MODEL DEFINITION ─"
     try:
