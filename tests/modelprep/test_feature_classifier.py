@@ -230,3 +230,40 @@ def test_missing_parquet_engine_is_a_one_line_error(tmp_path, monkeypatch):
         read_features_table(path)
     msg = str(exc.value)
     assert "\n" not in msg and "pip install pyarrow" in msg
+
+
+def test_reporter_columns_match_mycomorph_naming():
+    from modelprep.core.feature_classifier import reporter_columns
+
+    cols = ["solidity", "intensity_mean_Bright", "intensity_p95_Bright",
+            "intensity_min_mCher", "intensity_total_mCher", "intensity_mean_C2"]
+    assert reporter_columns(cols, "Bright") == [
+        "intensity_min_mCher", "intensity_total_mCher", "intensity_mean_C2"]
+
+
+def test_phase_only_drops_reporter_intensities(synthetic_h5, tmp_path):
+    """Review M7: the feature model can be restricted to phase-derived
+    information, and says what it dropped."""
+    from modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
+
+    uids = [f"cell_{i:04d}" for i in range(32)]
+    rng = np.random.default_rng(1)
+    pd.DataFrame({
+        "cell_uid": uids, "solidity": rng.random(32),
+        "intensity_mean_Phase": rng.random(32), "intensity_mean_Fluor": rng.random(32),
+    }).to_parquet(synthetic_h5.parent / "all_features.parquet")
+    store = LabelsStore(tmp_path / "labels")
+    store.ensure_initialised(source_h5=synthetic_h5, total_cells=32, h5_schema_version="1.0")
+    store.append_batch([LabelRow(cell_uid=u, label_idx=i % 2,
+                                 label_name="good" if i % 2 == 0 else "bad",
+                                 split=SPLIT_TRAIN if i % 3 else SPLIT_TEST)
+                        for i, u in enumerate(uids)])
+
+    kw = dict(with_fragment=False, with_context=False, with_focus=False)
+    full = load_feature_matrix(synthetic_h5, tmp_path / "labels", **kw)
+    assert "intensity_mean_Fluor" in full.columns
+    m = load_feature_matrix(synthetic_h5, tmp_path / "labels", phase_only=True, **kw)
+    assert "intensity_mean_Fluor" not in m.columns
+    assert "intensity_mean_Phase" in m.columns and "solidity" in m.columns
+    s = train_feature_classifier(m, n_importance_repeats=2)
+    assert s["phase_only"] and s["dropped_reporter_features"] == ["intensity_mean_Fluor"]

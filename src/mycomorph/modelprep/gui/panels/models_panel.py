@@ -341,7 +341,9 @@ class ModelsPanel(QWidget):
 
         cells = {
             "Name": name_item,
-            "Type": _text_cell("features" if m.model_type == "features" else "CNN"),
+            "Type": _text_cell(
+                ("features · phase only" if (cfg.get("feature_groups") or {}).get("phase_only")
+                 else "features") if m.model_type == "features" else "CNN"),
             "Created": _text_cell(m.created or "—"),
             "Eval on": _text_cell(str(cfg.get("eval_split", "—"))),
             "Acc": _num_cell(cfg.get("eval_acc")),

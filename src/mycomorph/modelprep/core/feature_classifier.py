@@ -14,6 +14,7 @@ crop — and the importances say *which* features carry the decision.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Optional
 
@@ -31,6 +32,29 @@ _DROP_COLS = {
 }
 
 
+# MycoMorph's per-channel intensity columns: intensity_<stat>_<channel>.
+_INTENSITY_RE = re.compile(r"^intensity_(?:mean|min|max|median|p95|total)_(?P<ch>.+)$")
+
+
+def _sanitise_channel(name: str) -> str:
+    """Channel name as MycoMorph embeds it in a column key."""
+    s = "".join(c if (c.isalnum() or c == "_") else "_" for c in name).strip("_")
+    return s or "chan"
+
+
+def reporter_columns(columns, phase_channel: str) -> list[str]:
+    """Per-channel intensity columns of every channel *other than* the phase
+    (brightfield) one: reporter / fluorescence readouts. Excluding them makes
+    the feature model see only what the CNN sees (phase-derived information)."""
+    phase = _sanitise_channel(phase_channel).lower()
+    out = []
+    for c in columns:
+        m = _INTENSITY_RE.match(str(c))
+        if m and m.group("ch").lower() != phase:
+            out.append(c)
+    return out
+
+
 def _features_path(h5_path: Path) -> Optional[Path]:
     base = Path(h5_path).parent
     for name in ("all_features.parquet", "all_features.csv"):
@@ -46,12 +70,17 @@ def load_feature_matrix(
     with_fragment: bool = True,
     with_context: bool = True,
     with_focus: bool = True,
+    phase_only: bool = False,
 ):
     """Return a DataFrame of numeric features + ``label`` (0/1) + ``split`` for
     every labelled cell, joining the morphometric table to the labels.
 
     ``with_context`` adds FOV-context features (neighbour density etc.);
     ``with_fragment`` adds the crossing-fragment cues from the crops.
+    ``phase_only`` drops reporter / fluorescence intensity columns (every
+    per-channel intensity except the HDF5's phase channel), so the comparison
+    with the CNN, which sees phase + mask + area, is like-for-like. The dropped
+    names are in ``matrix.attrs["dropped_reporter_features"]``.
     """
     import pandas as pd
 
@@ -64,6 +93,14 @@ def load_feature_matrix(
             "The feature-based model needs MycoMorph's 04_features table."
         )
     feats = read_features_table(fpath)
+    dropped: list[str] = []
+    if phase_only:
+        from .crops_h5 import HDF5CropsReader
+
+        with HDF5CropsReader(h5_path) as reader:
+            phase_name = reader.channel_names[reader.phase_channel_idx] if reader.channel_names else ""
+        dropped = reporter_columns(feats.columns, phase_name)
+        feats = feats.drop(columns=dropped)
 
     latest = LabelsStore(labels_dir).load().latest_by_uid()
     if not latest:
@@ -84,6 +121,8 @@ def load_feature_matrix(
         crop = compute_crop_features(h5_path, cell_uids=matrix["cell_uid"].tolist(),
                                      focus=with_focus, fragment=with_fragment)
         matrix = matrix.merge(crop, on="cell_uid", how="left")
+    matrix.attrs["phase_only"] = bool(phase_only)
+    matrix.attrs["dropped_reporter_features"] = list(dropped)
     return matrix
 
 
@@ -157,6 +196,8 @@ def train_feature_classifier(matrix, seed: int = 42, n_importance_repeats: int =
         "with_fragment": any(c.startswith("frag_") for c in cols),
         "with_context": any(c.startswith("ctx_") for c in cols),
         "with_focus": any(c.startswith("focus_") for c in cols),
+        "phase_only": bool(matrix.attrs.get("phase_only", False)),
+        "dropped_reporter_features": list(matrix.attrs.get("dropped_reporter_features", [])),
     }
     if return_estimator:
         summary["_clf"] = clf
@@ -170,7 +211,8 @@ def train_feature_classifier(matrix, seed: int = 42, n_importance_repeats: int =
 
 
 def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
-                   seed: int = 42, provenance: Optional[dict] = None) -> dict:
+                   seed: int = 42, provenance: Optional[dict] = None,
+                   phase_only: bool = False) -> dict:
     """Train the all-features model and persist a run dir that mirrors the CNN's
     artefact shape (so it lists in the Models tab + renders in the inspector).
     Returns the JSON-safe summary (with ``model_path`` + ``model_type``)."""
@@ -180,7 +222,7 @@ def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
     from .cell_quality_classifier import CLASS_NAMES
     from .train_classifier import _binary_curves
 
-    matrix = load_feature_matrix(h5_path, labels_dir)  # all 4 groups by default
+    matrix = load_feature_matrix(h5_path, labels_dir, phase_only=phase_only)  # all 4 groups
     s = train_feature_classifier(matrix, seed=seed, return_estimator=True)
     clf = s.pop("_clf")
     cols = s.pop("_feature_cols")
@@ -209,7 +251,9 @@ def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
         "roc_auc": s["roc_auc"], "average_precision": s["average_precision"],
         "decision_threshold": 0.5, "confusion": s["confusion"],
         "n_features": s["n_features"], "top_importances": s["top_importances"],
-        "feature_groups": {k: s[k] for k in ("with_context", "with_focus", "with_fragment")},
+        "feature_groups": {k: s[k] for k in ("with_context", "with_focus", "with_fragment",
+                                             "phase_only")},
+        "dropped_reporter_features": s["dropped_reporter_features"],
         "provenance": provenance or {},
     }
     (output_dir / "training_config.json").write_text(json.dumps(config, indent=2))

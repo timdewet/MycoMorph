@@ -460,6 +460,11 @@ def feature_model(
         False, "--no-focus",
         help="Skip the crop-based focus/sharpness features.",
     ),
+    phase_only: bool = typer.Option(
+        False, "--phase-only",
+        help="Drop reporter/fluorescence intensity columns, keeping only "
+             "phase-derived information (what the CNN sees).",
+    ),
 ) -> None:
     """Train a feature-based classifier (morphometrics + fragment + FOV-context
     + focus cues) and report hold-out metrics — comparable to the CNN."""
@@ -469,7 +474,8 @@ def feature_model(
     try:
         matrix = load_feature_matrix(h5, ld, with_fragment=not no_fragment,
                                      with_context=not no_context,
-                                     with_focus=not no_focus)
+                                     with_focus=not no_focus,
+                                     phase_only=phase_only)
         summary = train_feature_classifier(matrix)
     except (FileNotFoundError, ValueError, ImportError) as e:
         typer.echo(f"ERROR: {e}", err=True)
@@ -483,6 +489,10 @@ def feature_model(
     typer.echo(f"  train / hold-out:  {summary['n_train']} / {summary['n_test']} cells · "
                f"{summary['n_features']} features"
                f"{' (+ ' + ' + '.join(extras) + ' cues)' if extras else ''}")
+    if summary["phase_only"]:
+        dropped = summary["dropped_reporter_features"]
+        typer.echo(f"  phase only:        dropped {len(dropped)} reporter columns"
+                   f"{': ' + ', '.join(dropped) if dropped else ''}")
     typer.echo(f"  balanced accuracy: {summary['balanced_acc']:.3f}")
     typer.echo(f"  accuracy:          {summary['eval_acc']:.3f}")
     typer.echo(f"  ROC AUC:           {summary['roc_auc']:.3f}    AP: {summary['average_precision']:.3f}")

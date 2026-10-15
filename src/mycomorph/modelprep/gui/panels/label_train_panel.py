@@ -426,6 +426,7 @@ class _TrainWorker(QThread):
         pretrained: Optional[Path],
         model_name: str = "",
         use_holdout: bool = True,
+        feature_phase_only: bool = False,
     ) -> None:
         super().__init__()
         self.h5_path = h5_path
@@ -446,6 +447,7 @@ class _TrainWorker(QThread):
         # otherwise fall back to an internal split of the train cells. Either
         # way, test-tagged cells are never trained on.
         self.use_holdout = use_holdout
+        self.feature_phase_only = feature_phase_only
 
     def run(self) -> None:
         try:
@@ -526,7 +528,8 @@ class _TrainWorker(QThread):
             f"{name}-features_{ts}" if ts else f"{self.output_dir.name}-features")
         try:
             return train_and_save(self.h5_path, self.labels_dir, feature_dir,
-                                  seed=self.seed, provenance=provenance), None
+                                  seed=self.seed, provenance=provenance,
+                                  phase_only=self.feature_phase_only), None
         except FileNotFoundError:
             return None, "no morphometric features table next to the HDF5"
         except (ValueError, ImportError) as e:
@@ -986,12 +989,19 @@ class LabelTrainPanel(QWidget):
             "(auto-disabled on tiny datasets)."
         )
         self._seed = QSpinBox(); self._seed.setRange(0, 2**31 - 1); self._seed.setValue(42)
+        self._feat_phase_only = QCheckBox("Feature model: phase only")
+        self._feat_phase_only.setToolTip(
+            "Train the comparison feature model without reporter/fluorescence "
+            "intensities, so it sees only phase-derived information like the CNN "
+            "(phase + mask + area). Off = all measured features."
+        )
         adv.addWidget(_labeled("Device:", self._device_combo))
         adv.addWidget(_labeled("Batch:", self._batch))
         adv.addWidget(_labeled("Patience:", self._patience))
         adv.addWidget(_labeled("Val:", self._val_frac))
         adv.addWidget(_labeled("Test:", self._test_frac))
         adv.addWidget(_labeled("Seed:", self._seed))
+        adv.addWidget(self._feat_phase_only)
         adv_host.setVisible(False)
         v.addWidget(adv_host)
 
@@ -1589,6 +1599,7 @@ class LabelTrainPanel(QWidget):
             pretrained=pretrained,
             model_name=self._model_name,
             use_holdout=self._use_holdout.isChecked() and self._use_holdout.isEnabled(),
+            feature_phase_only=self._feat_phase_only.isChecked(),
         )
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.finished.connect(self._on_train_finished)
@@ -1670,7 +1681,11 @@ class LabelTrainPanel(QWidget):
                       f"AP {fm['average_precision']:.3f}"]
             cnn_auc = auc if (auc is not None and auc == auc) else None
             delta = (f"  (vs CNN AUC {cnn_auc:.3f})" if cnn_auc is not None else "")
-            feature_line = "\nFeature model · " + " · ".join(fparts) + delta
+            groups = ["morphology"] + [g for g, on in (
+                ("context", fm.get("with_context")), ("focus", fm.get("with_focus")),
+                ("fragment", fm.get("with_fragment"))) if on]
+            used = " + ".join(groups) + (", phase only" if fm.get("phase_only") else "")
+            feature_line = f"\nFeature model ({used}) · " + " · ".join(fparts) + delta
         elif summary.get("feature_skip"):
             feature_line = f"\nFeature model skipped — {summary['feature_skip']}."
         else:
