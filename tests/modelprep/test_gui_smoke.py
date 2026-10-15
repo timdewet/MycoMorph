@@ -455,6 +455,8 @@ def test_label_page_wording_follows_state(synthetic_h5, tmp_path):
     assert panel._diversify.isEnabled()
     panel.shutdown()
 
+    # From a source checkout the rubric resolves to the local file, not the URL.
+    assert Path(rubric_location()).is_file()
     assert Path(rubric_location()).name == "labelling_rubric.md"
 
 
