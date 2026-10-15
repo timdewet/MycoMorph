@@ -874,10 +874,9 @@ def main():
     print("  MicrobeJ will detect each white object as a cell")
     if fmt == "tiff" and args.sample:
         print()
-        print("Next steps (training workflow):")
-        print("  Label and train in ModelPrep (`modelprep`, or `modelprep-cli label` /")
-        print("  `modelprep-cli train`). It reads the all_crops.h5 that MycoMorph's")
-        print("  Features stage writes with \"Save HDF5 crops\" on.")
+        print("Note: the cell-quality classifier is now trained in ModelPrep, which")
+        print("labels cells from the all_crops.h5 that the MycoMorph app's Features")
+        print("stage writes. It doesn't read these sampled TIFFs.")
 
 
 if __name__ == "__main__":
