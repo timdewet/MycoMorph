@@ -106,6 +106,32 @@ def test_models_panel_lists_sorts_and_deletes(tmp_path, monkeypatch):
     app.processEvents()
 
 
+def test_models_panel_lists_runs_from_standalone_modelprep(tmp_path, monkeypatch):
+    """Runs trained before the move recorded the standalone package's own
+    version; the Models tab lists them next to runs that record MycoMorph's."""
+    app = _app()
+    import mycomorph
+    import mycomorph.modelprep.gui.trained_models as tm
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    from mycomorph.modelprep.gui.panels.models_panel import _COL
+
+    root = tmp_path / "models"
+    root.mkdir()
+    monkeypatch.setattr(tm, "trained_models_root", lambda: root)
+    monkeypatch.setattr(mp, "trained_models_root", lambda: root)
+    _make_run(root, "old", "2026-06-11_00-00-00", trainer="modelprep",
+              trainer_version="0.1.0", roc_auc=0.81)
+    _make_run(root, "rel", "2026-10-15_00-00-00", trainer="modelprep",
+              trainer_version="0.2.0", roc_auc=0.84)
+    _make_run(root, "new", "2026-10-16_00-00-00", trainer="modelprep",
+              trainer_version=mycomorph.__version__, roc_auc=0.86)
+
+    panel = mp.ModelsPanel()
+    names = {panel._table.item(r, _COL["Name"]).text() for r in range(panel._table.rowCount())}
+    assert names == {"old", "rel", "new"}
+    app.processEvents()
+
+
 def test_models_panel_shows_feature_runs(tmp_path, monkeypatch):
     app = _app()
     import json

@@ -1,3 +1,6 @@
-"""ModelPrep — labeller and trainer for the MycoMorph cell-quality classifier."""
+"""ModelPrep — labeller and trainer for the MycoMorph cell-quality classifier.
 
-__version__ = "0.1.0"  # x-release-please-version
+Part of MycoMorph, and versioned with it.
+"""
+
+from mycomorph import __version__  # noqa: F401

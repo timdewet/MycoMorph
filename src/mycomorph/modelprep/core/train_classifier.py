@@ -660,6 +660,8 @@ def train(
         "test_fraction": test_fraction,
         "seed": int(seed),
         "freeze_backbone": bool(freeze_backbone),
+        # trainer_version is MycoMorph's version (0.3.0 onwards). Runs from
+        # the standalone ModelPrep package recorded its own 0.1.0 / 0.2.0.
         "trainer": "modelprep",
         "trainer_version": _get_version(),
         "provenance": provenance or {},
@@ -731,7 +733,7 @@ def _print_device(device):
 
 def _get_version() -> str:
     try:
-        from modelprep import __version__
+        from mycomorph import __version__
         return __version__
     except Exception:
         return "unknown"

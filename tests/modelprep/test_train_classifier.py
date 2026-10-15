@@ -75,6 +75,19 @@ def test_train_cpu_smoke(tmp_path):
     assert "balanced_acc" in summary and "majority_baseline" in summary
 
 
+def test_train_records_mycomorph_version(tmp_path):
+    import json
+
+    import mycomorph
+
+    crops, labels = _synthetic(10, 10)
+    train(crops=crops, labels=labels, output_dir=tmp_path, epochs=1, device="cpu", seed=0)
+    cfg = json.loads((tmp_path / "training_config.json").read_text(encoding="utf-8"))
+    # ModelPrep is versioned with MycoMorph; the trainer name stays "modelprep".
+    assert cfg["trainer"] == "modelprep"
+    assert cfg["trainer_version"] == mycomorph.__version__
+
+
 def test_train_with_external_holdout(tmp_path):
     crops, labels = _synthetic(24, 24, seed=1)
     eval_crops, eval_labels = _synthetic(8, 8, seed=2)
