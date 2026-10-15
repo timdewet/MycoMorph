@@ -185,7 +185,7 @@ def doctor() -> None:
     typer.echo(f"Python    {platform.python_version()}  ({sys.platform})")
 
     for mod in ("numpy", "scipy", "sklearn", "skimage", "h5py", "pandas",
-                "matplotlib", "typer", "qtawesome", "psutil"):
+                "pyarrow", "matplotlib", "typer", "qtawesome", "psutil"):
         try:
             m = importlib.import_module(mod)
             typer.echo(f"  {mod:12s} {getattr(m, '__version__', '?')}")
@@ -471,7 +471,7 @@ def feature_model(
                                      with_context=not no_context,
                                      with_focus=not no_focus)
         summary = train_feature_classifier(matrix)
-    except (FileNotFoundError, ValueError) as e:
+    except (FileNotFoundError, ValueError, ImportError) as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=2)
 

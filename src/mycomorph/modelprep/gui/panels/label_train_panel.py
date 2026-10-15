@@ -507,10 +507,12 @@ class _TrainWorker(QThread):
                                   seed=self.seed, provenance=provenance), None
         except FileNotFoundError:
             return None, "no morphometric features table next to the HDF5"
-        except ValueError as e:
+        except (ValueError, ImportError) as e:
             return None, str(e)
         except Exception as e:  # noqa: BLE001 — never fail the CNN run over this
-            return None, f"feature model error: {e}"
+            # One line only: the status label isn't the place for a traceback.
+            first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+            return None, f"feature model error: {first}"
 
 
 # ─────────────────────────────────────────────────────────────────────────────

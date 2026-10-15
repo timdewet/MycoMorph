@@ -255,3 +255,34 @@ def test_consistency_dialog_samples_scores_and_saves(synthetic_h5):
     # labels.csv is untouched: still exactly the 24 originals.
     assert len(store.load().rows) == 24
     app.processEvents()
+
+
+def test_feature_model_skip_reason_is_one_line(tmp_path, monkeypatch):
+    """A missing parquet engine (or any other error) surfaces as a short skip
+    reason under the CNN results, never as pandas' multi-line ImportError."""
+    _app()
+    import modelprep.core.feature_classifier as fc
+    from modelprep.gui.panels.label_train_panel import _TrainWorker
+
+    worker = _TrainWorker(
+        tmp_path / "all_crops.h5", tmp_path / "labels",
+        tmp_path / "demo_2026-06-14_10-00-00",
+        epochs=1, lr=1e-3, batch_size=8, patience=1, val_fraction=0.2,
+        test_fraction=0.0, seed=0, device="cpu", freeze_backbone=False,
+        pretrained=None,
+    )
+
+    def no_pyarrow(*_a, **_k):
+        raise ImportError("pyarrow isn't installed, so all_features.parquet "
+                          "can't be read (pip install pyarrow)")
+
+    monkeypatch.setattr(fc, "train_and_save", no_pyarrow)
+    summary, reason = worker._train_feature_model({})
+    assert summary is None and "pip install pyarrow" in reason and "\n" not in reason
+
+    def boom(*_a, **_k):
+        raise RuntimeError("first line\nsecond line")
+
+    monkeypatch.setattr(fc, "train_and_save", boom)
+    _, reason = worker._train_feature_model({})
+    assert reason == "feature model error: first line"

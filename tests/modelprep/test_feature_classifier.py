@@ -202,3 +202,20 @@ def test_train_and_save_writes_feature_run(synthetic_h5, tmp_path):
     cfg = json.loads((out / "training_config.json").read_text())
     assert cfg["model_type"] == "features"
     assert "roc_auc" in cfg and "balanced_acc" in cfg and cfg["eval_split"] == "holdout"
+
+
+def test_missing_parquet_engine_is_a_one_line_error(tmp_path, monkeypatch):
+    from modelprep.core.context_features import read_features_table
+
+    path = tmp_path / "all_features.parquet"
+    path.write_bytes(b"")
+
+    def no_engine(*_a, **_k):
+        raise ImportError("Unable to find a usable engine; tried using: 'pyarrow'.\n"
+                          "A suitable version of pyarrow is required.")
+
+    monkeypatch.setattr(pd, "read_parquet", no_engine)
+    with pytest.raises(ImportError) as exc:
+        read_features_table(path)
+    msg = str(exc.value)
+    assert "\n" not in msg and "pip install pyarrow" in msg

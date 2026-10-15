@@ -55,13 +55,15 @@ def load_feature_matrix(
     """
     import pandas as pd
 
+    from .context_features import read_features_table
+
     fpath = _features_path(h5_path)
     if fpath is None:
         raise FileNotFoundError(
             f"No all_features.parquet/.csv next to {Path(h5_path).name}. "
             "The feature-based model needs MycoMorph's 04_features table."
         )
-    feats = pd.read_parquet(fpath) if fpath.suffix == ".parquet" else pd.read_csv(fpath)
+    feats = read_features_table(fpath)
 
     latest = LabelsStore(labels_dir).load().latest_by_uid()
     if not latest:

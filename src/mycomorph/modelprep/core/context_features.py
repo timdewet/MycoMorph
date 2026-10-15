@@ -28,6 +28,25 @@ def _features_path(h5_path: Path) -> Optional[Path]:
     return None
 
 
+def read_features_table(fpath: Path):
+    """Read ``all_features.parquet`` (or ``.csv``) as a DataFrame.
+
+    A missing parquet engine is re-raised as a one-line ``ImportError`` — pandas'
+    own message is a paragraph listing every engine it tried.
+    """
+    import pandas as pd
+
+    if Path(fpath).suffix != ".parquet":
+        return pd.read_csv(fpath)
+    try:
+        return pd.read_parquet(fpath)
+    except ImportError as e:
+        raise ImportError(
+            f"pyarrow isn't installed, so {Path(fpath).name} can't be read "
+            "(pip install pyarrow)"
+        ) from e
+
+
 def _bbox_overlap_counts(bb: np.ndarray) -> np.ndarray:
     """Count, per cell, how many other cells' bounding boxes it intersects.
     ``bb`` columns are (y0, x0, y1, x1)."""
@@ -54,8 +73,7 @@ def compute_context_features(
         raise FileNotFoundError(f"No all_features table next to {Path(h5_path).name}.")
     cols = ["cell_uid", "fov", "centroid_y", "centroid_x",
             "bbox_y0", "bbox_x0", "bbox_y1", "bbox_x1"]
-    df = (pd.read_parquet(fpath, columns=None) if fpath.suffix == ".parquet"
-          else pd.read_csv(fpath))
+    df = read_features_table(fpath)
     if "well" in df.columns:
         group_keys = ["well", "fov"]
     else:
