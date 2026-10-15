@@ -255,3 +255,146 @@ def test_consistency_dialog_samples_scores_and_saves(synthetic_h5):
     # labels.csv is untouched: still exactly the 24 originals.
     assert len(store.load().rows) == 24
     app.processEvents()
+
+
+def _wait_for_pool(app, panel):
+    """Let the pool worker finish and deliver its queued result."""
+    import time
+    worker = panel._al_worker
+    assert worker is not None
+    assert worker.wait(20000), "pool worker did not finish"
+    deadline = time.time() + 5
+    while time.time() < deadline and not panel._load_btn.isEnabled():
+        app.processEvents()
+        time.sleep(0.01)
+    app.processEvents()
+
+
+def test_label_panel_condition_filter(multi_condition_h5, tmp_path):
+    app = _app()
+    from modelprep.core.cell_filter import CellFilter
+    from modelprep.core.labels_store import CSV_COLUMNS, LabelsStore
+    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+
+    labels_dir = tmp_path / "labels"
+    panel = LabelTrainPanel()
+    panel.set_source(multi_condition_h5, labels_dir)
+    panel._model_combo.setCurrentIndex(0)  # "none (random order)"
+    assert panel._current_model_path() is None
+    assert panel._filter_summary.text() == "48 cells · 48 unlabelled"
+    assert panel._filter_btn.text().startswith("All cells")
+
+    # Filter to two genes, uninduced only (AND across fields).
+    dnan_inha = CellFilter.from_mapping({"gene": ["dnaN", "inhA"], "condition": ["ATc+MMC-"]})
+    panel._set_cell_filter(dnan_inha)
+    assert panel._filter_summary.text() == "12 of 48 cells match · 12 unlabelled"
+    assert panel._filter_btn.text().startswith("gene ∈ {dnaN, inhA} AND condition")
+    assert panel._filter_clear_btn.isVisibleTo(panel.label_section)
+
+    panel._load_pool()
+    _wait_for_pool(app, panel)
+    assert len(panel._pool) == 12
+    assert {rec.gene for rec, _ in panel._pool} == {"dnaN", "inhA"}
+    assert {rec.condition for rec, _ in panel._pool} == {"ATc+MMC-"}
+    assert "random order" in panel._status.text()
+
+    # Label five and save: rows keep the CSV format; the session records the draw.
+    for t in panel._thumbs[:5]:
+        t.set_label("good")
+    assert panel._save_batch(silent_if_empty=True) == 5
+    store = LabelsStore(labels_dir)
+    with open(store.csv_path) as f:
+        assert f.readline().strip().split(",") == list(CSV_COLUMNS)
+    first_session = panel._session_id
+    entry = store.session(first_session)
+    assert entry["n_labels"] == 5
+    sampling = entry["sampling"]
+    assert sampling["mode"] == "random" and sampling["seed"] == 42
+    assert sampling["filter"] == {"gene": ["dnaN", "inhA"], "condition": ["ATc+MMC-"]}
+    assert sampling["n_matching"] == 12 and sampling["split"] == "train"
+    assert panel._filter_summary.text() == "12 of 48 cells match · 7 unlabelled"
+
+    # Reloading with the same filter continues the same session, and draws the
+    # rest of the same seeded order (the 7 unlabelled cells, order kept).
+    first_order = [rec.cell_uid for rec, _ in panel._pool]
+    panel._load_pool()
+    _wait_for_pool(app, panel)
+    assert len(panel._pool) == 0  # all 12 labelled or already shown this session
+    panel._reset_session()  # forget "shown this session"; labels still excluded
+    panel._load_pool()
+    _wait_for_pool(app, panel)
+    assert [rec.cell_uid for rec, _ in panel._pool] == first_order[5:]
+    assert panel._session_id == first_session
+
+    # A different filter starts a new session, so each session_id ↔ one draw.
+    panel._set_cell_filter(CellFilter.from_mapping({"gene": ["NT1"]}))
+    panel._load_pool()
+    _wait_for_pool(app, panel)
+    assert {rec.gene for rec, _ in panel._pool} == {"NT1"}
+    assert panel._session_id != first_session
+    panel._thumbs[0].set_label("bad")
+    panel._save_batch(silent_if_empty=True)
+    assert store.session(panel._session_id)["sampling"]["filter"] == {"gene": ["NT1"]}
+    assert store.session(first_session)["sampling"]["filter"]["gene"] == ["dnaN", "inhA"]
+
+    # A filter matching nothing: a clear message, no crash, empty grid.
+    panel._set_cell_filter(CellFilter.from_mapping(
+        {"gene": ["dnaN"], "condition_label": ["empty"]}))
+    assert panel._filter_summary.text() == "No cells match this filter."
+    panel._load_pool()
+    _wait_for_pool(app, panel)
+    assert panel._pool == []
+    assert panel._status.text().startswith("No cells match the filter")
+
+    # Clearing returns to all cells.
+    panel._set_cell_filter(CellFilter())
+    assert panel._filter_btn.text().startswith("All cells")
+    panel.shutdown()
+    app.processEvents()
+
+
+def test_cell_filter_dialog(multi_condition_h5):
+    app = _app()
+    from PyQt6.QtCore import Qt
+    from modelprep.core.cell_filter import CellFilter
+    from modelprep.core.crops_h5 import HDF5CropsReader
+    from modelprep.gui.panels.cell_filter_dialog import CellFilterDialog
+
+    def tick(dlg, field, value):
+        lst = dlg._lists[field]
+        for i in range(lst.count()):
+            if lst.item(i).data(Qt.ItemDataRole.UserRole) == value:
+                lst.item(i).setCheckState(Qt.CheckState.Checked)
+                return
+        raise AssertionError(f"{value!r} not offered for {field}")
+
+    with HDF5CropsReader(multi_condition_h5) as reader:
+        labelled = {"cell_0000", "cell_0001"}  # one dnaN + one inhA, both MMC-
+        dlg = CellFilterDialog(reader, labelled, CellFilter.from_mapping({"gene": ["dnaN"]}))
+        # Reporter and drug have a single value each, so they aren't offered.
+        assert set(dlg._lists) == {"gene", "condition", "condition_label", "tiff_file"}
+        assert dlg.cell_filter().to_dict() == {"gene": ["dnaN"]}
+
+        tick(dlg, "gene", "inhA")
+        tick(dlg, "condition", "ATc+MMC-")
+        assert dlg.cell_filter().to_dict() == {"gene": ["dnaN", "inhA"],
+                                               "condition": ["ATc+MMC-"]}
+        assert dlg._summary.text().startswith("12 of 48 cells match · 10 still unlabelled")
+        assert dlg._boxes["gene"][0].title() == "Gene (4) · 2 ticked"
+        assert dlg._apply.isEnabled()
+
+        tick(dlg, "condition_label", "empty")  # contradicts the gene choice
+        assert dlg._summary.text().startswith("No cells match")
+        assert not dlg._apply.isEnabled()
+
+        dlg._clear_all()
+        assert dlg.cell_filter().is_empty()
+        assert dlg._summary.text() == "All cells: 48 · 46 still unlabelled"
+
+        dlg._search(dlg._lists["gene"], "nh")
+        visible = [dlg._lists["gene"].item(i).data(Qt.ItemDataRole.UserRole)
+                   for i in range(dlg._lists["gene"].count())
+                   if not dlg._lists["gene"].item(i).isHidden()]
+        assert visible == ["inhA"]
+        dlg.close()
+    app.processEvents()

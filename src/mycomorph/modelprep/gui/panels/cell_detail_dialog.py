@@ -330,7 +330,8 @@ class CellDetailView(QDialog):
     def _meta_html(self, record: CropRecord, score: float) -> str:
         rows = [
             ("cell_uid", record.cell_uid),
-            ("condition", record.condition_label),
+            ("condition", record.condition),
+            ("condition_label", record.condition_label),
             ("gene", record.gene),
             ("drug", record.drug),
             ("reporter", record.reporter),

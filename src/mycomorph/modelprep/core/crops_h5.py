@@ -10,8 +10,14 @@ one written by ``mycoprep.core.extract.crops``:
     channel_names     attr              list[str] — e.g. ["Phase", "ParB", "Mask"]
     crop_size         attr              int (typically 128)
     schema_version    attr              str ("1.0")
-    + parallel metadata: condition_labels, genes, drugs, reporters, tiff_files,
-      fov_indices, cell_labels, fov_ids, is_control, is_drug, ...
+    + parallel metadata: conditions, condition_labels, genes, drugs, reporters,
+      tiff_files, fov_indices, cell_labels, fov_ids, is_control, is_drug, ...
+
+MycoMorph derives the string metadata from the per-well TIFF stem
+``{condition}__{reporter}__{mutant_or_drug}__R{n}``: ``conditions`` is the
+treatment (e.g. ``ATc+MMC-``), ``condition_labels`` is ``mutant_or_drug`` (or
+the condition when that is blank), and ``genes`` is ``mutant_or_drug`` unless
+the well looks like a control, when it is ``""``.
 
 The reader exposes random-access ``get(idx)`` and batched
 ``get_classifier_batch(indices)`` for active-learning workers.
@@ -35,6 +41,11 @@ from .cell_quality_classifier import (
 
 SUPPORTED_SCHEMA_VERSIONS = ("1.0",)
 
+# Per-cell string metadata the reader loads into memory (see ``metadata``).
+STRING_METADATA_DATASETS = (
+    "conditions", "condition_labels", "genes", "drugs", "reporters", "tiff_files",
+)
+
 
 @dataclass(frozen=True)
 class CropRecord:
@@ -56,6 +67,7 @@ class CropRecord:
     fov_index: int
     cell_label: int
     source_h5_index: int
+    condition: str = ""         # treatment, e.g. "ATc+MMC-" (``conditions``)
 
 
 class HDF5CropsReader:
@@ -151,11 +163,16 @@ class HDF5CropsReader:
             return np.zeros(self._n, dtype=dtype)
 
         self._cell_uids = _read_str("cell_uids")
-        self._condition_labels = _read_str("condition_labels")
-        self._genes = _read_str("genes")
-        self._drugs = _read_str("drugs")
-        self._reporters = _read_str("reporters")
-        self._tiff_files = _read_str("tiff_files")
+        # Per-cell string metadata, keyed by HDF5 dataset name (absent → "").
+        self._str_meta = {
+            key: _read_str(key) for key in STRING_METADATA_DATASETS
+        }
+        self._conditions = self._str_meta["conditions"]
+        self._condition_labels = self._str_meta["condition_labels"]
+        self._genes = self._str_meta["genes"]
+        self._drugs = self._str_meta["drugs"]
+        self._reporters = self._str_meta["reporters"]
+        self._tiff_files = self._str_meta["tiff_files"]
         self._fov_indices = _read_int("fov_indices")
         self._cell_labels = _read_int("cell_labels")
         self._areas_px = _read_int("areas_px")
@@ -220,6 +237,18 @@ class HDF5CropsReader:
         """Per-cell field-of-view index (used for diversity-aware sampling)."""
         return self._fov_indices
 
+    def metadata(self, dataset: str) -> np.ndarray:
+        """Per-cell string metadata by HDF5 dataset name (e.g. ``"genes"``),
+        as an object array of ``str``. A dataset missing from the file reads as
+        all ``""``."""
+        try:
+            return self._str_meta[dataset]
+        except KeyError:
+            raise KeyError(
+                f"{dataset!r} is not a loaded metadata dataset; "
+                f"expected one of {STRING_METADATA_DATASETS}"
+            ) from None
+
     @property
     def schema_version(self) -> str:
         return str(self._h5.attrs.get("schema_version", "unknown"))
@@ -281,6 +310,7 @@ class HDF5CropsReader:
             fov_index=int(self._fov_indices[idx]),
             cell_label=int(self._cell_labels[idx]),
             source_h5_index=int(idx),
+            condition=str(self._conditions[idx]),
         )
 
     def get_classifier_batch(self, indices: Sequence[int]) -> np.ndarray:

@@ -63,6 +63,13 @@ def resolve_classifier_preset(name: str) -> Path:
     )
 
 
+# CLI option name (without "--") for each cell_filter field.
+_FILTER_OPTIONS = {
+    "gene": "gene", "condition": "condition", "condition_label": "condition-label",
+    "reporter": "reporter", "drug": "drug", "tiff_file": "tiff",
+}
+
+
 # ── Default outputs ──────────────────────────────────────────────────────────
 
 def _default_output_dir() -> Path:
@@ -77,8 +84,15 @@ def info(
         ..., "--h5", "-i", exists=True, file_okay=True, dir_okay=False,
         readable=True, help="Path to an all_crops.h5 file.",
     ),
+    values: bool = typer.Option(
+        False, "--values",
+        help="List every distinct gene / condition / … value with its cell "
+             "count (the values `label --gene/--condition/…` accept).",
+    ),
 ) -> None:
-    """Describe an ``all_crops.h5`` file (cells, channels, schema)."""
+    """Describe an ``all_crops.h5`` file (cells, channels, schema, metadata)."""
+    from .cell_filter import FILTER_FIELDS, distinct_values
+
     with HDF5CropsReader(h5) as reader:
         typer.echo(reader.summary())
         typer.echo(f"  phase channel: idx={reader.phase_channel_idx}  "
@@ -88,6 +102,18 @@ def info(
         typer.echo(f"  native crop:   {reader.native_crop_size}×{reader.native_crop_size}")
         typer.echo(f"  classifier projection: 3 channels × "
                    f"{reader.classifier_size}×{reader.classifier_size}")
+        typer.echo("  metadata (filter with `label --<option> VALUE`):")
+        for key, (dataset, _name) in FILTER_FIELDS.items():
+            pairs = distinct_values(reader, key)
+            option = "--" + _FILTER_OPTIONS[key]
+            if not values:
+                shown = ", ".join(repr(v) for v, _ in pairs[:6])
+                more = f", … (+{len(pairs) - 6}; use --values)" if len(pairs) > 6 else ""
+                typer.echo(f"    {option:18s} {dataset}: {len(pairs)} value(s): {shown}{more}")
+                continue
+            typer.echo(f"    {option:18s} {dataset}: {len(pairs)} value(s)")
+            for v, n in pairs:
+                typer.echo(f"        {v!r:48s} {n:>8,} cells")
 
 
 @app.command()
@@ -250,8 +276,41 @@ def label(
         1000, "--n-pool", "-n", min=1,
         help="Number of unseen cells to load for this labelling session.",
     ),
+    gene: list[str] = typer.Option(
+        [], "--gene", help="Only cells of this gene (repeatable; values are "
+        "OR'd). Exact match — see `modelprep-cli info --values`.",
+    ),
+    condition: list[str] = typer.Option(
+        [], "--condition", help="Only cells with this condition, e.g. "
+        "'ATc+MMC-' (repeatable). Combined with other filters by AND.",
+    ),
+    condition_label: list[str] = typer.Option(
+        [], "--condition-label", help="Only cells with this MycoMorph "
+        "condition_label (repeatable).",
+    ),
+    reporter: list[str] = typer.Option(
+        [], "--reporter", help="Only cells with this reporter (repeatable).",
+    ),
+    drug: list[str] = typer.Option(
+        [], "--drug", help="Only cells with this drug (repeatable).",
+    ),
+    tiff: list[str] = typer.Option(
+        [], "--tiff", help="Only cells from this per-well TIFF file name "
+        "(repeatable).",
+    ),
+    seed: int = typer.Option(
+        42, "--seed", help="Seed for the random order (used without a model). "
+        "Same file + filter + seed → same sample.",
+    ),
 ) -> None:
-    """Launch the interactive labeller."""
+    """Launch the interactive labeller.
+
+    Without a model, cells come in a seeded random order; with one, least
+    certain first. --gene/--condition/… restrict the pool to matching cells
+    (values OR'd within an option, AND'd across options). The filter, seed and
+    ordering are recorded with the session in modelprep_labels/manifest.json.
+    """
+    from .cell_filter import CellFilter, distinct_values
     from .label_cells import run_grid_labeling
 
     model_path = None
@@ -262,11 +321,29 @@ def label(
             typer.echo(f"ERROR: {e}", err=True)
             raise typer.Exit(code=2)
 
+    cell_filter = CellFilter.from_mapping({
+        "gene": gene, "condition": condition, "condition_label": condition_label,
+        "reporter": reporter, "drug": drug, "tiff_file": tiff,
+    })
+    if not cell_filter.is_empty():
+        # Catch typos before opening the labeller: every value must exist.
+        with HDF5CropsReader(h5) as reader:
+            unknown = cell_filter.unknown_values(reader)
+            for key, missing in unknown.items():
+                available = ", ".join(repr(v) for v, _ in distinct_values(reader, key))
+                typer.echo(f"ERROR: no cells have --{_FILTER_OPTIONS[key]} "
+                           f"{', '.join(map(repr, missing))}. Available: {available}",
+                           err=True)
+            if unknown:
+                raise typer.Exit(code=2)
+
     run_grid_labeling(
         h5_path=h5,
         labels_dir=labels_dir,
         model_path=model_path,
         n_pool=n_pool,
+        cell_filter=cell_filter,
+        seed=seed,
     )
 
 

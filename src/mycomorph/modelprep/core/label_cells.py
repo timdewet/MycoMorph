@@ -8,9 +8,10 @@ alongside the HDF5.
 
 Workflow:
     1. Open ``all_crops.h5``
-    2. (Optional) score every unlabeled cell with a trained classifier;
-       rank by uncertainty (|0.5 - P(good)| ascending). Without a model,
-       cells are shown in random order.
+    2. (Optional) restrict to cells of chosen genes / conditions / wells
+       (``cell_filter``). Then score every unlabeled candidate with a trained
+       classifier and rank by uncertainty (|0.5 - P(good)| ascending), or,
+       without a model, show them in a seeded random order. See ``build_pool``.
     3. Show a grid of phase + mask-outline thumbnails. Click to select,
        press a key:
            g = good
@@ -27,15 +28,15 @@ the thumbnail rendering. See ``_make_contour_thumb``.
 from __future__ import annotations
 
 import math
-import random
-import sys
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
 import numpy as np
 
-from .cell_quality_classifier import CLASS_NAMES, CROP_SIZE
+from .cell_filter import CellFilter
+from .cell_quality_classifier import CROP_SIZE
 from .crops_h5 import CropRecord, HDF5CropsReader
 from .labels_store import (
     LABEL_TO_IDX,
@@ -103,54 +104,201 @@ def _make_contour_thumb(crop, phase_idx=0, contour_color=(0.0, 1.0, 0.4)):
 # Pool building — what cells to show, in what order
 # ─────────────────────────────────────────────────────────────────────────────
 
+# How the next cells are chosen. "uncertain" falls back to "random" without a
+# model; "good" (highest P(good) first) is for filling a balanced hold-out.
+SELECT_MODES = ("uncertain", "good", "random")
+
+
+class PoolCancelled(Exception):
+    """Raised by :func:`build_pool` when ``should_cancel()`` returns True."""
+
+
+@dataclass
+class PoolResult:
+    """The cells to show next, in order, plus what they were drawn from."""
+    indices: np.ndarray          # HDF5 row indices, in display order
+    scores: np.ndarray           # P(good) per cell; 0.5 placeholder when unscored
+    n_matching: int              # cells matching the filter (whole file if none)
+    n_candidates: int            # ...of those, not excluded (labelled / seen)
+    mode: str                    # effective ordering: "random" | "uncertain" | "good"
+    message: str = ""            # why the pool is empty, when it is
+
+    def __len__(self) -> int:
+        return len(self.indices)
+
+
 def build_pool(
     reader: HDF5CropsReader,
     *,
-    already_labeled: set[str],
+    exclude_uids: set[str],
     n_target: int,
     model_path: Optional[Path] = None,
-    progress_cb=None,
+    select: str = "uncertain",
+    cell_filter: Optional[CellFilter] = None,
     seed: int = 42,
-) -> tuple[list[int], np.ndarray]:
-    """Return ``(pool_indices, p_good_scores)`` — the indices in the HDF5 to
-    show next, in the order to show them.
+    diversify: bool = False,
+    uncertain_only: bool = False,
+    confidence_threshold: float = 0.85,
+    progress_cb=None,
+    should_cancel=None,
+) -> PoolResult:
+    """Choose up to ``n_target`` cells to label next. Shared by the GUI and CLI.
 
-    Without a ``model_path``, cells are shuffled. With one, every unlabeled
-    cell is scored and the top-``n_target`` most uncertain are picked.
+    1. Candidates are the cells matching ``cell_filter`` (all cells if empty).
+    2. They are put in a fixed order: a seeded permutation
+       (``np.random.default_rng(seed).permutation``) of every matching cell.
+       The order depends only on the file, the filter and the seed — not on
+       what is already labelled — so a random sample drawn across several
+       sessions is the same cells as one drawn in a single sitting.
+    3. Cells in ``exclude_uids`` (already labelled, hold-out, or shown this
+       session) are skipped, keeping that order.
+    4. ``random`` (or no model): the first ``n_target`` remaining cells.
+       ``uncertain``: score them all, least-confident first (optionally only
+       below ``confidence_threshold``, optionally spread across FOVs).
+       ``good``: highest P(good) first. Ties keep the permutation order.
     """
-    unseen_mask = np.array(
-        [uid not in already_labeled for uid in reader.cell_uids],
-        dtype=bool,
-    )
-    unseen_idx = np.flatnonzero(unseen_mask)
-    if unseen_idx.size == 0:
-        return [], np.zeros(0, dtype=np.float32)
+    if select not in SELECT_MODES:
+        raise ValueError(f"select must be one of {SELECT_MODES}, got {select!r}")
+    mode = "random" if model_path is None else select
+    cell_filter = cell_filter or CellFilter()
 
-    if model_path is None:
-        rng = np.random.default_rng(seed)
-        rng.shuffle(unseen_idx)
-        picked = unseen_idx[:n_target]
-        return picked.tolist(), np.full(len(picked), 0.5, dtype=np.float32)
+    match_idx = np.flatnonzero(cell_filter.mask(reader))
+    n_matching = int(match_idx.size)
 
+    def _empty(n_candidates: int, message: str) -> PoolResult:
+        return PoolResult(np.zeros(0, dtype=np.int64), np.zeros(0, dtype=np.float32),
+                          n_matching, n_candidates, mode, message)
+
+    if n_matching == 0:
+        return _empty(0, f"No cells match the filter ({cell_filter.describe()}).")
+
+    order = np.random.default_rng(seed).permutation(match_idx)
+    uids = reader.cell_uids
+    keep = np.fromiter((uids[i] not in exclude_uids for i in order),
+                       dtype=bool, count=order.size)
+    cand = order[keep]
+    if cand.size == 0:
+        if cell_filter.is_empty():
+            return _empty(0, "No unseen cells in this HDF5.")
+        return _empty(0, f"All {n_matching:,} cells matching the filter "
+                         f"({cell_filter.describe()}) are already labelled or "
+                         f"were shown this session.")
+
+    if mode == "random":
+        picked = cand[:n_target]
+        return PoolResult(picked, np.full(len(picked), 0.5, dtype=np.float32),
+                          n_matching, int(cand.size), mode)
+
+    scores = _score_cells(reader, cand, model_path, progress_cb, should_cancel)
+
+    if mode == "good":
+        # Highest P(good) first — surfaces the rare 'good' class so a balanced
+        # hold-out set fills without labelling thousands of mostly-'bad' cells.
+        rank = np.argsort(-scores, kind="stable")
+        return PoolResult(cand[rank][:n_target], scores[rank][:n_target],
+                          n_matching, int(cand.size), mode)
+
+    # Max-class confidence per cell (== how sure the model is); least-confident
+    # first is identical to ranking by |0.5 - P(good)| ascending.
+    maxconf = np.maximum(scores, 1.0 - scores)
+    if uncertain_only:
+        below = maxconf < confidence_threshold
+        if not below.any():
+            return _empty(int(cand.size),
+                          f"No cells below confidence {confidence_threshold:.2f}. "
+                          f"Raise the threshold or turn off 'uncertain only'.")
+        cand, scores, maxconf = cand[below], scores[below], maxconf[below]
+    rank = np.argsort(maxconf, kind="stable")
+    ranked_idx, ranked_scores = cand[rank], scores[rank]
+    if diversify:
+        picked, picked_scores = _diversify_by_fov(reader, ranked_idx, ranked_scores, n_target)
+    else:
+        picked, picked_scores = ranked_idx[:n_target], ranked_scores[:n_target]
+    return PoolResult(picked, picked_scores, n_matching, int(cand.size), mode)
+
+
+def _score_cells(reader, indices, model_path, progress_cb, should_cancel) -> np.ndarray:
+    """P(good) for each of ``indices`` (returned in the same order)."""
     from .cell_quality_classifier import CellQualityClassifier
 
     clf = CellQualityClassifier(str(model_path), in_channels=3)
-    scores = np.empty(len(unseen_idx), dtype=np.float32)
+    # Read the HDF5 in file order (far faster than random access), then map
+    # the scores back to the caller's order.
+    file_order = np.argsort(indices, kind="stable")
+    sorted_idx = indices[file_order]
+    sorted_scores = np.empty(len(sorted_idx), dtype=np.float32)
     batch_size = 256
-    for lo in range(0, len(unseen_idx), batch_size):
-        hi = min(lo + batch_size, len(unseen_idx))
-        batch = reader.get_classifier_batch(unseen_idx[lo:hi].tolist())
+    for lo in range(0, len(sorted_idx), batch_size):
+        if should_cancel is not None and should_cancel():
+            raise PoolCancelled()
+        hi = min(lo + batch_size, len(sorted_idx))
+        batch = reader.get_classifier_batch(sorted_idx[lo:hi].tolist())
         _, probs = clf.predict_batch(batch)
-        scores[lo:hi] = probs[:, 0]
+        sorted_scores[lo:hi] = probs[:, 0]
         if progress_cb is not None:
-            progress_cb(hi / len(unseen_idx),
-                        f"Scoring cells: {hi}/{len(unseen_idx)}")
+            progress_cb(hi / len(sorted_idx), f"Scoring cells: {hi}/{len(sorted_idx)}")
+    scores = np.empty_like(sorted_scores)
+    scores[file_order] = sorted_scores
+    return scores
 
-    # |0.5 - P(good)| → most uncertain first
-    rank = np.argsort(np.abs(0.5 - scores))
-    picked = unseen_idx[rank][:n_target]
-    scores_picked = scores[rank][:n_target]
-    return picked.tolist(), scores_picked
+
+def _diversify_by_fov(reader, ranked_idx, ranked_scores, n_target):
+    """Spread the most-uncertain candidates across fields of view so a single
+    noisy FOV can't dominate a page. Falls back to plain order."""
+    try:
+        from collections import OrderedDict, deque
+        k = min(len(ranked_idx), n_target * 5)
+        cand = ranked_idx[:k]
+        cand_scores = ranked_scores[:k]
+        fovs = reader.fov_indices[cand]
+        buckets: "OrderedDict[int, deque]" = OrderedDict()
+        for j, f in enumerate(fovs):
+            buckets.setdefault(int(f), deque()).append(j)
+        order: list[int] = []
+        queues = list(buckets.values())
+        while len(order) < n_target and any(queues):
+            for q in queues:
+                if q:
+                    order.append(q.popleft())
+                    if len(order) >= n_target:
+                        break
+        order = order[:n_target]
+        return cand[order], cand_scores[order]
+    except Exception:  # noqa: BLE001 — diversity is best-effort
+        return ranked_idx[:n_target], ranked_scores[:n_target]
+
+
+def sampling_record(
+    result: PoolResult,
+    *,
+    cell_filter: Optional[CellFilter],
+    seed: int,
+    n_target: int,
+    model_path: Optional[Path] = None,
+    **extra,
+) -> dict:
+    """How a pool was drawn, for the session entry in ``manifest.json`` — enough
+    for a methods section to state exactly how the labelled cells were chosen.
+    ``extra`` adds caller-specific settings (split, diversify, …)."""
+    cell_filter = cell_filter or CellFilter()
+    ordering = {
+        "random": "seeded permutation of the filter-matching cells",
+        "uncertain": "model uncertainty, least confident first",
+        "good": "model P(good), highest first",
+    }[result.mode]
+    rec = {
+        "mode": result.mode,
+        "ordering": ordering,
+        "seed": int(seed),
+        "filter": cell_filter.to_dict(),
+        "filter_description": cell_filter.describe(),
+        "n_matching": int(result.n_matching),
+        "pool_size": int(n_target),
+        # The model that ordered the pool ("none" when it played no part).
+        "model": str(model_path) if model_path and result.mode != "random" else "none",
+    }
+    rec.update(extra)
+    return rec
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,12 +312,15 @@ def run_grid_labeling(
     model_path: Optional[Path] = None,
     n_pool: int = 1000,
     pixels_per_um: float = 13.8767,
+    cell_filter: Optional[CellFilter] = None,
+    seed: int = 42,
 ) -> None:
     """Launch the matplotlib grid labeller against an HDF5 crops file.
 
     The user labels cells one page at a time; each save appends to
     ``labels.csv``. Pressing ``s`` saves without quitting; ``q`` saves and
-    closes.
+    closes. ``cell_filter`` restricts the pool to matching cells; how the pool
+    was drawn is recorded with the session in ``manifest.json``.
     """
     import matplotlib
     # Don't force a specific backend — let matplotlib pick whatever Qt
@@ -194,23 +345,33 @@ def run_grid_labeling(
 
     # Existing labels (so we don't re-show)
     already_labeled = store.labeled_uids()
+    cell_filter = cell_filter or CellFilter()
     print(f"Loaded {len(reader)} cells from {h5_path.name}")
     print(f"  {len(already_labeled)} already labeled  →  building pool of "
           f"up to {n_pool} unseen cells...")
+    if not cell_filter.is_empty():
+        print(f"  only cells where {cell_filter.describe()}")
 
-    pool_indices, scores = build_pool(
+    result = build_pool(
         reader,
-        already_labeled=already_labeled,
+        exclude_uids=already_labeled,
         n_target=n_pool,
         model_path=model_path,
+        cell_filter=cell_filter,
+        seed=seed,
         progress_cb=lambda f, m: print(f"    {m}"),
     )
-    if not pool_indices:
-        print("No unseen cells left to label. Nothing to do.")
+    if not len(result):
+        print(f"{result.message} Nothing to do.")
         reader.close()
         return
+    pool_indices, scores = result.indices.tolist(), result.scores
+    sampling = sampling_record(result, cell_filter=cell_filter, seed=seed,
+                               n_target=n_pool, model_path=model_path,
+                               split="train", source="modelprep-cli label")
 
-    print(f"  pool ready: {len(pool_indices)} cells")
+    print(f"  {result.n_matching:,} cells match · {result.n_candidates:,} unlabelled"
+          f"  →  pool ready: {len(pool_indices)} cells ({result.mode} order)")
     n_total = len(pool_indices)
     n_pages = math.ceil(n_total / PAGE_SIZE)
 
@@ -223,6 +384,12 @@ def run_grid_labeling(
 
     session_id = make_session_id()
     session_started_at = datetime.now(timezone.utc).isoformat()
+    n_session_labels = 0
+
+    def record_session() -> None:
+        store.record_session(session_id, session_started_at,
+                             datetime.now(timezone.utc).isoformat(),
+                             n_session_labels, sampling=sampling)
 
     # ── Figure setup ─────────────────────────────────────────────────────
     fig, axes = plt.subplots(
@@ -311,7 +478,9 @@ def run_grid_labeling(
     KEY_TO_LABEL = {"g": "good", "b": "bad"}
 
     def persist_labels() -> int:
-        """Flush all currently-labeled pool entries to the CSV."""
+        """Flush all currently-labeled pool entries to the CSV, and record the
+        session (with how its pool was drawn) in the manifest."""
+        nonlocal n_session_labels
         rows: list[LabelRow] = []
         used_indices: list[int] = []
         for idx, lbl in pool_labels.items():
@@ -333,6 +502,8 @@ def run_grid_labeling(
         if not rows:
             return 0
         store.append_batch(rows)
+        n_session_labels += len(rows)
+        record_session()
         # Drop labels we just persisted so the next save doesn't duplicate.
         for idx in used_indices:
             pool_labels[idx] = None
@@ -359,8 +530,6 @@ def run_grid_labeling(
             return
         if key == "q":
             n = persist_labels()
-            session_ended_at = datetime.now(timezone.utc).isoformat()
-            store.record_session(session_id, session_started_at, session_ended_at, n)
             print(f"  Saved {n} labels and exiting.")
             plt.close(fig)
             return
