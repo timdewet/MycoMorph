@@ -37,9 +37,12 @@ from mycomorph.core.cell_quality_classifier import (
     _append_area_channel_batch,
     _append_area_channel_single,
 )
+from mycomorph.core.extract.crops import HDF5_SCHEMA_VERSION
 
 
-SUPPORTED_SCHEMA_VERSIONS = ("1.0",)
+# The version MycoMorph's Features stage writes. If it is ever bumped, list the
+# older versions the reader still understands here as well.
+SUPPORTED_SCHEMA_VERSIONS = (HDF5_SCHEMA_VERSION,)
 
 # Per-cell string metadata the reader loads into memory (see ``metadata``).
 STRING_METADATA_DATASETS = (
