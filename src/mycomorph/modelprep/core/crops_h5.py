@@ -157,6 +157,15 @@ class HDF5CropsReader:
         self._reporters = _read_str("reporters")
         self._tiff_files = _read_str("tiff_files")
         self._fov_indices = _read_int("fov_indices")
+        # Global FOV ids (unique across TIFFs/wells). Older files lack them; then
+        # a (tiff_file, fov_index) pair identifies the field instead, since
+        # fov_indices restart at 0 in every TIFF.
+        if "fov_ids" in self._h5:
+            self._fov_groups = np.asarray(self._h5["fov_ids"][:], dtype=np.int64)
+        else:
+            pairs = [f"{t}\x00{i}" for t, i in zip(self._tiff_files, self._fov_indices)]
+            self._fov_groups = np.unique(np.asarray(pairs, dtype=object),
+                                         return_inverse=True)[1].astype(np.int64)
         self._cell_labels = _read_int("cell_labels")
         self._areas_px = _read_int("areas_px")
 
@@ -217,8 +226,15 @@ class HDF5CropsReader:
 
     @property
     def fov_indices(self) -> np.ndarray:
-        """Per-cell field-of-view index (used for diversity-aware sampling)."""
+        """Per-cell field-of-view index *within its TIFF* (restarts per file)."""
         return self._fov_indices
+
+    @property
+    def fov_groups(self) -> np.ndarray:
+        """Per-cell id of its field of view across the whole HDF5: the global
+        ``fov_ids`` when present, else one id per (tiff_file, fov_index). Used
+        for diversity-aware sampling."""
+        return self._fov_groups
 
     @property
     def schema_version(self) -> str:

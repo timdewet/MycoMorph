@@ -338,7 +338,7 @@ class CellDetailView(QDialog):
             ("fov_index", record.fov_index),
             ("cell_label", record.cell_label),
             ("area_px", f"{record.area_px} px"),
-            ("P(good)", f"{score:.3f}"),
+            ("P(good)", "not scored" if score != score else f"{score:.3f}"),
         ]
         body = "".join(
             f"<tr><td style='padding-right:10px; color:{COLORS['border_strong']};'>"

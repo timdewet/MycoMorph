@@ -265,6 +265,18 @@ def _evaluate(model, loader, device):
     return true, pred, prob
 
 
+def single_class_warning(class_counts: dict, what: str = "hold-out") -> "str | None":
+    """A one-line warning when an evaluation set holds only one class (accuracy
+    then just counts that class, and AUC/AP are undefined). None otherwise."""
+    present = [k for k, v in class_counts.items() if v]
+    missing = [k for k, v in class_counts.items() if not v]
+    if len(present) == 1 and missing:
+        return (f"the {what} set has only '{present[0]}' cells: accuracy is "
+                f"meaningless and AUC/AP can't be computed. Label some "
+                f"'{missing[0]}' cells into it.")
+    return None
+
+
 def _binary_curves(true, scores_pos):
     """ROC/PR curves + Youden-J optimal threshold for the positive (good=… no,
     pos_label=1) class. Returns None if only one class is present."""
@@ -593,6 +605,10 @@ def train(
         eval_true, eval_preds, eval_probs = val_true, _val_preds, val_probs
 
     eval_acc = float((eval_preds == eval_true).mean()) if len(eval_true) else float("nan")
+    eval_class_counts = {CLASS_NAMES[i]: int((eval_true == i).sum()) for i in range(NUM_CLASSES)}
+    _single = single_class_warning(eval_class_counts, {"holdout": "hold-out"}.get(eval_split, eval_split))
+    if _single:
+        log.warning(f"WARNING: {_single}")
     # Prevalence-independent companions to raw accuracy: balanced accuracy (mean
     # per-class recall) and the majority-class baseline. Under class imbalance
     # these are what make the headline number interpretable.
@@ -644,6 +660,7 @@ def train(
         "eval_split": eval_split,
         "split_note": split_note,
         "class_counts": class_counts,
+        "eval_class_counts": eval_class_counts,
         "best_val_acc": float(best_val_acc),
         "best_epoch": best_epoch,
         "eval_acc": eval_acc,
@@ -708,6 +725,7 @@ def train(
         "decision_threshold": float(decision_threshold),
         "confusion": confusion,
         "class_counts": class_counts,
+        "eval_class_counts": eval_class_counts,
         "seed": int(seed),
         "model_path": str(output_dir / "best_model.pth"),
     }

@@ -136,6 +136,10 @@ class _LearningCurveWorker(QThread):
             if len(ev_labels) == 0:
                 self.finished.emit([], "No hold-out test set — build one on the Label cells tab.")
                 return
+            if len(set(ev_labels.tolist())) < 2:
+                self.finished.emit([], "The hold-out has only one class, so AUC/AP can't "
+                                       "be computed. Label both good and bad cells into it.")
+                return
 
             points = compute_learning_curve(
                 tr_crops, tr_labels, ev_crops, ev_labels,

@@ -91,6 +91,16 @@ def test_train_with_external_holdout(tmp_path):
     import json
     cfg = json.loads((tmp_path / "training_config.json").read_text())
     assert cfg["eval_split"] == "holdout" and cfg["n_holdout"] == 16
+    assert cfg["eval_class_counts"] == {"good": 8, "bad": 8}
+
+
+def test_single_class_warning():
+    from modelprep.core.train_classifier import single_class_warning
+
+    assert single_class_warning({"good": 5, "bad": 5}) is None
+    assert single_class_warning({"good": 0, "bad": 0}) is None
+    msg = single_class_warning({"good": 48, "bad": 0})
+    assert "only 'good'" in msg and "'bad'" in msg and "\n" not in msg
 
 
 def test_train_reproducible(tmp_path):

@@ -137,6 +137,9 @@ class _ActiveLearningWorker(QThread):
         # "good" (highest P(good) first — surfaces the rare class for a balanced
         # hold-out set), or "random" (representative sampling, no model needed).
         self.select = select
+        # The model whose scores the pool carries: None when nothing was scored
+        # (no model, or random sampling). Labels saved from this pool record it.
+        self.scored_with: Optional[Path] = None
         self._cancel = False
 
     def cancel(self) -> None:
@@ -150,7 +153,7 @@ class _ActiveLearningWorker(QThread):
             k = min(len(ranked_idx), self.n_target * 5)
             cand = ranked_idx[:k]
             cand_scores = ranked_scores[:k]
-            fovs = reader.fov_indices[cand]
+            fovs = reader.fov_groups[cand]
             buckets: "OrderedDict[int, deque]" = OrderedDict()
             for j, f in enumerate(fovs):
                 buckets.setdefault(int(f), deque()).append(j)
@@ -166,6 +169,34 @@ class _ActiveLearningWorker(QThread):
             return cand[order], cand_scores[order]
         except Exception:  # noqa: BLE001 — diversity is best-effort
             return ranked_idx[: self.n_target], ranked_scores[: self.n_target]
+
+    def _score(self, reader, idx: np.ndarray) -> Optional[np.ndarray]:
+        """P(good) for ``idx``, scoring only cells not already in the
+        per-(model, HDF5) cache. None if cancelled (partial scores are kept)."""
+        from ...core.score_cache import ScoreCache
+
+        cache = ScoreCache.open(self.h5_path, self.model_path, len(reader))
+        todo = cache.missing(idx)
+        if todo.size:
+            from ...core.cell_quality_classifier import CellQualityClassifier
+
+            clf = CellQualityClassifier(str(self.model_path), in_channels=3)
+            B = 256
+            try:
+                for lo in range(0, len(todo), B):
+                    if self._cancel:
+                        return None
+                    hi = min(lo + B, len(todo))
+                    batch = reader.get_classifier_batch(todo[lo:hi].tolist())
+                    _, probs = clf.predict_batch(batch)
+                    cache.scores[todo[lo:hi]] = probs[:, 0]
+                    self.progress.emit(hi / len(todo), f"Scoring cells: {hi}/{len(todo)}")
+            finally:
+                cache.save()
+        n_cached = len(idx) - todo.size
+        if n_cached:
+            self.progress.emit(1.0, f"Reused cached scores for {n_cached:,} cells")
+        return cache.scores[idx].copy()
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -185,28 +216,18 @@ class _ActiveLearningWorker(QThread):
                 return
 
             if self.model_path is None or self.select == "random":
+                # No scoring at all: a random sample has no model confidence, so
+                # carry NaN rather than a 0.5 placeholder that reads as a score.
                 rng = np.random.default_rng(42)
                 rng.shuffle(unseen_idx)
                 picked = unseen_idx[: self.n_target]
-                scores = np.full(len(picked), 0.5, dtype=np.float32)
+                scores = np.full(len(picked), np.nan, dtype=np.float32)
             else:
-                from ...core.cell_quality_classifier import CellQualityClassifier
-
-                clf = CellQualityClassifier(str(self.model_path), in_channels=3)
-                scores_all = np.empty(len(unseen_idx), dtype=np.float32)
-                B = 256
-                for lo in range(0, len(unseen_idx), B):
-                    if self._cancel:
-                        self.finished.emit([], "Cancelled.")
-                        return
-                    hi = min(lo + B, len(unseen_idx))
-                    batch = reader.get_classifier_batch(unseen_idx[lo:hi].tolist())
-                    _, probs = clf.predict_batch(batch)
-                    scores_all[lo:hi] = probs[:, 0]
-                    self.progress.emit(
-                        hi / len(unseen_idx),
-                        f"Scoring cells: {hi}/{len(unseen_idx)}",
-                    )
+                scores_all = self._score(reader, unseen_idx)
+                if scores_all is None:
+                    self.finished.emit([], "Cancelled.")
+                    return
+                self.scored_with = self.model_path
                 if self.select == "good":
                     # Highest P(good) first — surfaces the rare 'good' class so a
                     # balanced hold-out set fills without labelling thousands of
@@ -531,6 +552,9 @@ class LabelTrainPanel(QWidget):
         self._context_provider: Optional[FovContextProvider] = None
 
         self._pool: list[tuple[CropRecord, float]] = []
+        # Model that scored the current pool (None = unscored / random order).
+        # Saved labels record this, not whatever the picker shows at save time.
+        self._pool_model: Optional[Path] = None
         self._page_index = 0
         self._page_labels: dict[int, str] = {}  # absolute pool index → label string
         # Last label persisted to disk per pool index, so we can tell what is
@@ -613,6 +637,7 @@ class LabelTrainPanel(QWidget):
         )
         # Fresh labelling session for this dataset.
         self._pool = []
+        self._pool_model = None
         self._page_index = 0
         self._page_labels.clear()
         self._saved_labels.clear()
@@ -1113,6 +1138,7 @@ class LabelTrainPanel(QWidget):
             return
 
         self._pool = list(records)
+        self._pool_model = self._al_worker.scored_with
         self._page_index = 0
         self._page_labels.clear()
         self._saved_labels.clear()  # pool indices now map to different cells
@@ -1320,7 +1346,7 @@ class LabelTrainPanel(QWidget):
                                         "Label some cells first.")
             return 0
 
-        model_path = self._current_model_path()
+        model_path = self._pool_model
         model_at_label = str(model_path) if model_path else "none"
         # Safety net: outside Test-set mode, never downgrade a cell that's
         # currently in the hold-out to the training split (so a stray edit can't
@@ -1455,6 +1481,8 @@ class LabelTrainPanel(QWidget):
         te_total = te["good"] + te["bad"]
         test_part = (f"  ·  hold-out test: {te_total} (good={te['good']} bad={te['bad']})"
                      if te_total else "")
+        if te_total and not (te["good"] and te["bad"]):
+            test_part += "  ⚠ hold-out has only one class — label both good and bad into it"
         self._stats_label.setText(
             f"train: {tr_total} (good={tr['good']} bad={tr['bad']}){test_part}"
             f"   ·   {self._store.csv_path}"
@@ -1561,8 +1589,13 @@ class LabelTrainPanel(QWidget):
         parts.append(sizes)
         msg = "Done · " + " · ".join(parts)
 
+        from ...core.train_classifier import single_class_warning
+
         warning = ""
-        if split == "val":
+        single = single_class_warning(summary.get("eval_class_counts") or {}, label)
+        if single:
+            warning = f"  ⚠ {single}"
+        elif split == "val":
             warning = ("  ⚠ no held-out test set — metrics are validation, i.e. "
                        "optimistic. Build a hold-out test set (toggle above) for a "
                        "comparable number across rounds.")

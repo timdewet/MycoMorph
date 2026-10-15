@@ -286,3 +286,93 @@ def test_feature_model_skip_reason_is_one_line(tmp_path, monkeypatch):
     monkeypatch.setattr(fc, "train_and_save", boom)
     _, reason = worker._train_feature_model({})
     assert reason == "feature model error: first line"
+
+
+def _wait_for_pool(app, panel):
+    worker = panel._al_worker
+    assert worker is not None
+    worker.wait(30000)
+    for _ in range(50):         # deliver the queued finished() signal
+        app.processEvents()
+        if panel._pool:
+            break
+
+
+def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_path):
+    """Random hold-out sampling doesn't score cells, so the saved labels must
+    say model 'none' with NaN confidence, even with a model in the picker
+    (review M9)."""
+    import math
+    import modelprep.core.cell_quality_classifier as cqc
+    from modelprep.core.labels_store import LabelsStore
+    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+
+    app = _app()
+
+    def no_scoring(*_a, **_k):
+        raise AssertionError("random sampling must not load the classifier")
+
+    orig = cqc.CellQualityClassifier
+    cqc.CellQualityClassifier = no_scoring
+    try:
+        panel = LabelTrainPanel()
+        labels = tmp_path / "labels"
+        panel.set_source(synthetic_h5, labels)
+        panel._model_combo.setCurrentIndex(panel._model_combo.findText("preset: mtb"))
+        assert panel._current_model_path() is not None
+        panel._test_mode_chk.setChecked(True)          # Prioritise good stays off
+        panel._load_pool()
+        _wait_for_pool(app, panel)
+        assert panel._pool and panel._pool_model is None
+        assert all(math.isnan(score) for _rec, score in panel._pool)
+
+        panel._thumbs[0].set_label("good")
+        assert panel._save_batch(silent_if_empty=True) == 1
+        row = next(iter(LabelsStore(labels).load().latest_by_uid().values()))
+        assert row.split == "test" and row.model_at_label == "none"
+        assert math.isnan(row.confidence_good_at_label)
+        panel.shutdown()
+    finally:
+        cqc.CellQualityClassifier = orig
+
+
+def test_pool_scores_are_cached_per_model_and_h5(synthetic_h5, tmp_path, monkeypatch):
+    """A second Load pool with the same model + HDF5 doesn't rescore (review M5)."""
+    import numpy as np
+    import modelprep.core.cell_quality_classifier as cqc
+    import modelprep.core.score_cache as sc
+    from modelprep.gui.panels.label_train_panel import _ActiveLearningWorker
+
+    _app()
+    monkeypatch.setattr(sc, "score_cache_root", lambda: tmp_path / "cache")
+    sc.clear_memory()
+    scored: list[int] = []
+
+    class FakeClf:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def predict_batch(self, batch):
+            scored.append(len(batch))
+            p = np.full((len(batch), 2), 0.5, dtype=np.float32)
+            return p.argmax(1), p
+
+    monkeypatch.setattr(cqc, "CellQualityClassifier", FakeClf)
+    model = tmp_path / "m.pth"
+    model.write_bytes(b"w")
+
+    def run():
+        w = _ActiveLearningWorker(synthetic_h5, model, n_target=10, seen_uids=set(),
+                                  diversify=True)
+        out = {}
+        w.finished.connect(lambda recs, err: out.update(recs=recs, err=err))
+        w.run()                                   # synchronously, on this thread
+        assert out["err"] == "" and len(out["recs"]) == 10
+        assert w.scored_with == model
+        return out["recs"]
+
+    run()
+    assert sum(scored) == 32
+    sc.clear_memory()                             # the disk layer alone suffices
+    run()
+    assert sum(scored) == 32                      # nothing rescored

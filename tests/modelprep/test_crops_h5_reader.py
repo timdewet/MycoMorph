@@ -55,3 +55,25 @@ def test_cell_uids_property(synthetic_h5):
         assert uids.shape == (32,)
         assert str(uids[0]) == "cell_0000"
         assert str(uids[-1]) == "cell_0031"
+
+
+def test_fov_groups_prefer_global_fov_ids(synthetic_h5):
+    """fov_indices restart per TIFF, so diversity sampling groups by the global
+    fov_ids when present, else by (tiff_file, fov_index) (review L2)."""
+    import h5py
+
+    n = 32
+    tiffs = ["a.tif"] * 16 + ["b.tif"] * 16
+    with h5py.File(synthetic_h5, "a") as f:
+        del f["tiff_files"]
+        f.create_dataset("tiff_files", data=tiffs, dtype=h5py.string_dtype())
+    with HDF5CropsReader(synthetic_h5) as r:
+        assert set(r.fov_indices.tolist()) == {0}          # both TIFFs: FOV 0
+        g = r.fov_groups
+        assert len(set(g[:16].tolist())) == 1 and len(set(g[16:].tolist())) == 1
+        assert g[0] != g[16]                                # …but different fields
+
+    with h5py.File(synthetic_h5, "a") as f:
+        f.create_dataset("fov_ids", data=np.arange(n, dtype=np.int32) // 4)
+    with HDF5CropsReader(synthetic_h5) as r:
+        assert r.fov_groups.tolist() == (np.arange(n) // 4).tolist()
