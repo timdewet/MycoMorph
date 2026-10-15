@@ -566,7 +566,7 @@ def classify_filter_tiff(
     """
     from .cell_quality_classifier import classify_and_filter_mask
     from .cellpose_pipeline import save_hyperstack
-    from .label_cells import load_hyperstack
+    from .hyperstack import load_hyperstack
     from .provenance import (
         checkpoint_signature,
         clear_artifact_in_progress,

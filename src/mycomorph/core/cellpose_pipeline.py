@@ -354,7 +354,7 @@ def process_tiff_unit(tiff_path, model, phase_channel, diameter=None,
         fov_names: list of FOV identifier strings
         total_cells: total cells segmented
     """
-    from .label_cells import load_hyperstack
+    from .hyperstack import load_hyperstack
 
     data, metadata = load_hyperstack(tiff_path)  # (N_FOV, C, Y, X)
     n_fov = data.shape[0]
@@ -694,7 +694,7 @@ def main():
         n_input_channels = first_img.shape[0]
         print(f"Detected {n_input_channels} channels in CZI files")
     else:
-        from .label_cells import load_hyperstack
+        from .hyperstack import load_hyperstack
         first_data, _ = load_hyperstack(tiff_files[0])
         n_input_channels = first_data.shape[1]
         print(f"Detected {n_input_channels} channels in TIFF files")

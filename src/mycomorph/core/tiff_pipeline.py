@@ -38,7 +38,7 @@ from pathlib import Path
 import numpy as np
 
 from .cellpose_pipeline import segment_phase, add_cell_boundaries, save_hyperstack
-from .label_cells import load_hyperstack
+from .hyperstack import load_hyperstack
 
 
 def process_tiff_file(tiff_path, model, phase_channel, diameter=None,

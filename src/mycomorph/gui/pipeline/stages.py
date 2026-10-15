@@ -842,7 +842,7 @@ class FluorescentNormalisationStage:
             build as build_normaliser,
             requires_run_level_fit,
         )
-        from mycomorph.core.label_cells import load_hyperstack
+        from mycomorph.core.hyperstack import load_hyperstack
 
         # Prefer classify output (quality-filtered cells); fall back to segment.
         inputs: list[Path] = []
@@ -1098,7 +1098,7 @@ class FociDetectionStage:
 
         import pandas as pd
         from mycomorph.core.foci.batch import detect_unit, resolve_worker_count
-        from mycomorph.core.label_cells import (
+        from mycomorph.core.hyperstack import (
             get_labeled_mask_from_fov,
             load_hyperstack,
         )

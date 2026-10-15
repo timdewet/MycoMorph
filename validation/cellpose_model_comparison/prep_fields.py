@@ -14,7 +14,7 @@ from pathlib import Path
 import numpy as np
 from skimage.measure import label as sk_label
 
-from mycomorph.core.label_cells import load_hyperstack
+from mycomorph.core.hyperstack import load_hyperstack
 
 BASE = Path("/Users/timdewet/Library/CloudStorage/Dropbox-MMRU/Network Data/Microscopy/Tim/2026")
 MTB = BASE / "Mtb_CRISPRi/Processed/07_05_2026"
