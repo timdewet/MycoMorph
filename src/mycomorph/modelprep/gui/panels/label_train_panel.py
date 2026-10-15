@@ -454,6 +454,7 @@ class _TrainWorker(QThread):
             from ...core.train_classifier import train as run_train
             from ...core.labels_store import LABELS_SCHEMA_VERSION, cell_uids_sha256
             from ...core.cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
+            from ...core.crop_provenance import crop_options
 
             reader = HDF5CropsReader(self.h5_path)
             store = LabelsStore(self.labels_dir)
@@ -485,6 +486,7 @@ class _TrainWorker(QThread):
                 "n_holdout": int(len(eval_uids)),
                 "holdout_class_counts": test_class_counts,
                 "labels_schema_version": LABELS_SCHEMA_VERSION,
+                "crop_options": crop_options(self.h5_path),
             }
 
             self.output_dir.mkdir(parents=True, exist_ok=True)

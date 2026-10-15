@@ -484,3 +484,17 @@ def test_models_panel_exports_cnn_runs_only(tmp_path, monkeypatch):
     panel._export_selected()
     assert (dest / cnn.name / f"{cnn.name}.pth").read_bytes() == b"x"
     assert shown
+
+
+def test_source_page_warns_about_masked_crops(synthetic_h5):
+    """Review H5: masked-background crops are flagged when the HDF5 loads."""
+    import h5py
+
+    from modelprep.gui.panels.source_panel import SourcePanel
+
+    _app()
+    with h5py.File(synthetic_h5, "a") as f:
+        f.attrs["mask_background"] = True
+    sp = SourcePanel()
+    sp.set_h5_path(synthetic_h5)
+    assert not sp._warn_label.isHidden() and "masking ON" in sp._warn_label.text()

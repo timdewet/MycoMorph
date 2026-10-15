@@ -100,6 +100,14 @@ def info(
         typer.echo(f"  native crop:   {reader.native_crop_size}×{reader.native_crop_size}")
         typer.echo(f"  classifier projection: 3 channels × "
                    f"{reader.classifier_size}×{reader.classifier_size}")
+    from .crop_provenance import crop_options, crop_warnings
+
+    opts = crop_options(h5)
+    mb = opts.get("mask_background")
+    typer.echo(f"  mask_background: {'unknown' if mb is None else mb}"
+               f"{'  (from ' + opts['source'] + ')' if 'source' in opts else ''}")
+    for w in crop_warnings(h5, opts):
+        typer.echo(f"  WARNING: {w}")
 
 
 @app.command()
@@ -385,6 +393,7 @@ def train(
     import numpy as np
 
     from .cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
+    from .crop_provenance import crop_options
     from .labels_store import LABELS_SCHEMA_VERSION, cell_uids_sha256
     from .train_classifier import train as run_train
 
@@ -454,6 +463,7 @@ def train(
         "holdout_class_counts": {CLASS_NAMES[i]: int((eval_labels == i).sum())
                                  for i in range(NUM_CLASSES)},
         "labels_schema_version": LABELS_SCHEMA_VERSION,
+        "crop_options": crop_options(h5_path),
         "entry_point": "modelprep-cli train",
     }
 

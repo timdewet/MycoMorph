@@ -95,6 +95,11 @@ class SourcePanel(QGroupBox):
         self._info_label.setWordWrap(True)
         layout.addWidget(self._info_label)
 
+        self._warn_label = QLabel("")
+        self._warn_label.setWordWrap(True)
+        self._warn_label.setVisible(False)
+        layout.addWidget(self._warn_label)
+
     # ── public ─────────────────────────────────────────────────────────
 
     def current_h5_path(self) -> Optional[Path]:
@@ -158,6 +163,20 @@ class SourcePanel(QGroupBox):
 
     # ── internals ──────────────────────────────────────────────────────
 
+    def _show_crop_warnings(self, path: Path) -> None:
+        """Flag crops that won't match what MycoMorph classifies (background
+        masking) or that the previous model pre-filtered."""
+        from ...core.crop_provenance import crop_warnings
+        from ..ui import tokens
+
+        try:
+            warnings = crop_warnings(path)
+        except Exception:  # noqa: BLE001 — a check, never a blocker
+            warnings = []
+        self._warn_label.setVisible(bool(warnings))
+        self._warn_label.setText("\n".join(f"⚠ {w}" for w in warnings))
+        self._warn_label.setStyleSheet(f"color: {tokens.active().warning};")
+
     def _set_h5(self, path: Path) -> None:
         if not path.exists():
             self._info_label.setText(f"File not found: {path}")
@@ -174,4 +193,5 @@ class SourcePanel(QGroupBox):
         self._labels_dir = default_labels_dir_for(path)
         self._lbl_edit.setText(str(self._labels_dir))
         self._info_label.setText(summary)
+        self._show_crop_warnings(path)
         self.sourceChanged.emit(self._h5_path, self._labels_dir)
