@@ -100,9 +100,6 @@ def test_labeller_button_opens_one_modelprep_window_on_the_runs_crops(
     assert mp.source_panel.current_h5_path() == h5
     assert settings_file().is_relative_to(home)
 
-    # The old Label & Train window is no longer what the button opens.
-    assert not window.findChildren(mw._LabelTrainerWindow)
-
     # A second click raises the same window.
     window.classify_panel._open_labeler_btn.click()
     assert window._modelprep_window is mp

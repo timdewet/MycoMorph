@@ -33,7 +33,6 @@ from .panels.analysis_panel import AnalysisPanel
 from .panels.embeddings_panel import EmbeddingsPanel
 from .panels.features_panel import FeaturesPanel
 from .panels.input_panel import InputMode, InputPanel
-from .panels.label_train_panel import LabelTrainPanel
 from .panels.layout_panel import LayoutPanel
 from .panels.run_panel import RunPanel
 from .panels.stage_panels import (
@@ -100,14 +99,6 @@ NAV_ENTRIES = [
 _TRAIN_MODE_HIDDEN_TABS = ("plate", "focus", "segment", "features")
 
 
-class _LabelTrainerWindow(QMainWindow):
-    def __init__(self, panel: LabelTrainPanel, parent: QWidget | None = None) -> None:
-        super().__init__(parent)
-        self.setWindowTitle("Labeller & Classifier Trainer")
-        self.resize(1100, 800)
-        self.setCentralWidget(panel)
-
-
 class _ModelDetailsWindow(QMainWindow):
     def __init__(self, inspector, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -162,7 +153,6 @@ class MainWindow(QMainWindow):
         self.embeddings_panel = EmbeddingsPanel()
         self.run_panel = RunPanel()
         self.analysis_panel = AnalysisPanel()
-        self.label_train_panel = LabelTrainPanel()
         self.live_preview = LivePreviewPanel()
 
         # Convenience aliases — many other places still reference these.
@@ -471,7 +461,6 @@ class MainWindow(QMainWindow):
             self.features_panel,
             self.embeddings_panel,
             self.run_panel,
-            self.label_train_panel,
         ):
             for box in panel.findChildren(QGroupBox):
                 apply_shadow(box, level=1)
@@ -1001,7 +990,6 @@ class MainWindow(QMainWindow):
     def _on_channels_changed(self) -> None:
         ch = self.input_panel.phase_channel
         self.focus_panel.set_phase_channel(ch)
-        self.label_train_panel.set_phase_channel(ch)
         self.live_preview.set_phase_channel(ch)
         labels = self.input_panel.channel_labels or []
         self.features_panel.set_channels(list(labels))
@@ -1042,7 +1030,6 @@ class MainWindow(QMainWindow):
         if out is None:
             self.live_preview.set_search_dirs([])
             self.live_preview.set_segment_dir(None)
-            self.label_train_panel.set_segment_dir(None)
             self.foci_det_panel.set_label_button_enabled(False)
             return
         candidates = [
@@ -1052,7 +1039,6 @@ class MainWindow(QMainWindow):
         ]
         self.live_preview.set_search_dirs([d for d in candidates if d.exists()])
         seg_dir = out / "02_segment"
-        self.label_train_panel.set_segment_dir(seg_dir if seg_dir.exists() else None)
         # Same directory feeds the live preview, which reuses a stored
         # mask whenever its provenance signature matches the options the
         # user is currently previewing (skipping a cellpose run).
