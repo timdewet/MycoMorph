@@ -464,7 +464,7 @@ def test_inspector_names_the_eval_split(tmp_path):
     """The model card said 'Val accuracy' for hold-out numbers (review M4)."""
     import json
 
-    from mycomorph.modelprep.gui.widgets.model_inspector import ModelInspector
+    from mycomorph.gui.widgets.model_inspector import ModelInspector
 
     _app()
     run = tmp_path / "demo_2026-06-14_10-00-00"
@@ -479,6 +479,78 @@ def test_inspector_names_the_eval_split(tmp_path):
     text = insp._stats.text()
     assert "Hold-out accuracy: 90.0%" in text and "Val accuracy" not in text
     assert "hold-out 50" in text
+
+
+def _curves(decision_threshold):
+    """A metrics.json body whose curves are on P(bad), as both trainers write."""
+    return {
+        "decision_threshold": decision_threshold,
+        "binary": {
+            "roc": {"fpr": [0.0, 0.05, 0.10, 0.20, 0.40, 1.0],
+                    "tpr": [0.0, 0.40, 0.60, 0.75, 0.90, 1.0],
+                    "thresholds": [float("inf"), 0.9, 0.7, 0.5, 0.3, 0.1], "auc": 0.85},
+            "pr": {"precision": [0.5, 0.6, 0.8, 1.0], "recall": [1.0, 0.9, 0.6, 0.0],
+                   "thresholds": [0.1, 0.3, 0.7], "ap": 0.8, "baseline": 0.5},
+        },
+    }
+
+
+def _marker(insp):
+    ax_roc = insp._fig.axes[0]
+    line = next(ln for ln in ax_roc.lines if ln.get_label().startswith("P(bad) cut"))
+    return float(line.get_xdata()[0]), float(line.get_ydata()[0])
+
+
+def test_shared_inspector_shows_cnn_and_feature_runs(tmp_path, monkeypatch):
+    """ModelPrep's Models tab uses MycoMorph's inspector: a CNN run and a
+    feature run both get their stats and curves, marked at the run's own
+    decision threshold (no Classify rule is set here)."""
+    import json
+
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    import mycomorph.modelprep.gui.trained_models as tm
+    from mycomorph.gui.widgets.model_inspector import ModelInspector
+
+    app = _app()
+    root = tmp_path / "models"
+    root.mkdir()
+    monkeypatch.setattr(tm, "trained_models_root", lambda: root)
+    monkeypatch.setattr(mp, "trained_models_root", lambda: root)
+    empty = mp.ModelsPanel()
+    assert isinstance(empty._inspector, ModelInspector)
+    assert empty._inspector._header.text() == "No trained model selected"  # ModelPrep's wording
+
+    cnn = _make_run(root, "demo", "2026-06-14_10-00-00", decision_threshold=0.3)
+    (cnn / "metrics.json").write_text(json.dumps(_curves(0.3)))
+    feat = root / "demo-features_2026-06-14_10-00-00"
+    feat.mkdir()
+    (feat / "feature_model.joblib").write_bytes(b"x")
+    (feat / "training_config.json").write_text(json.dumps(dict(
+        model_type="features", eval_split="holdout", eval_acc=0.8, roc_auc=0.854,
+        n_train=2552, n_holdout=1100, decision_threshold=0.5)))
+    (feat / "metrics.json").write_text(json.dumps(_curves(0.5)))
+
+    panel = mp.ModelsPanel()
+    insp = panel._inspector
+    panel._select_dir(str(cnn))
+    assert insp._header.text() == f"Model: {cnn.name}"
+    assert "tuned threshold: keep if P(bad) < 0.300" in insp._stats.text()
+    assert not insp._canvas.isHidden()
+    assert _marker(insp) == pytest.approx((0.40, 0.90))        # thr 0.3 on the ROC
+
+    panel._select_dir(str(feat))
+    assert insp._header.text() == f"Model: {feat.name}"
+    text = insp._stats.text()
+    assert "Hold-out accuracy: 80.0%" in text and "AUC 0.85" in text
+    assert "P(bad) < 0.500" in text
+    assert _marker(insp) == pytest.approx((0.20, 0.75))        # thr 0.5 on the ROC
+
+    # MycoMorph's Classify page sets its rule; the marker then follows it.
+    insp.set_threshold(0.7)                                    # P(good) >= 0.7
+    assert _marker(insp) == pytest.approx((0.40, 0.90))        # reject P(bad) > 0.3
+    insp.set_threshold(0.7, decision_threshold=0.9)
+    assert _marker(insp) == pytest.approx((0.05, 0.40))
+    app.processEvents()
 
 
 def test_models_panel_exports_cnn_runs_only(tmp_path, monkeypatch):

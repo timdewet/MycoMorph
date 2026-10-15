@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
 
 from mycomorph.gui.ui import tokens
 from mycomorph.gui.ui.flow_layout import FlowLayout
+from mycomorph.gui.widgets.model_inspector import ModelInspector
 
 from ...core._render import outline_of, to_outlined_rgb
 from ...core.cell_filter import CellFilter
@@ -78,7 +79,6 @@ TEST_SET_TARGET = 1000
 SAMPLING_SEED = 42
 from ..palette import COLORS, LABEL_COLORS
 from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
-from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
 
 
@@ -971,7 +971,10 @@ class LabelTrainPanel(QWidget):
         self._train_status.setWordWrap(True)
         v.addWidget(self._train_status)
 
-        self._inspector = ModelInspector()
+        self._inspector = ModelInspector(
+            empty_title="No trained model selected",
+            empty_hint="Train a model to see its curves + metrics here.",
+        )
         v.addWidget(self._inspector)
 
         return box

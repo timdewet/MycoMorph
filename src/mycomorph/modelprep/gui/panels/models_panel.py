@@ -34,6 +34,7 @@ from PyQt6.QtWidgets import (
 )
 
 from mycomorph.gui.ui import tokens
+from mycomorph.gui.widgets.model_inspector import ModelInspector
 
 from ...core.crops_h5 import HDF5CropsReader
 from ...core.labels_store import SPLIT_TEST, LabelsStore
@@ -45,7 +46,6 @@ from ..trained_models import (
     trained_models_root,
 )
 from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
-from ..widgets.model_inspector import ModelInspector
 
 # Column order. Numeric columns get numeric-aware sort items.
 _COLUMNS = [
@@ -227,7 +227,10 @@ class ModelsPanel(QWidget):
         self._table.itemDoubleClicked.connect(lambda *_: self._use_selected())
         self._splitter.addWidget(self._table)
 
-        self._inspector = ModelInspector()
+        self._inspector = ModelInspector(
+            empty_title="No trained model selected",
+            empty_hint="Train a model to see its curves + metrics here.",
+        )
         self._splitter.addWidget(self._inspector)
         self._splitter.setStretchFactor(0, 3)
         self._splitter.setStretchFactor(1, 2)
