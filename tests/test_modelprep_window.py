@@ -5,12 +5,18 @@ share the GPU."""
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import numpy as np
 import pytest
 
 pytest.importorskip("PyQt6")
+
+# MycoMorph's window embeds QtWebEngine (Analysis page). Chromium's sandbox
+# can't start for an unprivileged user on Ubuntu 24.04 CI runners and aborts
+# the process; nothing here loads web content.
+os.environ.setdefault("QTWEBENGINE_DISABLE_SANDBOX", "1")
 
 # Imported at collection, before pytest-qt creates the QApplication: MycoMorph's
 # Analysis page imports QtWebEngineWidgets, which must load first.

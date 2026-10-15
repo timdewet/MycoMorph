@@ -36,6 +36,9 @@ def _smoke_launch(module: str, *flags: str, home: Path) -> subprocess.CompletedP
         HOME=str(home),                          # never the user's ~/.modelprep
         USERPROFILE=str(home),
         XDG_CONFIG_HOME=str(home / ".config"),
+        # MycoMorph's window embeds QtWebEngine; its sandbox can't start for
+        # an unprivileged user on Ubuntu 24.04 CI runners.
+        QTWEBENGINE_DISABLE_SANDBOX="1",
     )
     return subprocess.run(
         [sys.executable, "-m", module, *flags],
