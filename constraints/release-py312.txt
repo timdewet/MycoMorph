@@ -4,10 +4,17 @@
 # every release since requires >=3.12. Pinning a 3.11-compatible czifile would
 # mean falling back to 2019.7.2.3. The library itself still supports >=3.10
 # (see pyproject) — this pin set governs the desktop bundle only.
+#
+#   pip install -c constraints/release-py312.txt -e ".[test]"
+#
+# Includes ModelPrep's former constraints/release.txt (the environment the
+# Fig. S2 models were trained in); every package the two files shared was
+# already pinned to the same version.
 numpy==2.4.5
 scipy==1.17.1
 scikit-image==0.26.0
 scikit-learn==1.8.0
+joblib==1.5.3
 tifffile==2026.3.3
 czifile==2026.4.11
 pylibCZIrw==6.0.1
@@ -25,3 +32,9 @@ qtawesome==1.4.2
 umap-learn==0.5.11
 plotly==6.7.0
 PyQt6-WebEngine==6.11.0
+psutil==7.2.2
+
+# test / package extras
+pytest==9.0.3
+pytest-qt==4.5.0
+pyinstaller==6.16.0

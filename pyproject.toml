@@ -30,6 +30,7 @@ dependencies = [
     "umap-learn>=0.5",
     "plotly>=5.20",
     "PyQt6-WebEngine>=6.5",
+    "psutil>=5.9",  # nav-sidebar system stats; a declared ModelPrep dependency
 ]
 
 [project.optional-dependencies]
