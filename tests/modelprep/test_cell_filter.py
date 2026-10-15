@@ -161,7 +161,7 @@ def test_exclusions_apply_within_filter(multi_condition_h5, tmp_path):
 
 def _fake_scores(monkeypatch):
     """Deterministic P(good) per HDF5 row, so ranking is testable without a CNN."""
-    def fake(reader, indices, model_path, progress_cb, should_cancel):
+    def fake(reader, indices, model_path, progress_cb, should_cancel, **_kw):
         return (np.asarray(indices, dtype=np.float32) % 10) / 10.0
     monkeypatch.setattr(label_cells, "_score_cells", fake)
 
@@ -186,6 +186,18 @@ def test_uncertainty_ranking_within_filter(multi_condition_h5, monkeypatch, tmp_
         assert np.all(np.maximum(only.scores, 1 - only.scores) < 0.75)
 
 
+
+def test_diversify_spreads_across_fields_not_fov_numbers(multi_condition_h5):
+    """fov_indices restart in every TIFF, so FOV 0 of two wells is two fields.
+    Cells 0/24 share one TIFF's FOV 0 and 12/36 another's; 1 and 2 are FOVs 1, 2."""
+    with HDF5CropsReader(multi_condition_h5) as r:
+        assert r.fov_indices[[0, 12, 24, 36]].tolist() == [0, 0, 0, 0]
+        ranked = np.array([0, 24, 12, 36, 1, 2])
+        picked, _ = label_cells._diversify_by_fov(
+            r, ranked, np.linspace(0.5, 0.9, len(ranked)), n_target=4)
+    # Bucketing by bare fov_index would give [0, 1, 2, 24].
+    assert picked.tolist() == [0, 12, 1, 2]
+
 def test_random_select_ignores_model(multi_condition_h5, tmp_path):
     f = CellFilter.from_mapping({"gene": ["NT1"]})
     with HDF5CropsReader(multi_condition_h5) as r:
@@ -193,6 +205,42 @@ def test_random_select_ignores_model(multi_condition_h5, tmp_path):
         b = _pool(r, f, n=5, model_path=tmp_path / "unused.pth", select="random")
     assert a.mode == b.mode == "random"
     assert a.indices.tolist() == b.indices.tolist()
+    # Nothing scored them, so they carry no model confidence (not 0.5).
+    assert np.isnan(a.scores).all() and np.isnan(b.scores).all()
+
+
+def test_filtered_pools_share_the_score_cache(multi_condition_h5, tmp_path, monkeypatch):
+    """Scores cached while labelling one gene are reused when the filter
+    changes: only cells not scored before are run through the model."""
+    import modelprep.core.cell_quality_classifier as cqc
+    from modelprep.core import score_cache
+
+    monkeypatch.setattr(score_cache, "score_cache_root", lambda: tmp_path / "cache")
+    score_cache.clear_memory()
+    scored: list[int] = []
+
+    class FakeClf:
+        def __init__(self, *_a, **_k):
+            pass
+
+        def predict_batch(self, batch):
+            scored.append(len(batch))
+            p = np.full((len(batch), 2), 0.5, dtype=np.float32)
+            return p.argmax(1), p
+
+    monkeypatch.setattr(cqc, "CellQualityClassifier", FakeClf)
+    model = tmp_path / "m.pth"
+    model.write_bytes(b"w")
+    dnan = CellFilter.from_mapping({"gene": ["dnaN"]})
+    with HDF5CropsReader(multi_condition_h5) as r:
+        first = _pool(r, dnan, model_path=model, cache_scores=True)
+        assert len(first) == 12 and sum(scored) == 12
+        assert set(_column(r, "genes", first.indices)) == {"dnaN"}
+        _pool(r, dnan, model_path=model, cache_scores=True)
+        assert sum(scored) == 12                       # all from the cache
+        whole = _pool(r, model_path=model, cache_scores=True)
+        assert len(whole) == 48 and sum(scored) == 48  # only the other 36 scored
+    score_cache.clear_memory()
 
 
 # ── provenance ───────────────────────────────────────────────────────────────
