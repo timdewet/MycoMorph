@@ -376,3 +376,72 @@ def test_pool_scores_are_cached_per_model_and_h5(synthetic_h5, tmp_path, monkeyp
     sc.clear_memory()                             # the disk layer alone suffices
     run()
     assert sum(scored) == 32                      # nothing rescored
+
+
+def test_inspector_defaults_to_crop_when_originals_are_online_only(synthetic_h5):
+    """Context mode would download the full online-only TIFFs, so the inspector
+    opens on the isolated crop and says why (review L3)."""
+    from types import SimpleNamespace
+
+    from modelprep.core.crops_h5 import HDF5CropsReader
+    from modelprep.gui.panels.cell_detail_dialog import CellDetailView
+
+    _app()
+    with HDF5CropsReader(synthetic_h5) as r:
+        pool = [(r.get(i), float("nan")) for i in range(3)]
+        phase, mask = r.phase_channel_idx, r.mask_channel_idx
+    labels: dict = {}
+    provider = SimpleNamespace(available=True, online_only_bytes=lambda: 2_000_000_000)
+    dlg = CellDetailView(pool=pool, start_index=0, phase_idx=phase, mask_idx=mask,
+                         get_label=lambda i: labels.get(i, "unlabeled"),
+                         set_label=labels.__setitem__, context_provider=provider)
+    assert dlg._mode == "crop" and not dlg._ctx_toggle.isChecked()
+    assert dlg._ctx_toggle.isEnabled() and "2.0 GB" in dlg._ctx_toggle.toolTip()
+    assert "not scored" in dlg._meta.text()
+    dlg.close()
+
+
+def test_label_page_wording_follows_state(synthetic_h5, tmp_path):
+    """Review M4/H6: no stale 'Pick an HDF5' once a source is loaded, Diversify
+    is disabled (and says why) without a model, paths are shortened, and the
+    rubric link resolves."""
+    from pathlib import Path
+
+    from modelprep.gui._resources import rubric_location
+    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+
+    _app()
+    panel = LabelTrainPanel()
+    panel.set_source(synthetic_h5, tmp_path / "labels")
+    assert "Pick an HDF5" not in panel._status.text()
+    assert str(tmp_path) not in panel._info_label.text()      # name, not full path
+
+    panel._model_combo.setCurrentIndex(0)                       # none (random order)
+    assert not panel._diversify.isEnabled()
+    assert "Needs a model" in panel._diversify.toolTip()
+    panel._model_combo.setCurrentIndex(panel._model_combo.findText("preset: mtb"))
+    assert panel._diversify.isEnabled()
+    panel.shutdown()
+
+    assert Path(rubric_location()).name == "labelling_rubric.md"
+
+
+def test_inspector_names_the_eval_split(tmp_path):
+    """The model card said 'Val accuracy' for hold-out numbers (review M4)."""
+    import json
+
+    from modelprep.gui.widgets.model_inspector import ModelInspector
+
+    _app()
+    run = tmp_path / "demo_2026-06-14_10-00-00"
+    run.mkdir()
+    (run / "best_model.pth").write_bytes(b"")
+    (run / "training_config.json").write_text(json.dumps({
+        "eval_split": "holdout", "eval_acc": 0.9, "balanced_acc": 0.85,
+        "n_train": 100, "n_val": 20, "n_test": 0, "n_holdout": 50,
+    }))
+    insp = ModelInspector()
+    insp.set_model(run / "best_model.pth")
+    text = insp._stats.text()
+    assert "Hold-out accuracy: 90.0%" in text and "Val accuracy" not in text
+    assert "hold-out 50" in text

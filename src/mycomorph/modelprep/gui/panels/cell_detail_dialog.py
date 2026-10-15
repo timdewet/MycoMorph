@@ -105,7 +105,10 @@ class CellDetailView(QDialog):
         self._provider = context_provider
 
         self._context_ok = bool(context_provider and context_provider.available)
-        self._mode = "context" if self._context_ok else "crop"
+        # Online-only (cloud placeholder) originals would be downloaded in full
+        # (~2 GB per TIFF) the moment context is shown, so don't default to it.
+        self._online_bytes = context_provider.online_only_bytes() if self._context_ok else 0
+        self._mode = "context" if self._context_ok and not self._online_bytes else "crop"
         self._window_px = _WINDOW_DEFAULT
         self._img_key: Optional[tuple] = None  # (idx, mode, window_px) shown
         self._req_id = 0
@@ -166,8 +169,13 @@ class CellDetailView(QDialog):
         self._ctx_toggle.setEnabled(self._context_ok)
         if not self._context_ok:
             self._ctx_toggle.setToolTip(
-                "Original pipeline images (01_focus / 02_segment) were not found "
-                "next to the HDF5."
+                "Not available: the original pipeline images (01_focus plus "
+                "02_segment or 03_classify) aren't in the folder above this HDF5's."
+            )
+        elif self._online_bytes:
+            self._ctx_toggle.setToolTip(
+                "The original images are online-only (cloud storage). Turning this "
+                f"on downloads them, about {self._online_bytes / 1e9:.1f} GB."
             )
         self._ctx_toggle.toggled.connect(self._on_toggle_context)
         side.addWidget(self._ctx_toggle)

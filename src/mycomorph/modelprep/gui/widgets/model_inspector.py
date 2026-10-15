@@ -145,19 +145,26 @@ class ModelInspector(QWidget):
                 auc = cfg.get("roc_auc")
                 thr = cfg.get("decision_threshold")
                 n_train, n_val, n_test = cfg.get("n_train"), cfg.get("n_val"), cfg.get("n_test")
+                n_holdout = cfg.get("n_holdout")
+                bal = cfg.get("balanced_acc")
                 classes = cfg.get("class_names")
                 if eval_acc is not None and eval_acc == eval_acc:
-                    label = "Test" if split == "test" else "Val"
+                    # Name the set the number was measured on (the frozen
+                    # hold-out, an internal test split, or validation).
+                    label = {"holdout": "Hold-out", "test": "Test"}.get(split, "Val")
                     stats_lines.append(f"{label} accuracy: {eval_acc:.1%}")
+                    if bal is not None and bal == bal:
+                        stats_lines.append(f"balanced {bal:.1%}")
                 elif best is not None:
                     stats_lines.append(f"Best val accuracy: {best:.1%}")
                 if auc is not None and auc == auc:
                     stats_lines.append(f"AUC {auc:.2f}")
                 if thr is not None:
                     stats_lines.append(f"threshold {thr:.2f}")
-                if n_train and n_val:
-                    extra = f" / test {n_test:,}" if n_test else ""
-                    stats_lines.append(f"train {n_train:,} / val {n_val:,}{extra}")
+                sizes = [f"{k} {v:,}" for k, v in (("train", n_train), ("val", n_val),
+                                                   ("test", n_test), ("hold-out", n_holdout)) if v]
+                if sizes:
+                    stats_lines.append(" / ".join(sizes))
                 if classes:
                     stats_lines.append(f"classes: {', '.join(classes)}")
             except Exception:  # noqa: BLE001

@@ -633,8 +633,11 @@ class LabelTrainPanel(QWidget):
 
         self._info_label.setText(
             f"Loaded {len(self._reader):,} cells from {self._h5_path.name} · "
-            f"labels at {self._labels_dir}"
+            f"labels in {self._labels_dir.name}/"
         )
+        self._info_label.setToolTip(f"{self._h5_path}\nlabels: {self._labels_dir}")
+        self._status.setText(
+            "Pick a model (or none for random order), then click 'Load pool'.")
         # Fresh labelling session for this dataset.
         self._pool = []
         self._pool_model = None
@@ -702,32 +705,40 @@ class LabelTrainPanel(QWidget):
         self._model_combo.currentTextChanged.connect(self._model_combo.setToolTip)
         self._populate_model_combo()
         self._model_combo.activated.connect(self._on_model_combo_activated)
+        self._model_combo.currentIndexChanged.connect(lambda _i: self._sync_model_controls())
 
         self._pool_size = QSpinBox(); self._pool_size.setRange(48, 5000); self._pool_size.setValue(1000)
         self._pool_size.setToolTip(
-            "Cells to preload per fetch. Higher = fewer waits, more upfront time."
+            "Pool: how many cells to fetch at once. You label them page by page; "
+            "a bigger pool means fewer waits later but a longer first load."
         )
         self._page_size = QSpinBox(); self._page_size.setRange(8, 256); self._page_size.setValue(48)
         self._page_size.setToolTip(
-            "Cells shown per page. Smaller pages render faster."
+            "Page: how many cells are shown on screen at a time."
         )
         self._diversify = QCheckBox("Diversify")
         self._diversify.setChecked(True)
-        self._diversify.setToolTip(
-            "Spread the most-uncertain cells across fields of view so one noisy "
-            "FOV can't fill a page with near-duplicates."
+        self._diversify_tip = (
+            "Spread the cells the model is least sure about across different "
+            "fields of view, so one crowded image can't fill a page with "
+            "near-duplicates."
         )
+        self._diversify.setToolTip(self._diversify_tip)
         self._uncertain_only = QCheckBox("Uncertain only")
         self._uncertain_only.setToolTip(
-            "Only load cells the model is unsure about (max-class confidence "
-            "below the threshold). Requires a model."
+            "Only show cells the model can't decide on: its confidence is below "
+            "the cutoff in the box next to this. Spends your time where the model "
+            "is weakest. Needs a model."
         )
         self._conf_thresh = QDoubleSpinBox()
         self._conf_thresh.setRange(0.5, 1.0); self._conf_thresh.setSingleStep(0.05)
         self._conf_thresh.setValue(0.85); self._conf_thresh.setDecimals(2)
         self._conf_thresh.setPrefix("conf< ")
         self._conf_thresh.setEnabled(False)  # only relevant with 'Uncertain only'
-        self._conf_thresh.setToolTip("Confidence cutoff for 'Uncertain only' / Review.")
+        self._conf_thresh.setToolTip(
+            "Confidence cutoff for 'Uncertain only': cells the model is less sure "
+            "about than this are shown (0.5 = a coin flip, 1.0 = certain)."
+        )
         self._uncertain_only.toggled.connect(self._conf_thresh.setEnabled)
 
         self._load_btn = QPushButton("Load pool")
@@ -758,11 +769,11 @@ class LabelTrainPanel(QWidget):
 
         self._prioritise_good = QCheckBox("Prioritise good")
         self._prioritise_good.setToolTip(
-            "When building the test set, show the model's most-likely-'good' "
-            "cells first so the rare class fills quickly (you still label each "
-            "cell's true class). Needs a model. Off = uniform random sample.\n"
-            "Note: prioritising couples the set to the model — a random pass too "
-            "keeps it representative; AUC/AP/balanced-acc are reported regardless."
+            "While building the hold-out test set, show the cells the model thinks "
+            "are most likely 'good' first, so the rarer class fills up faster. You "
+            "still decide every label. Needs a model.\n"
+            "Off = a random sample, which is more representative. Prioritising "
+            "ties the set to that model, so mix in a random pass too."
         )
         self._prioritise_good.setEnabled(False)
 
@@ -778,6 +789,7 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(self._load_btn)
         bar.addWidget(self._review_btn)
         v.addWidget(bar_host)
+        self._sync_model_controls()
 
         # Prominent banner shown only while labelling the hold-out test set.
         self._test_banner = QLabel(
@@ -842,7 +854,7 @@ class LabelTrainPanel(QWidget):
         self._info_label.setWordWrap(True)
         v.addWidget(self._info_label)
 
-        self._status = QLabel("Pick an HDF5 and click 'Load pool'.")
+        self._status = QLabel("Pick an HDF5 on the Source page first.")
         self._status.setObjectName("muted")
         self._status.setWordWrap(True)
         v.addWidget(self._status)
@@ -855,10 +867,13 @@ class LabelTrainPanel(QWidget):
             "Click a thumbnail to cycle unlabeled → good → bad. On the focused "
             "cell, press g (good) / b (bad) — both jump to the next cell — or u "
             "(unlabeled); arrow keys move between cells. Double-click to enlarge. "
-            "Outer border = your label · cyan outline = segmented cell."
+            "Outer border = your label · cyan outline = segmented cell. "
+            "What counts as good or bad: <a href='rubric'>labelling rubric</a>."
         )
         hint.setObjectName("muted")
         hint.setWordWrap(True)
+        hint.setTextFormat(Qt.TextFormat.RichText)
+        hint.linkActivated.connect(lambda _href: self._open_rubric())
         v.addWidget(hint)
 
         # Grid
@@ -888,15 +903,25 @@ class LabelTrainPanel(QWidget):
 
         bar_host, bar = _flow_row()
         self._epochs = QSpinBox(); self._epochs.setRange(1, 500); self._epochs.setValue(40)
+        self._epochs.setToolTip(
+            "The most passes training makes over your labels. It stops earlier "
+            "when validation accuracy stops improving (see Patience)."
+        )
         self._lr = QDoubleSpinBox()
         self._lr.setRange(1e-6, 1.0); self._lr.setDecimals(6)
         self._lr.setValue(1e-4); self._lr.setSingleStep(5e-5)
+        self._lr.setToolTip(
+            "Learning rate: how big a step each training update takes. Small "
+            "(0.0001) suits fine-tuning an existing model; larger (0.001) suits "
+            "training from scratch. Too large and training becomes unstable."
+        )
         self._fine_tune = QCheckBox("Fine-tune from selected base model")
         self._fine_tune.setChecked(True)
         self._freeze = QCheckBox("Freeze backbone")
         self._freeze.setToolTip(
-            "Train only the classifier head (freeze the conv layers). Often "
-            "better when fine-tuning from a preset on a small label set."
+            "Keep the starting model's image-feature layers fixed and retrain only "
+            "its final decision layer. Faster and less prone to overfitting when "
+            "fine-tuning on a small label set."
         )
         self._use_holdout = QCheckBox("Evaluate on hold-out test set")
         self._use_holdout.setChecked(True)
@@ -941,6 +966,10 @@ class LabelTrainPanel(QWidget):
         self._device_combo.addItem("CUDA", userData="cuda")
         self._batch = QSpinBox(); self._batch.setRange(1, 512); self._batch.setValue(32)
         self._patience = QSpinBox(); self._patience.setRange(1, 200); self._patience.setValue(15)
+        self._patience.setToolTip(
+            "Stop training early if validation accuracy hasn't improved for this "
+            "many epochs in a row. The best epoch's weights are kept."
+        )
         self._val_frac = QDoubleSpinBox(); self._val_frac.setRange(0.05, 0.5)
         self._val_frac.setSingleStep(0.05); self._val_frac.setValue(0.2)
         self._test_frac = QDoubleSpinBox(); self._test_frac.setRange(0.0, 0.5)
@@ -997,6 +1026,19 @@ class LabelTrainPanel(QWidget):
         self._model_combo.blockSignals(False)
         # Signals were blocked, so refresh the full-name tooltip ourselves.
         self._model_combo.setToolTip(self._model_combo.currentText())
+        self._sync_model_controls()
+
+    def _sync_model_controls(self) -> None:
+        """Diversify spreads the *model-ranked* cells across fields of view;
+        with no model the order is already random, so it can't apply."""
+        if not hasattr(self, "_diversify"):
+            return  # called while the picker is built, before the checkbox
+        has_model = self._current_model_path() is not None
+        self._diversify.setEnabled(has_model)
+        self._diversify.setToolTip(
+            self._diversify_tip if has_model else
+            "Needs a model: with 'none' the cells already come in random order, "
+            "so there's nothing to spread out.")
 
     def refresh_models(self) -> None:
         """Public: re-enumerate trained models in the picker (e.g. after a
@@ -1378,9 +1420,7 @@ class LabelTrainPanel(QWidget):
         # read as "unsaved" while their thumbnails stay coloured on screen.
         for idx, lbl in to_save:
             self._saved_labels[idx] = lbl
-        self._status.setText(
-            f"Saved {n_saved} labels → {self._store.csv_path}."
-        )
+        self._status.setText(f"Saved {n_saved} labels to {self._store.csv_path.name}.")
         self._refresh_dataset_stats()
         return n_saved
 
@@ -1406,6 +1446,13 @@ class LabelTrainPanel(QWidget):
             QMessageBox.information(self.label_section, "No labels yet",
                                     "Pick a source and save some labels first.")
 
+    def _open_rubric(self) -> None:
+        from .._resources import rubric_location
+
+        loc = rubric_location()
+        url = QUrl(loc) if loc.startswith("http") else QUrl.fromLocalFile(loc)
+        QDesktopServices.openUrl(url)
+
     def _open_model_folder(self) -> None:
         if self._last_model_dir and self._last_model_dir.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_model_dir)))
@@ -1423,7 +1470,7 @@ class LabelTrainPanel(QWidget):
             return
         try:
             shutil.copyfile(self._store.csv_path, dest)
-            self._status.setText(f"Exported labels → {dest}")
+            self._status.setText(f"Exported labels to {Path(dest).name}")
         except Exception as e:  # noqa: BLE001
             QMessageBox.warning(self.label_section, "Export failed", str(e))
 
@@ -1484,9 +1531,8 @@ class LabelTrainPanel(QWidget):
         if te_total and not (te["good"] and te["bad"]):
             test_part += "  ⚠ hold-out has only one class — label both good and bad into it"
         self._stats_label.setText(
-            f"train: {tr_total} (good={tr['good']} bad={tr['bad']}){test_part}"
-            f"   ·   {self._store.csv_path}"
-        )
+            f"train: {tr_total} (good={tr['good']} bad={tr['bad']}){test_part}")
+        self._stats_label.setToolTip(str(self._store.csv_path))
         self._train_btn.setEnabled(tr_total >= 20)
         # The hold-out toggle only means something once a test set exists.
         self._use_holdout.setEnabled(te_total > 0)
@@ -1508,8 +1554,9 @@ class LabelTrainPanel(QWidget):
 
         self._train_btn.setEnabled(False)
         self._train_progress.setValue(0)
+        self._train_status.setToolTip(str(out_dir))
         self._train_status.setText(
-            f"Training → {out_dir} (epochs={self._epochs.value()}, "
+            f"Training {out_dir.name} (epochs={self._epochs.value()}, "
             f"lr={self._lr.value()}, device={device or 'auto'}, "
             f"fine-tune={'yes' if pretrained else 'no'}, "
             f"freeze={'yes' if self._freeze.isChecked() else 'no'})…"
@@ -1617,7 +1664,9 @@ class LabelTrainPanel(QWidget):
             feature_line = f"\nFeature model skipped — {summary['feature_skip']}."
         else:
             feature_line = ""
-        self._train_status.setText(msg + warning + f"  →  {model_path}" + feature_line)
+        self._train_status.setToolTip(str(model_path))
+        self._train_status.setText(
+            msg + warning + f"  →  {Path(model_path).parent.name}" + feature_line)
 
         # Surface the curves + metrics inline.
         try:

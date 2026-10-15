@@ -25,3 +25,18 @@ def resource_root() -> Path:
         if meipass:
             return Path(meipass)
     return Path(__file__).resolve().parent / "assets"
+
+
+RUBRIC_URL = "https://github.com/timdewet/ModelPrep/blob/main/docs/labelling_rubric.md"
+
+
+def rubric_location() -> str:
+    """Where the labelling rubric is: the bundled/checkout copy if present
+    (a local path), else its URL in the repository."""
+    candidates = [resource_root() / "docs" / "labelling_rubric.md"]  # frozen bundle
+    # Source checkout / editable install: <repo>/docs/labelling_rubric.md.
+    candidates.append(Path(__file__).resolve().parents[3] / "docs" / "labelling_rubric.md")
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return RUBRIC_URL

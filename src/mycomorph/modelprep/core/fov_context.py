@@ -24,6 +24,7 @@ so callers can fall back to the isolated crop.
 
 from __future__ import annotations
 
+import os
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -60,6 +61,20 @@ def _label_mask(raw: np.ndarray) -> np.ndarray:
     return raw.astype(np.int32)
 
 
+# Cloud-storage placeholders (Dropbox/OneDrive/iCloud "online-only" files):
+# macOS marks them SF_DATALESS; Windows uses RECALL_ON_DATA_ACCESS / OFFLINE.
+_SF_DATALESS = 0x40000000
+_WIN_ONLINE_ONLY = 0x00400000 | 0x00001000
+
+
+def is_online_only(st) -> bool:
+    """True if an ``os.stat`` result is a cloud placeholder whose data isn't on
+    disk, so reading it would download the whole file."""
+    if getattr(st, "st_flags", 0) & _SF_DATALESS:
+        return True
+    return bool(getattr(st, "st_file_attributes", 0) & _WIN_ONLINE_ONLY)
+
+
 class FovContextProvider:
     """Resolves a cell's neighbourhood from the pipeline images beside the HDF5."""
 
@@ -78,6 +93,22 @@ class FovContextProvider:
         self._cache: "OrderedDict[tuple[str, int], tuple[np.ndarray, np.ndarray]]" = OrderedDict()
 
     # ── public ─────────────────────────────────────────────────────────
+
+    def online_only_bytes(self) -> int:
+        """Total size of the pipeline images that are online-only placeholders
+        (0 = all local). Metadata only: nothing is downloaded."""
+        total = 0
+        for d in [self.focus_dir, *self._mask_dirs[:1]]:
+            try:
+                with os.scandir(d) as it:
+                    for e in it:
+                        if e.is_file():
+                            st = e.stat()
+                            if is_online_only(st):
+                                total += st.st_size
+            except OSError:
+                continue
+        return total
 
     def get_window(self, record: CropRecord, window_px: int) -> Optional[FovContext]:
         """Return a ``window_px`` square of the original FOV centred on the cell,

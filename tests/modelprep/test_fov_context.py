@@ -134,3 +134,21 @@ def test_missing_label_returns_none(tmp_path):
     prov = FovContextProvider(h5_path)
     # cell_label 999 doesn't exist in the mask → graceful None.
     assert prov.get_window(_record(cell_label=999, area_px=area), 64) is None
+
+
+def test_online_only_detection():
+    """Cloud placeholders (e.g. Dropbox online-only) are recognised from stat
+    flags alone, so the inspector can avoid downloading 2 GB TIFFs (review L3)."""
+    from types import SimpleNamespace
+
+    from modelprep.core.fov_context import is_online_only
+
+    assert is_online_only(SimpleNamespace(st_flags=0x40000060))      # macOS dataless
+    assert not is_online_only(SimpleNamespace(st_flags=0x40))         # local
+    assert is_online_only(SimpleNamespace(st_file_attributes=0x400000))  # Windows
+    assert not is_online_only(SimpleNamespace())
+
+
+def test_online_only_bytes_zero_for_local_files(tmp_path):
+    h5_path, _ = _build_dataset(tmp_path, blob_center=(120, 60))
+    assert FovContextProvider(h5_path).online_only_bytes() == 0
