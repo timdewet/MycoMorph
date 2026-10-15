@@ -3,7 +3,8 @@
 Reads the runs under ``~/.modelprep/models/`` (via
 ``trained_models.list_trained_models``) into a sortable table of metrics, with
 the per-model ROC/PR curves shown below (reusing ``ModelInspector``). Actions:
-use a model for labelling, open its run folder, or delete a run.
+use a model for labelling, open its run folder, export it for MycoMorph, or
+delete a run.
 """
 
 from __future__ import annotations
@@ -40,6 +41,7 @@ from ..trained_models import (
     list_trained_models,
     trained_models_root,
 )
+from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
 from ..ui import tokens
 from ..widgets.model_inspector import ModelInspector
 
@@ -188,12 +190,15 @@ class ModelsPanel(QWidget):
         self._use_btn.clicked.connect(self._use_selected)
         self._open_btn = QPushButton("Open folder")
         self._open_btn.clicked.connect(self._open_selected)
+        self._export_btn = QPushButton("Export for MycoMorph…")
+        self._export_btn.clicked.connect(self._export_selected)
         self._delete_btn = QPushButton("Delete run")
         self._delete_btn.clicked.connect(self._delete_selected)
         bar.addWidget(self._refresh_btn)
         bar.addStretch(1)
         bar.addWidget(self._use_btn)
         bar.addWidget(self._open_btn)
+        bar.addWidget(self._export_btn)
         bar.addWidget(self._delete_btn)
         root.addLayout(bar)
 
@@ -400,6 +405,11 @@ class ModelsPanel(QWidget):
         self._use_btn.setToolTip(
             "" if is_cnn else "Feature models can't drive the crop-based labeller."
         )
+        self._export_btn.setEnabled(is_cnn)
+        self._export_btn.setToolTip(
+            EXPORT_TOOLTIP if is_cnn or m is None
+            else "Feature models can't be used in MycoMorph; only CNN runs export."
+        )
         self._inspector.set_model(m.weights if m else None)
 
     def _use_selected(self) -> None:
@@ -411,6 +421,11 @@ class ModelsPanel(QWidget):
         m = self._selected_model()
         if m is not None and m.dir.exists():
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(m.dir)))
+
+    def _export_selected(self) -> None:
+        m = self._selected_model()
+        if m is not None:
+            export_run_for_mycomorph(self, m.dir)
 
     def _delete_selected(self) -> None:
         m = self._selected_model()

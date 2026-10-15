@@ -68,6 +68,7 @@ TEST_SET_TARGET = 1000
 from ..palette import COLORS, LABEL_COLORS
 from ..ui import tokens
 from ..ui.flow_layout import FlowLayout
+from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
 from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
 
@@ -946,6 +947,11 @@ class LabelTrainPanel(QWidget):
         self._open_model_btn.clicked.connect(self._open_model_folder)
         self._open_model_btn.setEnabled(False)
 
+        self._export_btn = QPushButton("Export for MycoMorph…")
+        self._export_btn.setToolTip(EXPORT_TOOLTIP)
+        self._export_btn.clicked.connect(self._export_for_mycomorph)
+        self._export_btn.setEnabled(False)
+
         bar.addWidget(_labeled("Epochs:", self._epochs))
         bar.addWidget(_labeled("LR:", self._lr))
         bar.addWidget(self._fine_tune)
@@ -954,6 +960,7 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(self._train_btn)
         bar.addWidget(self._adv_toggle)
         bar.addWidget(self._open_model_btn)
+        bar.addWidget(self._export_btn)
         v.addWidget(bar_host)
 
         # Advanced row — hidden until the user opens the disclosure.
@@ -1446,6 +1453,10 @@ class LabelTrainPanel(QWidget):
             QMessageBox.information(self.label_section, "No labels yet",
                                     "Pick a source and save some labels first.")
 
+    def _export_for_mycomorph(self) -> None:
+        if self._last_model_dir is not None:
+            export_run_for_mycomorph(self.train_section, self._last_model_dir)
+
     def _open_rubric(self) -> None:
         from .._resources import rubric_location
 
@@ -1673,6 +1684,7 @@ class LabelTrainPanel(QWidget):
             self._last_model_dir = Path(model_path).parent
             self._inspector.set_model(Path(model_path))
             self._open_model_btn.setEnabled(True)
+            self._export_btn.setEnabled((self._last_model_dir / "best_model.pth").exists())
         except Exception:  # noqa: BLE001
             pass
 

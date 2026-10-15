@@ -445,3 +445,42 @@ def test_inspector_names_the_eval_split(tmp_path):
     text = insp._stats.text()
     assert "Hold-out accuracy: 90.0%" in text and "Val accuracy" not in text
     assert "hold-out 50" in text
+
+
+def test_models_panel_exports_cnn_runs_only(tmp_path, monkeypatch):
+    """Review H4: Export for MycoMorph copies the selected CNN run to a chosen
+    folder; feature runs can't be exported."""
+    import json
+
+    import modelprep.gui.export_action as ea
+    import modelprep.gui.panels.models_panel as mp
+    import modelprep.gui.trained_models as tm
+    from PyQt6.QtWidgets import QMessageBox
+
+    _app()
+    root = tmp_path / "models"
+    root.mkdir()
+    monkeypatch.setattr(tm, "trained_models_root", lambda: root)
+    monkeypatch.setattr(mp, "trained_models_root", lambda: root)
+    cnn = _make_run(root, "alpha", "2026-06-11_00-00-00")
+    feat = root / "alpha-features_2026-06-11_00-00-00"
+    feat.mkdir()
+    (feat / "feature_model.joblib").write_bytes(b"")
+    (feat / "training_config.json").write_text(json.dumps({"model_type": "features"}))
+
+    dest = tmp_path / "Exports"
+    dest.mkdir()
+    monkeypatch.setattr(ea.QFileDialog, "getExistingDirectory",
+                        staticmethod(lambda *a, **k: str(dest)))
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: shown.append(a)))
+
+    panel = mp.ModelsPanel()
+    panel._select_dir(str(feat))
+    assert not panel._export_btn.isEnabled()
+    panel._select_dir(str(cnn))
+    assert panel._export_btn.isEnabled()
+    panel._export_selected()
+    assert (dest / cnn.name / f"{cnn.name}.pth").read_bytes() == b"x"
+    assert shown
