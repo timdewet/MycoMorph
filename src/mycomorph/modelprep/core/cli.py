@@ -707,7 +707,7 @@ def evaluate(
     if res.get("warning"):
         typer.echo(f"  WARNING: {res['warning']}")
     if json_out:
-        json_out.write_text(_json.dumps(res, indent=2))
+        json_out.write_text(_json.dumps(res, indent=2), encoding="utf-8")
         typer.echo(f"  wrote {json_out}")
 
 
@@ -758,7 +758,7 @@ def learning_curve(
     output.mkdir(parents=True, exist_ok=True)
     (output / "curve.json").write_text(_json.dumps(
         {"h5": str(h5), "labels_dir": str(ld), "epochs": epochs, "seed": seed,
-         "points": pts}, indent=2))
+         "points": pts}, indent=2), encoding="utf-8")
     keys = ["n", "n_good", "n_bad", "roc_auc", "average_precision", "balanced_acc", "eval_acc"]
     with open(output / "curve.csv", "w", newline="", encoding="utf-8") as f:
         w = csv.DictWriter(f, fieldnames=keys)
@@ -792,7 +792,7 @@ def consistency(
         return
     typer.echo(f"{'run':20s} {'mode':9s} {'n':>5s} {'agree':>6s} {'kappa':>6s}  band")
     for f in runs:
-        r = _json.loads(f.read_text())
+        r = _json.loads(f.read_text(encoding="utf-8"))
         typer.echo(f"{f.parent.name:20s} {str(r.get('mode', '')):9s} {r.get('n', 0):>5} "
                    f"{r.get('raw_agreement', float('nan')):>6.1%} "
                    f"{r.get('cohen_kappa', float('nan')):>6.2f}  {r.get('kappa_band', '')}")

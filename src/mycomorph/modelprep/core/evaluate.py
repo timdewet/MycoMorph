@@ -71,7 +71,7 @@ def _resolve(model: Path) -> Path:
 def _read_config(model_file: Path) -> dict:
     cfg = model_file.parent / "training_config.json"
     try:
-        return json.loads(cfg.read_text()) if cfg.is_file() else {}
+        return json.loads(cfg.read_text(encoding="utf-8")) if cfg.is_file() else {}
     except (OSError, ValueError):
         return {}
 
