@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mycomorph"
 version = "0.4.0"
-description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
+description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification), and ModelPrep, the labeller and trainer for its cell-quality classifier"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -34,7 +34,6 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-napari = ["napari"]
 profiling = [
     # Pin upper bound: versions after 0.0.9 require a C++ toolchain to
     # build from source on Windows (scikit-build-core + CMake). 0.0.9 is
