@@ -37,9 +37,12 @@ def _ensure_qt_plugin_path() -> None:
         os.environ.setdefault("QT_QPA_PLATFORM_PLUGIN_PATH", str(plugins / "platforms"))
 
 
-def main() -> int:
-    _ensure_qt_plugin_path()
-    app = QApplication(sys.argv)
+def configure_app(app: QApplication) -> None:
+    """Name, icon and theme for an application that opens ModelPrep's window.
+
+    Shared with ``mycomorph --modelprep`` (the desktop bundle's ModelPrep
+    launcher; see ``mycomorph.gui.app``).
+    """
     app.setApplicationName("ModelPrep")
     app.setApplicationDisplayName("ModelPrep")
     app.setQuitOnLastWindowClosed(True)
@@ -51,6 +54,12 @@ def main() -> int:
     # Install the token-driven theme (shared visual language with MycoMorph)
     # and hook the system light/dark follower.
     theme.apply_theme(app)
+
+
+def main() -> int:
+    _ensure_qt_plugin_path()
+    app = QApplication(sys.argv)
+    configure_app(app)
 
     win = MainWindow()
     win.show()

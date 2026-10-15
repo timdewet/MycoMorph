@@ -1,10 +1,15 @@
-"""Qt application entry point."""
+"""Qt application entry point.
+
+``mycomorph --modelprep`` (``MycoMorph --modelprep`` in the desktop bundle)
+opens ModelPrep, the cell-quality labeller and trainer, on its own instead of
+MycoMorph's main window.
+"""
 
 from __future__ import annotations
 
+import argparse
 import os
 import sys
-from pathlib import Path
 
 from PyQt6.QtCore import QTimer, Qt
 from PyQt6.QtGui import QIcon
@@ -17,12 +22,28 @@ from PyQt6.QtWidgets import QApplication
 QApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
 
 from ._resources import resource_root
-from .main_window import MainWindow
 from .ui.theme import apply_theme
 
 
-def main() -> int:
-    app = QApplication(sys.argv)
+def _parse_args(argv: list[str]) -> tuple[argparse.Namespace, list[str]]:
+    """Split MycoMorph's own flags from the rest of ``argv``.
+
+    Unknown arguments (Qt's ``-platform …``, macOS's ``-psn_…``) are passed
+    on to the QApplication untouched.
+    """
+    parser = argparse.ArgumentParser(
+        prog="mycomorph", allow_abbrev=False,
+        description="MycoMorph: bacterial microscopy pre-processing pipeline.",
+    )
+    parser.add_argument(
+        "--modelprep", action="store_true",
+        help="open ModelPrep (the cell-quality labeller and trainer) instead of MycoMorph",
+    )
+    args, rest = parser.parse_known_args(argv[1:])
+    return args, argv[:1] + rest
+
+
+def _configure_mycomorph(app: QApplication) -> None:
     app.setApplicationName("MycoMorph")
     app.setApplicationDisplayName("MycoMorph")
     # Ensure closing the last window actually exits the process. Qt's
@@ -35,9 +56,33 @@ def main() -> int:
     if logo.exists():
         app.setWindowIcon(QIcon(str(logo)))
     apply_theme(app)
-    win = MainWindow()
+
+
+def _app_parts(modelprep: bool):
+    """(configure-app function, main-window class) for the app to open.
+
+    Called before the QApplication exists: MycoMorph's Analysis page imports
+    QtWebEngineWidgets, which wants to load first. ModelPrep's window doesn't
+    use it, so ``--modelprep`` never loads it.
+    """
+    if modelprep:
+        from mycomorph.modelprep.gui.app import configure_app
+        from mycomorph.modelprep.gui.main_window import MainWindow as ModelPrepWindow
+        return configure_app, ModelPrepWindow
+    from .main_window import MainWindow
+    return _configure_mycomorph, MainWindow
+
+
+def main(argv: list[str] | None = None) -> int:
+    args, qt_argv = _parse_args(list(sys.argv if argv is None else argv))
+    configure_app, window_cls = _app_parts(args.modelprep)
+    app = QApplication(qt_argv)
+    configure_app(app)
+    win = window_cls()
     win.show()
     if os.environ.get("MYCOMORPH_SMOKE_TEST") == "1":
+        # Name the window that opened so a launch check can tell the two apart.
+        print(f"[mycomorph] smoke test: opened {win.windowTitle()}", flush=True)
         QTimer.singleShot(500, app.quit)
     rc = app.exec()
     # Force-quit any lingering Qt resources. ``os._exit`` bypasses
