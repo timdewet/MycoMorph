@@ -407,6 +407,19 @@ class SegmentPanel(QWidget):
             self._loading = False
 
 
+class _RefreshOnPopupComboBox(QComboBox):
+    """A combo box that rebuilds its items just before its list opens, so
+    it shows what is on disk now rather than when the panel was built."""
+
+    def __init__(self, refresh: Callable[[], None], parent: QWidget | None = None) -> None:
+        super().__init__(parent)
+        self._refresh = refresh
+
+    def showPopup(self) -> None:  # noqa: N802 (Qt API)
+        self._refresh()
+        super().showPopup()
+
+
 class ClassifyPanel(QWidget):
     """Classifier options + small model-inspector. The combined
     Segment & Classify tab embeds this directly; the inspector lives
@@ -449,6 +462,17 @@ class ClassifyPanel(QWidget):
         path_row.addWidget(self.custom_path); path_row.addWidget(browse)
         path_wrap = QWidget(); path_wrap.setLayout(path_row)
 
+        # Runs trained in ModelPrep (~/.modelprep/models), listed by name.
+        # CNN runs only: Classify can't load a feature model. Picking one
+        # selects "custom…" and fills the path; Browse… still takes any .pth.
+        self.trained_run = _RefreshOnPopupComboBox(self.refresh_trained_runs)
+        self.trained_run.setToolTip(
+            "CNN models trained in ModelPrep (Labeller / trainer), by name and "
+            "date. Feature models aren't listed: Classify can't use them."
+        )
+        self.refresh_trained_runs()
+        self.trained_run.currentIndexChanged.connect(self._on_trained_run_picked)
+
         self.use_rules = QCheckBox("Apply rule-based pre-filter (edge / debris)")
         self.use_rules.setChecked(True)
 
@@ -472,6 +496,7 @@ class ClassifyPanel(QWidget):
         self._model_threshold_note.setWordWrap(True)
 
         form.addRow("Classifier:", self.preset)
+        form.addRow("Trained run:", self.trained_run)
         form.addRow("Custom model (.pth):", path_wrap)
         form.addRow("", self.use_rules)
         from PyQt6.QtWidgets import QVBoxLayout as _QVB
@@ -516,7 +541,7 @@ class ClassifyPanel(QWidget):
             "Open ModelPrep, the active-learning labeller and classifier "
             "trainer, in its own window. It opens on this output folder's "
             "04_features/all_crops.h5 (written when Features saves HDF5 "
-            "crops)."
+            "crops). Runs you train there appear under Trained run."
         )
         self._open_labeler_btn.clicked.connect(self.openLabelTrainerRequested.emit)
 
@@ -532,6 +557,7 @@ class ClassifyPanel(QWidget):
         self.inspector = ModelInspector()
 
         self.custom_path.textChanged.connect(self._refresh_inspector)
+        self.custom_path.textChanged.connect(self._sync_trained_run)
         self._refresh_inspector()
 
         # Fan in option-widget signals → optionsChanged.
@@ -549,6 +575,54 @@ class ClassifyPanel(QWidget):
         text = self.preset.currentText()
         self.custom_path.setEnabled(text == "custom…")
         self._refresh_inspector()
+        self._sync_trained_run()
+
+    def refresh_trained_runs(self) -> None:
+        """Re-list ModelPrep's trained CNN runs, keeping the selection."""
+        from mycomorph.modelprep.gui.trained_models import list_trained_models
+
+        try:
+            runs = [m for m in list_trained_models()
+                    if m.model_type != "features" and m.weights.is_file()]
+        except OSError:
+            runs = []
+        combo = self.trained_run
+        combo.blockSignals(True)
+        try:
+            combo.clear()
+            combo.addItem(
+                "(pick a run trained in ModelPrep)" if runs
+                else "(no trained runs in ~/.modelprep/models yet)",
+                None,
+            )
+            for m in runs:
+                combo.addItem(m.label(), str(m.weights))
+                combo.setItemData(combo.count() - 1, str(m.dir),
+                                  Qt.ItemDataRole.ToolTipRole)
+        finally:
+            combo.blockSignals(False)
+        self._sync_trained_run()
+
+    def _sync_trained_run(self, *_args) -> None:
+        """Show the run the custom path points at (placeholder otherwise)."""
+        idx = 0
+        if self.preset.currentText() == "custom…":
+            p = self.custom_path.text().strip()
+            if p:
+                found = self.trained_run.findData(str(Path(p)))
+                idx = max(found, 0)
+        self.trained_run.blockSignals(True)
+        self.trained_run.setCurrentIndex(idx)
+        self.trained_run.blockSignals(False)
+
+    def _on_trained_run_picked(self, index: int) -> None:
+        weights = self.trained_run.itemData(index)
+        if not weights:
+            # The placeholder is a prompt, not a choice: keep the model.
+            self._sync_trained_run()
+            return
+        self.preset.setCurrentText("custom…")
+        self.custom_path.setText(weights)
 
     def _pick_custom(self) -> None:
         path, _ = QFileDialog.getOpenFileName(self, "Select classifier .pth", "", "PyTorch (*.pth)")
