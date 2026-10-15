@@ -7,6 +7,11 @@ Subcommands:
   ``label``         — interactive labeller (matplotlib grid)
   ``review``        — review + correct an existing model's predictions
   ``train``         — train a binary cell-quality CNN from labelled HDF5 crops
+  ``feature-model`` — train the feature-based comparison model
+  ``evaluate``      — score a saved CNN or feature model on the current hold-out
+  ``learning-curve``— train on growing subsets, score each on the hold-out
+  ``consistency``   — summarise saved label-consistency checks
+  ``export``        — copy a trained CNN to a visible folder for MycoMorph
 """
 
 from __future__ import annotations
@@ -61,6 +66,13 @@ def resolve_classifier_preset(name: str) -> Path:
     raise FileNotFoundError(
         f"Unknown preset {name!r}. Bundled presets: {sorted(presets) or '(none)'}"
     )
+
+
+# ── Training defaults ────────────────────────────────────────────────────────
+# Fine-tuning from a model uses the GUI's defaults (the Fig. S2 runs used these);
+# training from scratch needs more epochs and a larger learning rate.
+FINE_TUNE_DEFAULTS = {"epochs": 40, "lr": 1e-4}
+SCRATCH_DEFAULTS = {"epochs": 80, "lr": 1e-3}
 
 
 # ── Default outputs ──────────────────────────────────────────────────────────
@@ -324,12 +336,23 @@ def train(
     ),
     output: Path = typer.Option(
         None, "--output", "-o",
-        help="Where to write best_model.pth + training_config.json. "
-             "Default: ~/.modelprep/models/trained_<ts>/",
+        help="Where to write best_model.pth + training_config.json. Default: "
+             "~/.modelprep/models/<name>_<date>/ (or trained_<ts>/ without --name).",
     ),
-    epochs: int = typer.Option(80, "--epochs", min=1),
+    name: Optional[str] = typer.Option(
+        None, "--name",
+        help="Model name, as on the GUI's Source page (names the run directory "
+             "and is recorded in training_config.json).",
+    ),
+    epochs: Optional[int] = typer.Option(
+        None, "--epochs", min=1,
+        help="Default: 40 when fine-tuning (--pretrained, as in the GUI), else 80.",
+    ),
     batch_size: int = typer.Option(32, "--batch-size", min=1),
-    lr: float = typer.Option(1e-3, "--lr", min=1e-7),
+    lr: Optional[float] = typer.Option(
+        None, "--lr", min=1e-7,
+        help="Default: 1e-4 when fine-tuning (--pretrained, as in the GUI), else 1e-3.",
+    ),
     val_fraction: float = typer.Option(0.2, "--val-fraction", min=0.01, max=0.9),
     test_fraction: float = typer.Option(
         0.15, "--test-fraction", min=0.0, max=0.8,
@@ -350,6 +373,12 @@ def train(
     device: Optional[str] = typer.Option(
         None, "--device",
         help="Torch device override: 'cuda', 'mps', 'cpu'. Default: auto-detect.",
+    ),
+    holdout: bool = typer.Option(
+        True, "--holdout/--no-holdout",
+        help="Report metrics on the frozen hold-out test set (the 'test' split in "
+             "labels.csv) when one exists, as the GUI does. --no-holdout splits "
+             "the training labels internally instead. Test cells are never trained on.",
     ),
 ) -> None:
     """Train the binary cell-quality CNN from labelled HDF5 crops."""
@@ -377,13 +406,25 @@ def train(
             typer.echo(f"ERROR: {e}", err=True)
             raise typer.Exit(code=2)
 
+    defaults = FINE_TUNE_DEFAULTS if pretrained_path else SCRATCH_DEFAULTS
+    epochs = epochs if epochs is not None else defaults["epochs"]
+    lr = lr if lr is not None else defaults["lr"]
+
     if output is None:
-        output = _default_output_dir()
+        if name:
+            from ..gui.trained_models import new_run_dir  # pure-Python helper
+            output = new_run_dir(name)
+        else:
+            output = _default_output_dir()
 
     reader = HDF5CropsReader(h5_path)
     store = LabelsStore(labels_dir_path)
     try:
         crops, labels, used_uids = store.to_training_dataset(reader)
+        if holdout:
+            eval_crops, eval_labels, eval_uids = store.to_eval_dataset(reader)
+        else:
+            eval_crops, eval_labels, eval_uids = np.empty((0,)), np.empty((0,), np.int64), []
     except ValueError as e:
         typer.echo(f"ERROR: {e}", err=True)
         raise typer.Exit(code=2)
@@ -392,22 +433,35 @@ def train(
 
     typer.echo(f"Training on {len(used_uids)} labelled cells "
                f"(crops shape={crops.shape}, labels shape={labels.shape})")
+    typer.echo(f"  {'fine-tuning from ' + pretrained_path.name if pretrained_path else 'from scratch'}: "
+               f"epochs={epochs} lr={lr:g}")
+    if len(eval_labels):
+        typer.echo(f"  evaluating on the frozen hold-out: {len(eval_labels)} cells")
+    elif holdout:
+        typer.echo("  no hold-out test set yet: metrics come from an internal split")
     typer.echo(f"Output dir: {output}")
     output.mkdir(parents=True, exist_ok=True)
 
     class_counts = {CLASS_NAMES[i]: int((labels == i).sum()) for i in range(NUM_CLASSES)}
     provenance = {
+        "model_name": name or output.name,
         "source_h5": h5_path.name,
         "labels_dir": str(labels_dir_path),
         "n_labelled": int(len(used_uids)),
         "used_uids_sha256": cell_uids_sha256(used_uids),
         "class_counts": class_counts,
+        "n_holdout": int(len(eval_uids)),
+        "holdout_class_counts": {CLASS_NAMES[i]: int((eval_labels == i).sum())
+                                 for i in range(NUM_CLASSES)},
         "labels_schema_version": LABELS_SCHEMA_VERSION,
+        "entry_point": "modelprep-cli train",
     }
 
     summary = run_train(
         crops=crops,
         labels=labels,
+        eval_crops=eval_crops if len(eval_labels) else None,
+        eval_labels=eval_labels if len(eval_labels) else None,
         output_dir=output,
         epochs=epochs,
         batch_size=batch_size,
@@ -429,7 +483,11 @@ def train(
     acc = summary.get("eval_acc")
     if acc is not None and acc == acc:  # not NaN
         typer.echo(f"  {split}_accuracy:  {acc:.3f}  (held-out)"
-                   if split == "test" else f"  {split}_accuracy:  {acc:.3f}")
+                   if split in ("test", "holdout") else f"  {split}_accuracy:  {acc:.3f}")
+        bal = summary.get("balanced_acc")
+        if bal is not None and bal == bal:
+            typer.echo(f"  balanced acc:    {bal:.3f}  (majority baseline "
+                       f"{summary.get('majority_baseline', float('nan')):.3f})")
     auc = summary.get("roc_auc")
     if auc is not None and auc == auc:
         typer.echo(f"  {split} ROC AUC:  {auc:.3f}   AP: {summary.get('average_precision', float('nan')):.3f}")
@@ -440,6 +498,11 @@ def train(
     if "no held-out test" in summary.get("split_note", ""):
         typer.echo("  NOTE: dataset too small for a held-out test set — metrics are "
                    "validation (optimistic). Label more cells for an honest estimate.")
+    from .train_classifier import single_class_warning
+    single = single_class_warning(summary.get("eval_class_counts") or {},
+                                  {"holdout": "hold-out"}.get(split, split))
+    if single:
+        typer.echo(f"  WARNING: {single}")
     typer.echo(f"  model:           {summary['model_path']}")
     typer.echo(f"  config:          {output / 'training_config.json'}")
 
@@ -501,6 +564,175 @@ def feature_model(
     typer.echo("\n  top features (permutation importance on hold-out):")
     for name, mean, std in summary["top_importances"]:
         typer.echo(f"    {name:28s} {mean:+.4f} ± {std:.4f}")
+
+
+def _resolve_model_arg(model: str) -> Path:
+    """A preset name, a .pth/.joblib file, or a run directory."""
+    p = Path(model).expanduser()
+    if p.exists():
+        return p
+    return resolve_classifier_preset(model)
+
+
+@app.command()
+def evaluate(
+    h5: Path = typer.Option(..., "--h5", "-i", exists=True),
+    model: str = typer.Option(
+        ..., "--model", "-m",
+        help="A run directory, best_model.pth, feature_model.joblib or preset name.",
+    ),
+    labels_dir: Optional[Path] = typer.Option(None, "--labels-dir"),
+    json_out: Optional[Path] = typer.Option(
+        None, "--json", help="Also write the result as JSON to this file."),
+    device: Optional[str] = typer.Option("cpu", "--device"),
+) -> None:
+    """Score a saved CNN or feature model on the CURRENT hold-out test set.
+
+    Use it to re-score older runs after the hold-out changed, or to compare runs
+    on one yardstick. holdout_sha256 identifies the exact (cell, label) set, so
+    only compare numbers that share it.
+    """
+    import json as _json
+
+    from .evaluate import evaluate_model
+
+    ld = labels_dir or default_labels_dir_for(h5)
+    try:
+        res = evaluate_model(h5, ld, _resolve_model_arg(model), device=device)
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=2)
+
+    cc = res["eval_class_counts"]
+    typer.echo(f"\n{res['model_type'].upper()} model on the current hold-out")
+    typer.echo("=" * 44)
+    typer.echo(f"  model:             {res['model_path']}")
+    typer.echo(f"  hold-out:          {res['n']} cells (good {cc.get('good', 0)} / "
+               f"bad {cc.get('bad', 0)})  sha256 {res['holdout_sha256'][:12]}")
+    if res.get("trained_on_holdout_n") not in (None, res["n"]):
+        typer.echo(f"  NOTE: the model reported metrics on a {res['trained_on_holdout_n']}-cell "
+                   "hold-out when trained; this is a different set.")
+    typer.echo(f"  accuracy:          {res['eval_acc']:.3f}   balanced: {res['balanced_acc']:.3f}"
+               f"   (majority baseline {res['majority_baseline']:.3f})")
+    typer.echo(f"  ROC AUC:           {res['roc_auc']:.3f}   AP: {res['average_precision']:.3f}")
+    c = res["confusion"]
+    typer.echo(f"  confusion:         tn={c['tn']} fp={c['fp']} fn={c['fn']} tp={c['tp']}")
+    if res.get("warning"):
+        typer.echo(f"  WARNING: {res['warning']}")
+    if json_out:
+        json_out.write_text(_json.dumps(res, indent=2))
+        typer.echo(f"  wrote {json_out}")
+
+
+@app.command(name="learning-curve")
+def learning_curve(
+    h5: Path = typer.Option(..., "--h5", "-i", exists=True),
+    labels_dir: Optional[Path] = typer.Option(None, "--labels-dir"),
+    points: int = typer.Option(5, "--points", min=2, max=12,
+                               help="Number of training-set sizes."),
+    epochs: int = typer.Option(25, "--epochs", min=1, help="Epochs per point."),
+    seed: int = typer.Option(42, "--seed"),
+    device: Optional[str] = typer.Option(None, "--device"),
+    output: Optional[Path] = typer.Option(
+        None, "--output", "-o",
+        help="Directory for curve.json + curve.csv. "
+             "Default: ~/.modelprep/learning_curves/<h5 stem>_<date>/",
+    ),
+) -> None:
+    """Train from scratch on growing, class-stratified subsets of the train
+    labels and score each on the frozen hold-out (same as the Models tab)."""
+    import csv
+    import json as _json
+
+    from .learning_curve import compute_learning_curve
+
+    ld = labels_dir or default_labels_dir_for(h5)
+    store = LabelsStore(ld)
+    with HDF5CropsReader(h5) as reader:
+        try:
+            tr_crops, tr_labels, _ = store.to_training_dataset(reader)
+        except ValueError as e:
+            typer.echo(f"ERROR: {e}", err=True)
+            raise typer.Exit(code=2)
+        ev_crops, ev_labels, _ = store.to_eval_dataset(reader)
+    if len(set(ev_labels.tolist())) < 2:
+        typer.echo("ERROR: the learning curve needs a hold-out test set with both "
+                   "good and bad cells.", err=True)
+        raise typer.Exit(code=2)
+
+    pts = compute_learning_curve(
+        tr_crops, tr_labels, ev_crops, ev_labels, n_points=points, epochs=epochs,
+        seed=seed, device=device,
+        progress_cb=lambda f, m: typer.echo(f"  [{f:4.0%}] {m}"),
+    )
+    if output is None:
+        from ..gui.trained_models import human_timestamp
+        output = Path.home() / ".modelprep" / "learning_curves" / f"{h5.stem}_{human_timestamp()}"
+    output.mkdir(parents=True, exist_ok=True)
+    (output / "curve.json").write_text(_json.dumps(
+        {"h5": str(h5), "labels_dir": str(ld), "epochs": epochs, "seed": seed,
+         "points": pts}, indent=2))
+    keys = ["n", "n_good", "n_bad", "roc_auc", "average_precision", "balanced_acc", "eval_acc"]
+    with open(output / "curve.csv", "w", newline="", encoding="utf-8") as f:
+        w = csv.DictWriter(f, fieldnames=keys)
+        w.writeheader()
+        w.writerows({k: p.get(k) for k in keys} for p in pts)
+
+    typer.echo(f"\n  {'n':>6}  {'AUC':>6}  {'AP':>6}  {'bal.acc':>7}")
+    for p in pts:
+        typer.echo(f"  {p['n']:>6}  {p['roc_auc']:>6.3f}  {p['average_precision']:>6.3f}"
+                   f"  {p['balanced_acc']:>7.3f}")
+    typer.echo(f"  wrote {output}")
+
+
+@app.command()
+def consistency(
+    labels_dir: Optional[Path] = typer.Option(
+        None, "--labels-dir", help="Labels directory (or give --h5)."),
+    h5: Optional[Path] = typer.Option(None, "--h5", "-i"),
+) -> None:
+    """Summarise the saved blind label-consistency checks (run them from the
+    GUI: Label cells > More > Consistency check)."""
+    import json as _json
+
+    if labels_dir is None and h5 is None:
+        typer.echo("ERROR: pass --labels-dir or --h5.", err=True)
+        raise typer.Exit(code=2)
+    ld = labels_dir or default_labels_dir_for(h5)
+    runs = sorted((ld / "consistency").glob("*/summary.json"))
+    if not runs:
+        typer.echo(f"No consistency checks saved under {ld / 'consistency'}.")
+        return
+    typer.echo(f"{'run':20s} {'mode':9s} {'n':>5s} {'agree':>6s} {'kappa':>6s}  band")
+    for f in runs:
+        r = _json.loads(f.read_text())
+        typer.echo(f"{f.parent.name:20s} {str(r.get('mode', '')):9s} {r.get('n', 0):>5} "
+                   f"{r.get('raw_agreement', float('nan')):>6.1%} "
+                   f"{r.get('cohen_kappa', float('nan')):>6.2f}  {r.get('kappa_band', '')}")
+        flips = r.get("flips") or {}
+        if flips:
+            typer.echo("    flips: " + ", ".join(
+                f"{a}->{b} {n}" for a, row in flips.items() for b, n in row.items() if a != b))
+
+
+@app.command()
+def export(
+    model: str = typer.Option(..., "--model", "-m",
+                              help="A CNN run directory or its best_model.pth."),
+    dest: Path = typer.Option(..., "--dest", "-d",
+                              help="Folder to export into (a subfolder is created)."),
+    name: Optional[str] = typer.Option(None, "--name",
+                                       help="Default: the run directory's name."),
+) -> None:
+    """Copy a trained CNN to a visible folder for MycoMorph's Custom-model picker."""
+    from .export import export_for_mycomorph
+
+    try:
+        pth = export_for_mycomorph(Path(model).expanduser(), dest, name=name)
+    except (FileNotFoundError, ValueError, OSError) as e:
+        typer.echo(f"ERROR: {e}", err=True)
+        raise typer.Exit(code=2)
+    typer.echo(f"OK: {pth}\nIn MycoMorph: Classify > Custom model > choose {pth.name}")
 
 
 def main() -> None:
