@@ -5,8 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import modelprep.gui.trained_models as tm
-from modelprep.gui.trained_models import list_trained_models
+import mycomorph.modelprep.gui.trained_models as tm
+from mycomorph.modelprep.gui.trained_models import list_trained_models
 
 
 def _make_run(root: Path, name: str, ts: str, **cfg) -> Path:

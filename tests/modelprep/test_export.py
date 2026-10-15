@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from modelprep.core.export import export_for_mycomorph
+from mycomorph.modelprep.core.export import export_for_mycomorph
 
 
 def _run(tmp_path, name="msm_v1_2026-06-14_15-01-07"):

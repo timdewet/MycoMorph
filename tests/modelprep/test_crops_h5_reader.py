@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from modelprep.core.crops_h5 import HDF5CropsReader
+from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
 
 
 def test_reader_opens_and_reports_summary(synthetic_h5):

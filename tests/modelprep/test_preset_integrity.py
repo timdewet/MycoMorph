@@ -36,7 +36,7 @@ def test_mtb_loads_and_runs():
     from mycomorph.core.cell_quality_classifier import (
         CROP_SIZE, NUM_CLASSES, CellQualityClassifier,
     )
-    from modelprep.core.cli import resolve_classifier_preset
+    from mycomorph.modelprep.core.cli import resolve_classifier_preset
 
     p = resolve_classifier_preset("mtb")
     clf = CellQualityClassifier(str(p), in_channels=3, device="cpu")

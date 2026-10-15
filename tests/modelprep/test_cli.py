@@ -9,8 +9,8 @@ import numpy as np
 import pytest
 from typer.testing import CliRunner
 
-from modelprep.core.cli import app
-from modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
+from mycomorph.modelprep.core.cli import app
+from mycomorph.modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
 
 runner = CliRunner()
 
@@ -70,7 +70,7 @@ def test_train_no_holdout_and_finetune_defaults(synthetic_h5, tmp_path):
 
 def test_evaluate_feature_model(synthetic_h5, tmp_path):
     pd = pytest.importorskip("pandas")
-    from modelprep.core.feature_classifier import train_and_save
+    from mycomorph.modelprep.core.feature_classifier import train_and_save
 
     ld = _labels(synthetic_h5, tmp_path)
     rng = np.random.default_rng(0)
@@ -93,7 +93,7 @@ def test_evaluate_feature_model(synthetic_h5, tmp_path):
 
 
 def test_learning_curve_consistency_and_export(synthetic_h5, tmp_path):
-    from modelprep.core.consistency import consistency_stats, save_consistency_run
+    from mycomorph.modelprep.core.consistency import consistency_stats, save_consistency_run
 
     ld = _labels(synthetic_h5, tmp_path)
     curve = tmp_path / "curve"
@@ -119,7 +119,7 @@ def test_evaluate_preprocesses_like_training(synthetic_h5, tmp_path, monkeypatch
     the phase channel to [0, 1] after the resize; re-scoring must too, or its
     numbers drift from the ones training reported."""
     import mycomorph.core.cell_quality_classifier as cqc
-    from modelprep.core.evaluate import evaluate_model
+    from mycomorph.modelprep.core.evaluate import evaluate_model
 
     ld = _labels(synthetic_h5, tmp_path)
     seen = []

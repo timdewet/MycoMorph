@@ -6,8 +6,8 @@ import os
 
 import numpy as np
 
-from modelprep.core import score_cache
-from modelprep.core.score_cache import ScoreCache
+from mycomorph.modelprep.core import score_cache
+from mycomorph.modelprep.core.score_cache import ScoreCache
 
 
 def _files(tmp_path):

@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from modelprep.core.train_classifier import (
+from mycomorph.modelprep.core.train_classifier import (
     _make_splits,
     _resolve_device,
     compute_class_weights,
@@ -95,7 +95,7 @@ def test_train_with_external_holdout(tmp_path):
 
 
 def test_single_class_warning():
-    from modelprep.core.train_classifier import single_class_warning
+    from mycomorph.modelprep.core.train_classifier import single_class_warning
 
     assert single_class_warning({"good": 5, "bad": 5}) is None
     assert single_class_warning({"good": 0, "bad": 0}) is None

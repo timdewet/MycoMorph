@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import json
 
-from modelprep.core.crop_provenance import crop_options, crop_warnings
+from mycomorph.modelprep.core.crop_provenance import crop_options, crop_warnings
 
 
 def _manifest(path, mask_background, classify=True):

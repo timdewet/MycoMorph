@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from modelprep.core.crops_h5 import CropRecord
-from modelprep.core.fov_context import FovContextProvider
+from mycomorph.modelprep.core.crops_h5 import CropRecord
+from mycomorph.modelprep.core.fov_context import FovContextProvider
 
 tifffile = pytest.importorskip("tifffile")
 
@@ -141,7 +141,7 @@ def test_online_only_detection():
     flags alone, so the inspector can avoid downloading 2 GB TIFFs (review L3)."""
     from types import SimpleNamespace
 
-    from modelprep.core.fov_context import is_online_only
+    from mycomorph.modelprep.core.fov_context import is_online_only
 
     assert is_online_only(SimpleNamespace(st_flags=0x40000060))      # macOS dataless
     assert not is_online_only(SimpleNamespace(st_flags=0x40))         # local

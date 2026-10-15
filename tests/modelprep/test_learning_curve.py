@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from modelprep.core.learning_curve import (
+from mycomorph.modelprep.core.learning_curve import (
     _nested_stratified_indices,
     compute_learning_curve,
 )

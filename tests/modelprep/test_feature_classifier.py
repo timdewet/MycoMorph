@@ -7,12 +7,12 @@ import pytest
 
 pd = pytest.importorskip("pandas")
 
-from modelprep.core.feature_classifier import (
+from mycomorph.modelprep.core.feature_classifier import (
     _feature_columns,
     load_feature_matrix,
     train_feature_classifier,
 )
-from modelprep.core.fragment_features import _features_for
+from mycomorph.modelprep.core.fragment_features import _features_for
 
 
 def _separable_matrix(n=120, seed=0):
@@ -92,7 +92,7 @@ def test_fragment_features_distinguish_cut_from_clean():
 
 
 def test_load_feature_matrix_joins_and_drops(synthetic_h5, tmp_path):
-    from modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
+    from mycomorph.modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
 
     # A morphometric table next to the crops h5.
     uids = [f"cell_{i:04d}" for i in range(32)]
@@ -122,7 +122,7 @@ def test_load_feature_matrix_joins_and_drops(synthetic_h5, tmp_path):
 
 
 def test_context_features_neighbours_and_overlap(tmp_path):
-    from modelprep.core.context_features import compute_context_features
+    from mycomorph.modelprep.core.context_features import compute_context_features
 
     # FOV 0: two cells 10px apart whose bboxes overlap. FOV 1: one lonely cell.
     df = pd.DataFrame({
@@ -149,7 +149,7 @@ def test_context_features_neighbours_and_overlap(tmp_path):
 
 def test_focus_sharpness_ranks_sharp_above_blurred():
     from scipy.ndimage import gaussian_filter
-    from modelprep.core.focus_features import _sharpness
+    from mycomorph.modelprep.core.focus_features import _sharpness
 
     rng = np.random.default_rng(0)
     sharp = rng.random((128, 128)).astype(np.float32)
@@ -159,7 +159,7 @@ def test_focus_sharpness_ranks_sharp_above_blurred():
 
 
 def test_focus_features_from_h5(synthetic_h5):
-    from modelprep.core.focus_features import compute_focus_features
+    from mycomorph.modelprep.core.focus_features import compute_focus_features
 
     foc = compute_focus_features(synthetic_h5)
     assert len(foc) == 32
@@ -168,7 +168,7 @@ def test_focus_features_from_h5(synthetic_h5):
 
 
 def test_crop_features_unified_pass(synthetic_h5):
-    from modelprep.core.crop_features import compute_crop_features
+    from mycomorph.modelprep.core.crop_features import compute_crop_features
 
     df = compute_crop_features(synthetic_h5, focus=True, fragment=True)
     assert len(df) == 32
@@ -177,7 +177,7 @@ def test_crop_features_unified_pass(synthetic_h5):
 
 def _planted_dataset(synthetic_h5, tmp_path):
     """A morphometric parquet with a separable signal + labels with a hold-out."""
-    from modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
+    from mycomorph.modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
 
     uids = [f"cell_{i:04d}" for i in range(32)]
     y = np.array([0] * 16 + [1] * 16)
@@ -201,7 +201,7 @@ def _planted_dataset(synthetic_h5, tmp_path):
 
 def test_train_and_save_writes_feature_run(synthetic_h5, tmp_path):
     import json
-    from modelprep.core.feature_classifier import train_and_save
+    from mycomorph.modelprep.core.feature_classifier import train_and_save
 
     labels_dir = _planted_dataset(synthetic_h5, tmp_path)
     out = tmp_path / "demo-features_2026-06-14_10-00-00"
@@ -216,7 +216,7 @@ def test_train_and_save_writes_feature_run(synthetic_h5, tmp_path):
 
 
 def test_missing_parquet_engine_is_a_one_line_error(tmp_path, monkeypatch):
-    from modelprep.core.context_features import read_features_table
+    from mycomorph.modelprep.core.context_features import read_features_table
 
     path = tmp_path / "all_features.parquet"
     path.write_bytes(b"")
@@ -233,7 +233,7 @@ def test_missing_parquet_engine_is_a_one_line_error(tmp_path, monkeypatch):
 
 
 def test_reporter_columns_match_mycomorph_naming():
-    from modelprep.core.feature_classifier import reporter_columns
+    from mycomorph.modelprep.core.feature_classifier import reporter_columns
 
     cols = ["solidity", "intensity_mean_Bright", "intensity_p95_Bright",
             "intensity_min_mCher", "intensity_total_mCher", "intensity_mean_C2"]
@@ -244,7 +244,7 @@ def test_reporter_columns_match_mycomorph_naming():
 def test_phase_only_drops_reporter_intensities(synthetic_h5, tmp_path):
     """Review M7: the feature model can be restricted to phase-derived
     information, and says what it dropped."""
-    from modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
+    from mycomorph.modelprep.core.labels_store import LabelRow, LabelsStore, SPLIT_TEST, SPLIT_TRAIN
 
     uids = [f"cell_{i:04d}" for i in range(32)]
     rng = np.random.default_rng(1)

@@ -7,11 +7,11 @@ from collections import Counter
 import numpy as np
 import pytest
 
-from modelprep.core import label_cells
-from modelprep.core.cell_filter import CellFilter, distinct_values
-from modelprep.core.crops_h5 import HDF5CropsReader
-from modelprep.core.label_cells import build_pool, sampling_record
-from modelprep.core.labels_store import LabelsStore
+from mycomorph.modelprep.core import label_cells
+from mycomorph.modelprep.core.cell_filter import CellFilter, distinct_values
+from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+from mycomorph.modelprep.core.label_cells import build_pool, sampling_record
+from mycomorph.modelprep.core.labels_store import LabelsStore
 
 
 def _pool(reader, cell_filter=None, *, exclude=(), n=1000, seed=42, **kw):
@@ -144,7 +144,7 @@ def test_sample_continues_after_labelling(multi_condition_h5):
 
 def test_exclusions_apply_within_filter(multi_condition_h5, tmp_path):
     """Already-labelled cells (incl. hold-out) are skipped inside the filter."""
-    from modelprep.core.labels_store import SPLIT_TEST, SPLIT_TRAIN, LabelRow
+    from mycomorph.modelprep.core.labels_store import SPLIT_TEST, SPLIT_TRAIN, LabelRow
 
     store = LabelsStore(tmp_path / "labels")
     store.append_batch([
@@ -213,7 +213,7 @@ def test_filtered_pools_share_the_score_cache(multi_condition_h5, tmp_path, monk
     """Scores cached while labelling one gene are reused when the filter
     changes: only cells not scored before are run through the model."""
     import mycomorph.core.cell_quality_classifier as cqc
-    from modelprep.core import score_cache
+    from mycomorph.modelprep.core import score_cache
 
     monkeypatch.setattr(score_cache, "score_cache_root", lambda: tmp_path / "cache")
     score_cache.clear_memory()
@@ -278,7 +278,7 @@ def test_record_session_stores_sampling_and_updates_in_place(multi_condition_h5,
 
 def test_cli_info_lists_filter_values(multi_condition_h5):
     from typer.testing import CliRunner
-    from modelprep.core.cli import app
+    from mycomorph.modelprep.core.cli import app
 
     out = CliRunner().invoke(app, ["info", "--h5", str(multi_condition_h5), "--values"])
     assert out.exit_code == 0, out.output
@@ -288,7 +288,7 @@ def test_cli_info_lists_filter_values(multi_condition_h5):
 
 def test_cli_label_passes_filter_and_seed(multi_condition_h5, monkeypatch):
     from typer.testing import CliRunner
-    from modelprep.core.cli import app
+    from mycomorph.modelprep.core.cli import app
 
     seen = {}
     monkeypatch.setattr(label_cells, "run_grid_labeling", lambda **kw: seen.update(kw))
@@ -310,7 +310,7 @@ def test_cli_label_passes_filter_and_seed(multi_condition_h5, monkeypatch):
 
 def test_cli_label_rejects_unknown_values(multi_condition_h5, monkeypatch):
     from typer.testing import CliRunner
-    from modelprep.core.cli import app
+    from mycomorph.modelprep.core.cli import app
 
     monkeypatch.setattr(label_cells, "run_grid_labeling",
                         lambda **kw: pytest.fail("labeller should not launch"))

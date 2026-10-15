@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 from pathlib import Path
 
-from modelprep.core.consistency import (
+from mycomorph.modelprep.core.consistency import (
     SAMPLE_BALANCED,
     SAMPLE_RANDOM,
     _kappa_band,
@@ -13,8 +13,8 @@ from modelprep.core.consistency import (
     sample_for_consistency,
     save_consistency_run,
 )
-from modelprep.core.crops_h5 import HDF5CropsReader
-from modelprep.core.labels_store import LabelRow, LabelsStore
+from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+from mycomorph.modelprep.core.labels_store import LabelRow, LabelsStore
 
 
 def _row(uid: str, name: str) -> LabelRow:

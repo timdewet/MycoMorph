@@ -225,9 +225,9 @@ def doctor() -> None:
     import platform
     import sys
 
-    import modelprep
+    from mycomorph import __version__
 
-    typer.echo(f"ModelPrep {modelprep.__version__}")
+    typer.echo(f"ModelPrep (MycoMorph {__version__})")
     typer.echo(f"Python    {platform.python_version()}  ({sys.platform})")
 
     for mod in ("numpy", "scipy", "sklearn", "skimage", "h5py", "pandas",

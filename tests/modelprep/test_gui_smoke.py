@@ -28,8 +28,8 @@ def _app():
 
 def test_main_window_constructs_and_navigates(isolated_home):
     app = _app()
-    from modelprep.gui.ui import theme
-    from modelprep.gui.main_window import MainWindow, settings_file
+    from mycomorph.modelprep.gui.ui import theme
+    from mycomorph.modelprep.gui.main_window import MainWindow, settings_file
 
     # Settings come from the temp HOME, so the user's last HDF5 isn't reopened.
     assert settings_file().is_relative_to(isolated_home)
@@ -45,8 +45,8 @@ def test_main_window_constructs_and_navigates(isolated_home):
 
 def test_panels_construct():
     app = _app()
-    from modelprep.gui.panels.source_panel import SourcePanel
-    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+    from mycomorph.modelprep.gui.panels.source_panel import SourcePanel
+    from mycomorph.modelprep.gui.panels.label_train_panel import LabelTrainPanel
 
     sp = SourcePanel()
     assert sp is not None
@@ -72,9 +72,9 @@ def _make_run(root, name, ts, **cfg):
 
 def test_models_panel_lists_sorts_and_deletes(tmp_path, monkeypatch):
     app = _app()
-    import modelprep.gui.trained_models as tm
-    import modelprep.gui.panels.models_panel as mp
-    from modelprep.gui.panels.models_panel import _COL
+    import mycomorph.modelprep.gui.trained_models as tm
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    from mycomorph.modelprep.gui.panels.models_panel import _COL
     from PyQt6.QtCore import Qt
     from PyQt6.QtWidgets import QMessageBox
 
@@ -109,9 +109,9 @@ def test_models_panel_lists_sorts_and_deletes(tmp_path, monkeypatch):
 def test_models_panel_shows_feature_runs(tmp_path, monkeypatch):
     app = _app()
     import json
-    import modelprep.gui.trained_models as tm
-    import modelprep.gui.panels.models_panel as mp
-    from modelprep.gui.panels.models_panel import _COL
+    import mycomorph.modelprep.gui.trained_models as tm
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    from mycomorph.modelprep.gui.panels.models_panel import _COL
 
     root = tmp_path / "models"
     root.mkdir()
@@ -148,8 +148,8 @@ def test_models_panel_shows_feature_runs(tmp_path, monkeypatch):
 
 def test_models_panel_learning_curve_gated_on_holdout(tmp_path):
     app = _app()
-    import modelprep.gui.panels.models_panel as mp
-    from modelprep.core.labels_store import LabelsStore, LabelRow, SPLIT_TRAIN, SPLIT_TEST
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    from mycomorph.modelprep.core.labels_store import LabelsStore, LabelRow, SPLIT_TRAIN, SPLIT_TEST
 
     panel = mp.ModelsPanel()
     # Section exists; Run is disabled with no source.
@@ -181,8 +181,8 @@ def test_models_panel_learning_curve_runs_end_to_end(tmp_path, synthetic_h5, mon
     from pathlib import Path
 
     app = _app()
-    import modelprep.gui.panels.models_panel as mp
-    from modelprep.core.labels_store import LabelsStore, LabelRow, SPLIT_TRAIN, SPLIT_TEST
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    from mycomorph.modelprep.core.labels_store import LabelsStore, LabelRow, SPLIT_TRAIN, SPLIT_TEST
 
     labels_dir = synthetic_h5.parent / "modelprep_labels"
     store = LabelsStore(labels_dir)
@@ -224,8 +224,8 @@ def test_consistency_dialog_samples_scores_and_saves(synthetic_h5):
     import time
 
     app = _app()
-    from modelprep.core.labels_store import LabelsStore, LabelRow
-    from modelprep.gui.panels.consistency_dialog import ConsistencyCheckDialog
+    from mycomorph.modelprep.core.labels_store import LabelsStore, LabelRow
+    from mycomorph.modelprep.gui.panels.consistency_dialog import ConsistencyCheckDialog
 
     labels_dir = synthetic_h5.parent / "modelprep_labels"
     store = LabelsStore(labels_dir)
@@ -264,8 +264,8 @@ def test_feature_model_skip_reason_is_one_line(tmp_path, monkeypatch):
     """A missing parquet engine (or any other error) surfaces as a short skip
     reason under the CNN results, never as pandas' multi-line ImportError."""
     _app()
-    import modelprep.core.feature_classifier as fc
-    from modelprep.gui.panels.label_train_panel import _TrainWorker
+    import mycomorph.modelprep.core.feature_classifier as fc
+    from mycomorph.modelprep.gui.panels.label_train_panel import _TrainWorker
 
     worker = _TrainWorker(
         tmp_path / "all_crops.h5", tmp_path / "labels",
@@ -310,8 +310,8 @@ def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_pat
     (review M9)."""
     import math
     import mycomorph.core.cell_quality_classifier as cqc
-    from modelprep.core.labels_store import LabelsStore
-    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+    from mycomorph.modelprep.core.labels_store import LabelsStore
+    from mycomorph.modelprep.gui.panels.label_train_panel import LabelTrainPanel
 
     app = _app()
 
@@ -346,8 +346,8 @@ def test_pool_scores_are_cached_per_model_and_h5(synthetic_h5, tmp_path, monkeyp
     """A second Load pool with the same model + HDF5 doesn't rescore (review M5)."""
     import numpy as np
     import mycomorph.core.cell_quality_classifier as cqc
-    import modelprep.core.score_cache as sc
-    from modelprep.gui.panels.label_train_panel import _ActiveLearningWorker
+    import mycomorph.modelprep.core.score_cache as sc
+    from mycomorph.modelprep.gui.panels.label_train_panel import _ActiveLearningWorker
 
     _app()
     monkeypatch.setattr(sc, "score_cache_root", lambda: tmp_path / "cache")
@@ -389,8 +389,8 @@ def test_inspector_defaults_to_crop_when_originals_are_online_only(synthetic_h5)
     opens on the isolated crop and says why (review L3)."""
     from types import SimpleNamespace
 
-    from modelprep.core.crops_h5 import HDF5CropsReader
-    from modelprep.gui.panels.cell_detail_dialog import CellDetailView
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+    from mycomorph.modelprep.gui.panels.cell_detail_dialog import CellDetailView
 
     _app()
     with HDF5CropsReader(synthetic_h5) as r:
@@ -413,8 +413,8 @@ def test_label_page_wording_follows_state(synthetic_h5, tmp_path):
     rubric link resolves."""
     from pathlib import Path
 
-    from modelprep.gui._resources import rubric_location
-    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+    from mycomorph.modelprep.gui._resources import rubric_location
+    from mycomorph.modelprep.gui.panels.label_train_panel import LabelTrainPanel
 
     _app()
     panel = LabelTrainPanel()
@@ -436,7 +436,7 @@ def test_inspector_names_the_eval_split(tmp_path):
     """The model card said 'Val accuracy' for hold-out numbers (review M4)."""
     import json
 
-    from modelprep.gui.widgets.model_inspector import ModelInspector
+    from mycomorph.modelprep.gui.widgets.model_inspector import ModelInspector
 
     _app()
     run = tmp_path / "demo_2026-06-14_10-00-00"
@@ -458,9 +458,9 @@ def test_models_panel_exports_cnn_runs_only(tmp_path, monkeypatch):
     folder; feature runs can't be exported."""
     import json
 
-    import modelprep.gui.export_action as ea
-    import modelprep.gui.panels.models_panel as mp
-    import modelprep.gui.trained_models as tm
+    import mycomorph.modelprep.gui.export_action as ea
+    import mycomorph.modelprep.gui.panels.models_panel as mp
+    import mycomorph.modelprep.gui.trained_models as tm
     from PyQt6.QtWidgets import QMessageBox
 
     _app()
@@ -496,7 +496,7 @@ def test_source_page_warns_about_masked_crops(synthetic_h5):
     """Review H5: masked-background crops are flagged when the HDF5 loads."""
     import h5py
 
-    from modelprep.gui.panels.source_panel import SourcePanel
+    from mycomorph.modelprep.gui.panels.source_panel import SourcePanel
 
     _app()
     with h5py.File(synthetic_h5, "a") as f:
@@ -508,9 +508,9 @@ def test_source_page_warns_about_masked_crops(synthetic_h5):
 
 def test_label_panel_condition_filter(multi_condition_h5, tmp_path):
     app = _app()
-    from modelprep.core.cell_filter import CellFilter
-    from modelprep.core.labels_store import CSV_COLUMNS, LabelsStore
-    from modelprep.gui.panels.label_train_panel import LabelTrainPanel
+    from mycomorph.modelprep.core.cell_filter import CellFilter
+    from mycomorph.modelprep.core.labels_store import CSV_COLUMNS, LabelsStore
+    from mycomorph.modelprep.gui.panels.label_train_panel import LabelTrainPanel
 
     labels_dir = tmp_path / "labels"
     panel = LabelTrainPanel()
@@ -592,9 +592,9 @@ def test_label_panel_condition_filter(multi_condition_h5, tmp_path):
 def test_cell_filter_dialog(multi_condition_h5):
     app = _app()
     from PyQt6.QtCore import Qt
-    from modelprep.core.cell_filter import CellFilter
-    from modelprep.core.crops_h5 import HDF5CropsReader
-    from modelprep.gui.panels.cell_filter_dialog import CellFilterDialog
+    from mycomorph.modelprep.core.cell_filter import CellFilter
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+    from mycomorph.modelprep.gui.panels.cell_filter_dialog import CellFilterDialog
 
     def tick(dlg, field, value):
         lst = dlg._lists[field]

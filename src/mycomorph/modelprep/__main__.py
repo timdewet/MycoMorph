@@ -1,6 +1,6 @@
-"""Allow ``python -m modelprep`` to launch the GUI."""
+"""Allow ``python -m mycomorph.modelprep`` to launch the GUI."""
 
-from modelprep.gui.app import main
+from mycomorph.modelprep.gui.app import main
 
 if __name__ == "__main__":
     main()

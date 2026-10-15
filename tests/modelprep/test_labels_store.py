@@ -9,7 +9,7 @@ import pytest
 
 import csv
 
-from modelprep.core.labels_store import (
+from mycomorph.modelprep.core.labels_store import (
     SPLIT_TEST,
     SPLIT_TRAIN,
     LabelRow,
@@ -82,7 +82,7 @@ def test_manifest_mismatch_raises(tmp_path: Path, synthetic_h5):
 
 
 def test_to_training_dataset_round_trip(tmp_path: Path, synthetic_h5):
-    from modelprep.core.crops_h5 import HDF5CropsReader
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
 
     store = LabelsStore(tmp_path / "labels")
     store.ensure_initialised(
@@ -133,7 +133,7 @@ def test_split_round_trips_and_counts(tmp_path: Path, synthetic_h5):
 
 
 def test_train_and_eval_datasets_are_disjoint(tmp_path: Path, synthetic_h5):
-    from modelprep.core.crops_h5 import HDF5CropsReader
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
 
     store = LabelsStore(tmp_path / "labels")
     store.ensure_initialised(
@@ -160,7 +160,7 @@ def test_train_and_eval_datasets_are_disjoint(tmp_path: Path, synthetic_h5):
 
 
 def test_eval_dataset_empty_without_test_rows(tmp_path: Path, synthetic_h5):
-    from modelprep.core.crops_h5 import HDF5CropsReader
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
 
     store = LabelsStore(tmp_path / "labels")
     store.ensure_initialised(
@@ -259,7 +259,7 @@ def test_legacy_code_page_rows_still_load(tmp_path: Path, monkeypatch, capsys,
     """Rows an older ModelPrep wrote on Windows (cp1252), mixed with UTF-8
     rows from a Mac, load with a one-line warning instead of crashing — and
     keep loading after a new append (which migrates an old-schema file)."""
-    from modelprep.core import labels_store as ls
+    from mycomorph.modelprep.core import labels_store as ls
 
     monkeypatch.setattr(ls, "_legacy_encoding", lambda: "cp1252")
     labels_dir = tmp_path / "labels"
