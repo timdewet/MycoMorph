@@ -71,10 +71,3 @@ def test_get_labeled_mask_from_fov_labels_mask_channel(tmp_path: Path):
     assert labeled[17, 17] != labeled[18, 18]
     assert len(np.unique(labeled[2:6, 2:8])) == 1
 
-
-def test_label_cells_reexports_hyperstack_helpers():
-    # Kept for old importers until Phase E retires label_cells.
-    from mycomorph.core import hyperstack, label_cells
-
-    assert label_cells.load_hyperstack is hyperstack.load_hyperstack
-    assert label_cells.get_labeled_mask_from_fov is hyperstack.get_labeled_mask_from_fov

@@ -875,8 +875,9 @@ def main():
     if fmt == "tiff" and args.sample:
         print()
         print("Next steps (training workflow):")
-        print(f"  1. Label:  python label_cells.py -i {output_dir} -s <labeled_data_path>")
-        print(f"  2. Train:  python train_classifier.py --data <labeled_data_path> --output <model_dir> --gpu")
+        print("  Label and train in ModelPrep (`modelprep`, or `modelprep-cli label` /")
+        print("  `modelprep-cli train`). It reads the all_crops.h5 that MycoMorph's")
+        print("  Features stage writes with \"Save HDF5 crops\" on.")
 
 
 if __name__ == "__main__":
