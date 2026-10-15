@@ -53,3 +53,25 @@ def test_h5_attribute_wins_over_manifest(synthetic_h5):
         del f.attrs["crop_options"]
         f.attrs["mask_background"] = False
     assert crop_options(synthetic_h5)["mask_background"] is False
+
+
+def test_classifier_prefilter_attr_overrides_manifest(synthetic_h5):
+    """MycoMorph records classifier_prefilter on the HDF5; a known value wins
+    over run_manifest.json, and 'unknown' falls back to it."""
+    import h5py
+
+    _manifest(synthetic_h5.parent / "run_manifest.json", mask_background=False, classify=True)
+    with h5py.File(synthetic_h5, "a") as f:
+        f.attrs["classifier_prefilter"] = "none"     # Classify ran but filtered nothing
+    assert crop_warnings(synthetic_h5) == []
+
+    with h5py.File(synthetic_h5, "a") as f:
+        f.attrs["classifier_prefilter"] = "cnn"
+        f.attrs["classifier_prefilter_model_sha256"] = "ab" * 32
+    (w,) = crop_warnings(synthetic_h5)
+    assert "CNN removed cells" in w and "abababababab" in w
+
+    with h5py.File(synthetic_h5, "a") as f:
+        f.attrs["classifier_prefilter"] = "unknown"
+    (w,) = crop_warnings(synthetic_h5)
+    assert "Classify ran before Features" in w        # manifest fallback

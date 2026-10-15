@@ -5,12 +5,14 @@ with the median (``mask_background``, on by default in its GUI). The crops its
 classifier sees at inference are *not* masked, so a model trained on masked
 crops is trained on different images from the ones it will judge.
 
-The setting is read from the HDF5 itself when MycoMorph records it (an
-``mask_background`` attribute, or a JSON ``crop_options`` attribute), else from
-the pipeline's ``run_manifest.json`` (beside the HDF5 or one folder up, i.e.
-two levels above the file), whose ``Features`` stage lists its options. The
-manifest also shows whether Classify ran before Features, which means the
-HDF5 probably holds only cells the previous model kept.
+Both facts are read from the HDF5 itself when MycoMorph records them (root
+attributes ``mask_background`` and ``classifier_prefilter`` = "cnn" | "rules" |
+"none" | "unknown", plus ``classifier_prefilter_model_sha256``; a JSON
+``crop_options`` attribute is also accepted). A missing or "unknown" value falls
+back to the pipeline's ``run_manifest.json`` (beside the HDF5 or one folder up,
+i.e. two levels above the file): its ``Features`` stage lists the crop options,
+and a Classify stage before it means the HDF5 probably holds only cells the
+previous model kept.
 """
 
 from __future__ import annotations
@@ -36,27 +38,46 @@ def _as_bool(v: Any) -> Optional[bool]:
     return None
 
 
-def _from_h5(h5_path: Path) -> Optional[dict]:
+def _str_attr(v: Any) -> str:
+    return (v.decode() if isinstance(v, bytes) else str(v)).strip()
+
+
+def _from_h5(h5_path: Path) -> dict:
+    """Known values recorded on the HDF5 (unknown ones are left out)."""
     import h5py
 
     try:
         with h5py.File(str(h5_path), "r") as f:
             attrs = dict(f.attrs)
     except OSError:
-        return None
+        return {}
+    out: dict = {}
+    mb = None
     if "mask_background" in attrs:
-        return {"mask_background": _as_bool(attrs["mask_background"]), "source": "HDF5 attribute"}
-    for key in _OPTION_ATTRS:
-        if key in attrs:
-            raw = attrs[key]
+        mb = _as_bool(attrs["mask_background"])
+    else:
+        for key in _OPTION_ATTRS:
+            if key not in attrs:
+                continue
             try:
-                opts = json.loads(raw.decode() if isinstance(raw, bytes) else str(raw))
+                opts = json.loads(_str_attr(attrs[key]))
             except ValueError:
                 continue
             if isinstance(opts, dict) and "mask_background" in opts:
-                return {"mask_background": _as_bool(opts["mask_background"]),
-                        "source": f"HDF5 attribute {key}"}
-    return None
+                mb = _as_bool(opts["mask_background"])
+                break
+    if mb is not None:
+        out.update(mask_background=mb, source="HDF5 attributes")
+
+    prefilter = _str_attr(attrs.get("classifier_prefilter", "")).lower()
+    if prefilter in ("cnn", "rules", "none"):
+        out["classifier_prefilter"] = prefilter
+        out["classify_before_features"] = prefilter == "cnn"
+        sha = _str_attr(attrs.get("classifier_prefilter_model_sha256", ""))
+        if sha:
+            out["classifier_prefilter_model_sha256"] = sha
+        out.setdefault("source", "HDF5 attributes")
+    return out
 
 
 def find_run_manifest(h5_path: Path) -> Optional[Path]:
@@ -98,9 +119,7 @@ def crop_options(h5_path: Path) -> dict:
     manifest = find_run_manifest(h5_path)
     if manifest is not None:
         info.update(_from_manifest(manifest))
-    h5 = _from_h5(h5_path)
-    if h5 is not None:  # the HDF5's own record wins over the manifest
-        info.update(h5)
+    info.update(_from_h5(h5_path))  # the HDF5's own record wins over the manifest
     return info
 
 
@@ -114,7 +133,14 @@ def crop_warnings(h5_path: Path, info: Optional[dict] = None) -> list[str]:
             f"per {info.get('source', 'the run')}): everything outside each cell is "
             "blanked, but MycoMorph classifies unmasked crops, so a model trained on "
             "them won't see what it sees at inference. Re-extract with masking off.")
-    if info.get("classify_before_features"):
+    if info.get("classifier_prefilter") == "cnn":
+        sha = info.get("classifier_prefilter_model_sha256", "")
+        out.append(
+            "Classify's CNN removed cells before these crops were cut (per the HDF5"
+            f"{', model sha256 ' + sha[:12] if sha else ''}), so they hold only cells "
+            "that model kept: cells it wrongly rejected never reach the labeller, and "
+            "hold-out metrics are conditional on that filter.")
+    elif info.get("classify_before_features"):
         out.append(
             "Classify ran before Features in this pipeline run, so the HDF5 probably "
             "holds only cells the previous model kept: cells it wrongly rejected never "
