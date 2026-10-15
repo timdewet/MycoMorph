@@ -27,7 +27,22 @@ import threading
 import numpy as np
 from pathlib import Path
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# The block below is hash-checked against ModelPrep's copy
+# (tests/test_classifier_model_def.py in both repos), so it must stay
+# byte-identical: edit both copies together and refresh GOLDEN_SHA in both.
+# Its "MycoPrep" path is MycoMorph's former name; the text is left as is
+# because changing it changes the hash.
+
+# ── BEGIN SHARED MODEL DEFINITION ─────────────────────────────────────────────
+# Keep byte-identical with:
+#   MycoPrep:   src/mycoprep/core/cell_quality_classifier.py
+#   ModelPrep:  src/modelprep/core/cell_quality_classifier.py
+#
+# Anything inside this block is reproduced verbatim across both repos. A drift-
+# guard test in each repo hashes the block and fails on mismatch. If you need
+# to change the architecture, the area-channel logic, or the CellQualityClassifier
+# loader, update BOTH copies in the same commit and refresh the golden hash.
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Binary classification: good (0) vs bad (1)
 CLASS_NAMES = ["good", "bad"]
@@ -114,6 +129,145 @@ def _append_area_channel_batch(crops, true_areas_px=None):
     area_ch = np.broadcast_to(vals, mask.shape).copy()  # (N, 1, H, W)
     return np.concatenate([crops, area_ch], axis=1)
 
+
+# ── CNN model ─────────────────────────────────────────────────────────────────
+
+def _build_model(in_channels, num_classes=NUM_CLASSES):
+    """
+    Build a lightweight CNN for cell quality classification.
+
+    Architecture:
+        4 conv blocks (Conv2d → BatchNorm → ReLU → MaxPool2×2)
+        Global Average Pooling → Dropout → FC → num_classes
+
+    With CROP_SIZE=64, after 4 max-pools: 64→32→16→8→4, then GAP → 256-d.
+    Total ~400K parameters — trainable on a few hundred labelled cells.
+    """
+    import torch
+    import torch.nn as nn
+
+    class ConvBlock(nn.Module):
+        def __init__(self, c_in, c_out, kernel=3, pad=1):
+            super().__init__()
+            self.block = nn.Sequential(
+                nn.Conv2d(c_in, c_out, kernel, padding=pad, bias=False),
+                nn.BatchNorm2d(c_out),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
+            )
+
+        def forward(self, x):
+            return self.block(x)
+
+    class CellQualityCNN(nn.Module):
+        def __init__(self, c_in, n_cls):
+            super().__init__()
+            self.features = nn.Sequential(
+                ConvBlock(c_in, 32),
+                ConvBlock(32, 64),
+                ConvBlock(64, 128),
+                ConvBlock(128, 256),
+            )
+            self.classifier = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Dropout(0.5),
+                nn.Linear(256, n_cls),
+            )
+
+        def forward(self, x):
+            x = self.features(x)
+            x = self.classifier(x)
+            return x
+
+    return CellQualityCNN(in_channels, num_classes)
+
+
+# ── Classifier wrapper ────────────────────────────────────────────────────────
+
+class CellQualityClassifier:
+    """
+    Wrapper that loads a trained CNN and classifies cell crops.
+
+    Usage:
+        clf = CellQualityClassifier("model.pth", in_channels=3)
+        predictions = clf.predict_batch(crops_array)
+    """
+
+    def __init__(self, model_path, in_channels, device=None):
+        import torch
+
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        self.device = device
+        self.model = _build_model(in_channels, NUM_CLASSES)
+
+        state = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(state)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def predict_single(self, crop):
+        """
+        Classify a single cell crop.
+
+        Args:
+            crop: (C, CROP_SIZE, CROP_SIZE) float32 numpy array
+
+        Returns:
+            class_idx: int
+            class_name: str
+            probabilities: (NUM_CLASSES,) array
+        """
+        import torch
+
+        x = torch.from_numpy(crop).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            logits = self.model(x)
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
+        class_idx = int(probs.argmax())
+        return class_idx, CLASS_NAMES[class_idx], probs
+
+    def predict_batch(self, crops, batch_size=64):
+        """
+        Classify a batch of cell crops.
+
+        Args:
+            crops: (N, C, CROP_SIZE, CROP_SIZE) float32 numpy array
+            batch_size: processing batch size
+
+        Returns:
+            class_indices: (N,) int array
+            probabilities: (N, NUM_CLASSES) array
+        """
+        import torch
+
+        all_probs = []
+
+        for i in range(0, len(crops), batch_size):
+            batch = torch.from_numpy(crops[i:i + batch_size]).to(self.device)
+            with torch.no_grad():
+                logits = self.model(batch)
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+            all_probs.append(probs)
+
+        all_probs = np.concatenate(all_probs, axis=0)
+        class_indices = all_probs.argmax(axis=1)
+
+        return class_indices, all_probs
+
+
+# ── END SHARED MODEL DEFINITION ───────────────────────────────────────────────
+# Below: MycoMorph-only inference helpers (crop extraction, rule-based
+# filters, classifier cache and the mask filter). ModelPrep doesn't have
+# these; it trains on pre-extracted HDF5 crops.
 
 # Default thresholds for rule-based pre-filtering
 EDGE_MARGIN = 2        # Pixels from border to count as edge cell
@@ -300,147 +454,6 @@ def detect_large_clumps(labeled_mask, pixels_per_um=13.8767, max_area_um2=MAX_AR
             large_labels.add(label)
 
     return large_labels
-
-
-# ── CNN model ─────────────────────────────────────────────────────────────────
-
-def _build_model(in_channels, num_classes=NUM_CLASSES):
-    """
-    Build a lightweight CNN for cell quality classification.
-
-    Architecture:
-        4 conv blocks (Conv2d → BatchNorm → ReLU → MaxPool2×2)
-        Global Average Pooling → Dropout → FC → num_classes
-
-    With CROP_SIZE=64, after 4 max-pools: 64→32→16→8→4, then GAP → 256-d.
-    Total ~400K parameters — trainable on a few hundred labelled cells.
-
-    Args:
-        in_channels: number of input channels (imaging channels + 1 mask channel)
-        num_classes: number of output classes
-
-    Returns:
-        PyTorch nn.Module
-    """
-    import torch
-    import torch.nn as nn
-
-    class ConvBlock(nn.Module):
-        def __init__(self, c_in, c_out, kernel=3, pad=1):
-            super().__init__()
-            self.block = nn.Sequential(
-                nn.Conv2d(c_in, c_out, kernel, padding=pad, bias=False),
-                nn.BatchNorm2d(c_out),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(2),
-            )
-
-        def forward(self, x):
-            return self.block(x)
-
-    class CellQualityCNN(nn.Module):
-        def __init__(self, c_in, n_cls):
-            super().__init__()
-            self.features = nn.Sequential(
-                ConvBlock(c_in, 32),
-                ConvBlock(32, 64),
-                ConvBlock(64, 128),
-                ConvBlock(128, 256),
-            )
-            self.classifier = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Dropout(0.5),
-                nn.Linear(256, n_cls),
-            )
-
-        def forward(self, x):
-            x = self.features(x)
-            x = self.classifier(x)
-            return x
-
-    return CellQualityCNN(in_channels, num_classes)
-
-
-# ── Classifier wrapper ────────────────────────────────────────────────────────
-
-class CellQualityClassifier:
-    """
-    Wrapper that loads a trained CNN and classifies cell crops.
-
-    Usage:
-        clf = CellQualityClassifier("model.pth", in_channels=4)
-        predictions = clf.predict_batch(crops_array)
-    """
-
-    def __init__(self, model_path, in_channels, device=None):
-        import torch
-
-        if device is None:
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
-        self.device = device
-        self.model = _build_model(in_channels, NUM_CLASSES)
-
-        state = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(state)
-        self.model.to(self.device)
-        self.model.eval()
-
-    def predict_single(self, crop):
-        """
-        Classify a single cell crop.
-
-        Args:
-            crop: (C, CROP_SIZE, CROP_SIZE) float32 numpy array
-
-        Returns:
-            class_idx: int
-            class_name: str
-            probabilities: (NUM_CLASSES,) array
-        """
-        import torch
-
-        x = torch.from_numpy(crop).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            logits = self.model(x)
-            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
-        class_idx = int(probs.argmax())
-        return class_idx, CLASS_NAMES[class_idx], probs
-
-    def predict_batch(self, crops, batch_size=64):
-        """
-        Classify a batch of cell crops.
-
-        Args:
-            crops: (N, C, CROP_SIZE, CROP_SIZE) float32 numpy array
-            batch_size: processing batch size
-
-        Returns:
-            class_indices: (N,) int array
-            probabilities: (N, NUM_CLASSES) array
-        """
-        import torch
-
-        all_probs = []
-
-        for i in range(0, len(crops), batch_size):
-            batch = torch.from_numpy(crops[i:i + batch_size]).to(self.device)
-            with torch.no_grad():
-                logits = self.model(batch)
-                probs = torch.softmax(logits, dim=1).cpu().numpy()
-            all_probs.append(probs)
-
-        all_probs = np.concatenate(all_probs, axis=0)
-        class_indices = all_probs.argmax(axis=1)
-
-        return class_indices, all_probs
 
 
 # Constructing a CellQualityClassifier means a torch.load + load_state_dict
