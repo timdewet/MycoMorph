@@ -89,7 +89,7 @@ def _head_hash(path: Path, n_bytes: int = 1024) -> str:
     """Cheap fingerprint for the source HDF5 — first ``n_bytes`` bytes.
 
     NOTE: for an HDF5 file the first KB is the superblock / root-group
-    metadata, which is identical across files written by the same MycoPrep
+    metadata, which is identical across files written by the same MycoMorph
     version. It is kept only as a fast pre-check; ``cell_uids_sha256`` below is
     the authoritative, content-bearing fingerprint.
     """

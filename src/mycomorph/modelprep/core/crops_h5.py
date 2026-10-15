@@ -1,8 +1,8 @@
-"""HDF5 crops adapter — projects MycoPrep's ``all_crops.h5`` into the
+"""HDF5 crops adapter — projects MycoMorph's ``all_crops.h5`` into the
 classifier-ready ``(3, 64, 64)`` = [phase, mask, area] shape.
 
-This is the single boundary between MycoPrep and ModelPrep. The schema is the
-one written by ``mycoprep.core.extract.crops``:
+This is the single boundary between MycoMorph and ModelPrep. The schema is the
+one written by ``mycomorph.core.extract.crops``:
 
     crops             (N, C, 128, 128)  float32, per-channel min-max into [0, 1]
     cell_uids         (N,)              str       — primary key
@@ -59,14 +59,14 @@ class CropRecord:
 
 
 class HDF5CropsReader:
-    """Random-access reader for an ``all_crops.h5`` produced by MycoPrep.
+    """Random-access reader for an ``all_crops.h5`` produced by MycoMorph.
 
     The reader is read-only: it never mutates the HDF5. Open files use
-    ``swmr=True`` so MycoPrep can keep writing if it ever does (today it
+    ``swmr=True`` so MycoMorph can keep writing if it ever does (today it
     doesn't, but the cost is zero).
 
     ``classifier_size`` controls the resize applied to the [phase, mask] pair
-    before the area channel is appended. The bundled MycoPrep classifier was
+    before the area channel is appended. The bundled MycoMorph classifier was
     trained at 64×64, which is also ``CROP_SIZE``. Don't change this unless
     you're training a new architecture.
     """
@@ -111,7 +111,7 @@ class HDF5CropsReader:
         self._classifier_size = int(classifier_size)
 
         # Channel-name resolution mirrors the pattern in
-        # mycoprep.core.autoencoder.dataset._select_channels.
+        # mycomorph.core.autoencoder.dataset._select_channels.
         raw_names = self._h5.attrs.get("channel_names", [])
         self._channel_names = [_decode(s) for s in list(raw_names)]
         lower = [n.lower() for n in self._channel_names]

@@ -10,7 +10,7 @@ import pytest
 
 @pytest.fixture
 def synthetic_h5(tmp_path: Path) -> Path:
-    """Create a tiny ``all_crops.h5`` file matching MycoPrep's schema.
+    """Create a tiny ``all_crops.h5`` file matching MycoMorph's schema.
 
     Schema is the minimum the ModelPrep reader expects: crops dataset,
     cell_uids, areas_px, and basic metadata.

@@ -2,7 +2,7 @@
 """
 Interactive cell-quality labeller — ModelPrep
 =============================================
-Matplotlib grid labeller that reads pre-extracted crops from MycoPrep's
+Matplotlib grid labeller that reads pre-extracted crops from MycoMorph's
 ``all_crops.h5`` and persists labels to ``modelprep_labels/labels.csv``
 alongside the HDF5.
 

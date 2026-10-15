@@ -3,7 +3,7 @@
 The block between ``# ── BEGIN SHARED MODEL DEFINITION ──`` and
 ``# ── END SHARED MODEL DEFINITION ──`` in
 ``modelprep/core/cell_quality_classifier.py`` MUST be byte-identical to the
-corresponding block in MycoPrep's copy. This test computes the SHA-256 of the
+corresponding block in MycoMorph's copy. This test computes the SHA-256 of the
 ModelPrep block and compares against ``GOLDEN_SHA``.
 
 When the architecture / area channel / classifier loader legitimately changes:
@@ -12,7 +12,7 @@ When the architecture / area channel / classifier loader legitimately changes:
   3. Paste the new SHA into both repos' ``GOLDEN_SHA``.
 
 Set ``MODELPREP_SIBLING_CLF`` to the path of the sibling repo's
-``cell_quality_classifier.py`` (MycoPrep/MycoMorph) to also assert *both* copies
+``cell_quality_classifier.py`` (MycoMorph) to also assert *both* copies
 hash identically — a true two-sided guard in CI where the sibling is checked out.
 """
 
@@ -52,7 +52,7 @@ def test_shared_block_hash_matches_golden():
     if GOLDEN_SHA == "<TBD>":
         # First run: print so the dev can paste it back.
         print(f"\nFirst-run hash for shared block: {sha}")
-        print("Paste this into GOLDEN_SHA in this file AND in MycoPrep's "
+        print("Paste this into GOLDEN_SHA in this file AND in MycoMorph's "
               "tests/test_classifier_model_def.py.")
         return
     assert sha == GOLDEN_SHA, (

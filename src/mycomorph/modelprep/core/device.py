@@ -2,7 +2,7 @@
 
 NOTE: ``CellQualityClassifier.__init__`` keeps its own inlined probe because it
 lives inside the drift-guarded shared model block (kept byte-identical with
-MycoPrep). Everything *outside* that block routes through here.
+MycoMorph). Everything *outside* that block routes through here.
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 Subcommands:
   ``info``          — describe an ``all_crops.h5`` (cells, channels, schema)
   ``models``        — list bundled classifier presets
-  ``verify-model``  — confirm a ``.pth`` loads + runs (ready for MycoPrep)
+  ``verify-model``  — confirm a ``.pth`` loads + runs (ready for MycoMorph)
   ``label``         — interactive labeller (matplotlib grid)
   ``review``        — review + correct an existing model's predictions
   ``train``         — train a binary cell-quality CNN from labelled HDF5 crops
@@ -24,7 +24,7 @@ from .labels_store import LabelsStore, default_labels_dir_for
 app = typer.Typer(
     add_completion=False,
     help="ModelPrep — labeller + trainer for the cell-quality classifier. "
-         "Consumes MycoPrep's HDF5 crops (all_crops.h5).",
+         "Consumes MycoMorph's HDF5 crops (all_crops.h5).",
 )
 
 
@@ -113,8 +113,8 @@ def verify_model(
 ) -> None:
     """Verify a ``.pth`` loads + runs through the shared classifier loader.
 
-    Catches a broken hand-off before you point MycoPrep at the model: loads it
-    exactly the way MycoPrep will, runs a synthetic batch, and checks the
+    Catches a broken hand-off before you point MycoMorph at the model: loads it
+    exactly the way MycoMorph will, runs a synthetic batch, and checks the
     output shape / class names.
     """
     import json
@@ -149,7 +149,7 @@ def verify_model(
     typer.echo(
         f"OK: {model_path.name} loads as a {in_channels}-channel classifier "
         f"({NUM_CLASSES} classes {CLASS_NAMES}); synthetic batch → probs {probs.shape}. "
-        f"Ready to drop into MycoPrep's Custom-model picker."
+        f"Ready to drop into MycoMorph's Custom-model picker."
     )
     cfg = model_path.parent / "training_config.json"
     if cfg.exists():

@@ -10,7 +10,7 @@
   ],
   "crop_size": 64,
   "channels": "[phase, mask, log-area]",
-  "source": "Bundled M. tuberculosis cell-quality classifier shipped with ModelPrep; trained on hand-labelled MycoPrep crops. Drop-in for MycoPrep's Custom-model picker.",
+  "source": "Bundled M. tuberculosis cell-quality classifier shipped with ModelPrep; trained on hand-labelled MycoMorph crops. Drop-in for MycoMorph's Custom-model picker.",
   "trainer": "modelprep",
   "file_mtime_utc": "2026-05-18"
 }

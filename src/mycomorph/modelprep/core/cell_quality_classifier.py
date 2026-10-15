@@ -4,9 +4,9 @@ Cell Quality Classifier — ModelPrep (training side)
 ===================================================
 CNN model definition + training-side data loaders.
 
-This file is the **training half** of the classifier surface that MycoPrep
+This file is the **training half** of the classifier surface that MycoMorph
 uses for inference. The model-architecture section below is mirrored
-byte-for-byte in MycoPrep so a ``.pth`` trained here loads cleanly in the
+byte-for-byte in MycoMorph so a ``.pth`` trained here loads cleanly in the
 pipeline there.
 
 Categories (binary):
@@ -251,7 +251,7 @@ class CellQualityClassifier:
 
 # ── END SHARED MODEL DEFINITION ───────────────────────────────────────────────
 # Below: ModelPrep-only training-side data I/O. The TIFF crop extraction and
-# rule-based filters that live in the MycoPrep copy do NOT belong here — this
+# rule-based filters that live in the MycoMorph copy do NOT belong here — this
 # package consumes pre-extracted HDF5 crops (see crops_h5.py).
 
 
