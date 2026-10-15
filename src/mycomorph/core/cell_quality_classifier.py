@@ -27,7 +27,20 @@ import threading
 import numpy as np
 from pathlib import Path
 
-# ── Constants ──────────────────────────────────────────────────────────────────
+# The block below is hash-checked against ModelPrep's copy
+# (tests/test_classifier_model_def.py in both repos), so it must stay
+# byte-identical: edit both copies together and refresh GOLDEN_SHA in both.
+
+# ── BEGIN SHARED MODEL DEFINITION ─────────────────────────────────────────────
+# Keep byte-identical with:
+#   MycoMorph:  src/mycomorph/core/cell_quality_classifier.py
+#   ModelPrep:  src/modelprep/core/cell_quality_classifier.py
+#
+# Anything inside this block is reproduced verbatim across both repos. A drift-
+# guard test in each repo hashes the block and fails on mismatch. If you need
+# to change the architecture, the area-channel logic, or the CellQualityClassifier
+# loader, update BOTH copies in the same commit and refresh the golden hash.
+# ─────────────────────────────────────────────────────────────────────────────
 
 # Binary classification: good (0) vs bad (1)
 CLASS_NAMES = ["good", "bad"]
@@ -114,6 +127,145 @@ def _append_area_channel_batch(crops, true_areas_px=None):
     area_ch = np.broadcast_to(vals, mask.shape).copy()  # (N, 1, H, W)
     return np.concatenate([crops, area_ch], axis=1)
 
+
+# ── CNN model ─────────────────────────────────────────────────────────────────
+
+def _build_model(in_channels, num_classes=NUM_CLASSES):
+    """
+    Build a lightweight CNN for cell quality classification.
+
+    Architecture:
+        4 conv blocks (Conv2d → BatchNorm → ReLU → MaxPool2×2)
+        Global Average Pooling → Dropout → FC → num_classes
+
+    With CROP_SIZE=64, after 4 max-pools: 64→32→16→8→4, then GAP → 256-d.
+    Total ~400K parameters — trainable on a few hundred labelled cells.
+    """
+    import torch
+    import torch.nn as nn
+
+    class ConvBlock(nn.Module):
+        def __init__(self, c_in, c_out, kernel=3, pad=1):
+            super().__init__()
+            self.block = nn.Sequential(
+                nn.Conv2d(c_in, c_out, kernel, padding=pad, bias=False),
+                nn.BatchNorm2d(c_out),
+                nn.ReLU(inplace=True),
+                nn.MaxPool2d(2),
+            )
+
+        def forward(self, x):
+            return self.block(x)
+
+    class CellQualityCNN(nn.Module):
+        def __init__(self, c_in, n_cls):
+            super().__init__()
+            self.features = nn.Sequential(
+                ConvBlock(c_in, 32),
+                ConvBlock(32, 64),
+                ConvBlock(64, 128),
+                ConvBlock(128, 256),
+            )
+            self.classifier = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Flatten(),
+                nn.Dropout(0.5),
+                nn.Linear(256, n_cls),
+            )
+
+        def forward(self, x):
+            x = self.features(x)
+            x = self.classifier(x)
+            return x
+
+    return CellQualityCNN(in_channels, num_classes)
+
+
+# ── Classifier wrapper ────────────────────────────────────────────────────────
+
+class CellQualityClassifier:
+    """
+    Wrapper that loads a trained CNN and classifies cell crops.
+
+    Usage:
+        clf = CellQualityClassifier("model.pth", in_channels=3)
+        predictions = clf.predict_batch(crops_array)
+    """
+
+    def __init__(self, model_path, in_channels, device=None):
+        import torch
+
+        if device is None:
+            if torch.cuda.is_available():
+                device = "cuda"
+            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+                device = "mps"
+            else:
+                device = "cpu"
+        self.device = device
+        self.model = _build_model(in_channels, NUM_CLASSES)
+
+        state = torch.load(model_path, map_location=self.device, weights_only=True)
+        self.model.load_state_dict(state)
+        self.model.to(self.device)
+        self.model.eval()
+
+    def predict_single(self, crop):
+        """
+        Classify a single cell crop.
+
+        Args:
+            crop: (C, CROP_SIZE, CROP_SIZE) float32 numpy array
+
+        Returns:
+            class_idx: int
+            class_name: str
+            probabilities: (NUM_CLASSES,) array
+        """
+        import torch
+
+        x = torch.from_numpy(crop).unsqueeze(0).to(self.device)
+
+        with torch.no_grad():
+            logits = self.model(x)
+            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
+
+        class_idx = int(probs.argmax())
+        return class_idx, CLASS_NAMES[class_idx], probs
+
+    def predict_batch(self, crops, batch_size=64):
+        """
+        Classify a batch of cell crops.
+
+        Args:
+            crops: (N, C, CROP_SIZE, CROP_SIZE) float32 numpy array
+            batch_size: processing batch size
+
+        Returns:
+            class_indices: (N,) int array
+            probabilities: (N, NUM_CLASSES) array
+        """
+        import torch
+
+        all_probs = []
+
+        for i in range(0, len(crops), batch_size):
+            batch = torch.from_numpy(crops[i:i + batch_size]).to(self.device)
+            with torch.no_grad():
+                logits = self.model(batch)
+                probs = torch.softmax(logits, dim=1).cpu().numpy()
+            all_probs.append(probs)
+
+        all_probs = np.concatenate(all_probs, axis=0)
+        class_indices = all_probs.argmax(axis=1)
+
+        return class_indices, all_probs
+
+
+# ── END SHARED MODEL DEFINITION ───────────────────────────────────────────────
+# Below: MycoMorph-only inference helpers (crop extraction, rule-based
+# filters, classifier cache and the mask filter). ModelPrep doesn't have
+# these; it trains on pre-extracted HDF5 crops.
 
 # Default thresholds for rule-based pre-filtering
 EDGE_MARGIN = 2        # Pixels from border to count as edge cell
@@ -302,147 +454,6 @@ def detect_large_clumps(labeled_mask, pixels_per_um=13.8767, max_area_um2=MAX_AR
     return large_labels
 
 
-# ── CNN model ─────────────────────────────────────────────────────────────────
-
-def _build_model(in_channels, num_classes=NUM_CLASSES):
-    """
-    Build a lightweight CNN for cell quality classification.
-
-    Architecture:
-        4 conv blocks (Conv2d → BatchNorm → ReLU → MaxPool2×2)
-        Global Average Pooling → Dropout → FC → num_classes
-
-    With CROP_SIZE=64, after 4 max-pools: 64→32→16→8→4, then GAP → 256-d.
-    Total ~400K parameters — trainable on a few hundred labelled cells.
-
-    Args:
-        in_channels: number of input channels (imaging channels + 1 mask channel)
-        num_classes: number of output classes
-
-    Returns:
-        PyTorch nn.Module
-    """
-    import torch
-    import torch.nn as nn
-
-    class ConvBlock(nn.Module):
-        def __init__(self, c_in, c_out, kernel=3, pad=1):
-            super().__init__()
-            self.block = nn.Sequential(
-                nn.Conv2d(c_in, c_out, kernel, padding=pad, bias=False),
-                nn.BatchNorm2d(c_out),
-                nn.ReLU(inplace=True),
-                nn.MaxPool2d(2),
-            )
-
-        def forward(self, x):
-            return self.block(x)
-
-    class CellQualityCNN(nn.Module):
-        def __init__(self, c_in, n_cls):
-            super().__init__()
-            self.features = nn.Sequential(
-                ConvBlock(c_in, 32),
-                ConvBlock(32, 64),
-                ConvBlock(64, 128),
-                ConvBlock(128, 256),
-            )
-            self.classifier = nn.Sequential(
-                nn.AdaptiveAvgPool2d(1),
-                nn.Flatten(),
-                nn.Dropout(0.5),
-                nn.Linear(256, n_cls),
-            )
-
-        def forward(self, x):
-            x = self.features(x)
-            x = self.classifier(x)
-            return x
-
-    return CellQualityCNN(in_channels, num_classes)
-
-
-# ── Classifier wrapper ────────────────────────────────────────────────────────
-
-class CellQualityClassifier:
-    """
-    Wrapper that loads a trained CNN and classifies cell crops.
-
-    Usage:
-        clf = CellQualityClassifier("model.pth", in_channels=4)
-        predictions = clf.predict_batch(crops_array)
-    """
-
-    def __init__(self, model_path, in_channels, device=None):
-        import torch
-
-        if device is None:
-            if torch.cuda.is_available():
-                device = "cuda"
-            elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-                device = "mps"
-            else:
-                device = "cpu"
-        self.device = device
-        self.model = _build_model(in_channels, NUM_CLASSES)
-
-        state = torch.load(model_path, map_location=self.device, weights_only=True)
-        self.model.load_state_dict(state)
-        self.model.to(self.device)
-        self.model.eval()
-
-    def predict_single(self, crop):
-        """
-        Classify a single cell crop.
-
-        Args:
-            crop: (C, CROP_SIZE, CROP_SIZE) float32 numpy array
-
-        Returns:
-            class_idx: int
-            class_name: str
-            probabilities: (NUM_CLASSES,) array
-        """
-        import torch
-
-        x = torch.from_numpy(crop).unsqueeze(0).to(self.device)
-
-        with torch.no_grad():
-            logits = self.model(x)
-            probs = torch.softmax(logits, dim=1).cpu().numpy()[0]
-
-        class_idx = int(probs.argmax())
-        return class_idx, CLASS_NAMES[class_idx], probs
-
-    def predict_batch(self, crops, batch_size=64):
-        """
-        Classify a batch of cell crops.
-
-        Args:
-            crops: (N, C, CROP_SIZE, CROP_SIZE) float32 numpy array
-            batch_size: processing batch size
-
-        Returns:
-            class_indices: (N,) int array
-            probabilities: (N, NUM_CLASSES) array
-        """
-        import torch
-
-        all_probs = []
-
-        for i in range(0, len(crops), batch_size):
-            batch = torch.from_numpy(crops[i:i + batch_size]).to(self.device)
-            with torch.no_grad():
-                logits = self.model(batch)
-                probs = torch.softmax(logits, dim=1).cpu().numpy()
-            all_probs.append(probs)
-
-        all_probs = np.concatenate(all_probs, axis=0)
-        class_indices = all_probs.argmax(axis=1)
-
-        return class_indices, all_probs
-
-
 # Constructing a CellQualityClassifier means a torch.load + load_state_dict
 # + device transfer. Both callers pay that repeatedly for the same weights:
 # `classify_filter_tiff` calls the filter once per FOV, and the live preview
@@ -483,6 +494,68 @@ def _cached_classifier(model_path, in_channels, device=None):
         return entry
 
 
+# ── Tuned decision threshold (from ModelPrep) ─────────────────────────────────
+#
+# ModelPrep writes ``decision_threshold`` to the ``training_config.json`` next
+# to the ``.pth``. It is the Youden-J cutoff on the validation ROC of
+# P(bad) (class index 1), so it is applied as "keep the cell iff P(bad) < t".
+# That is a different rule from the default argmax + P(good) confidence
+# threshold, and the two numbers are not interchangeable.
+
+_BAD_INDEX = CLASS_NAMES.index("bad")
+_GOOD_INDEX = CLASS_NAMES.index("good")
+
+
+def _valid_decision_threshold(value):
+    """Return ``value`` as a float if it is a usable P(bad) cutoff, else None."""
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        return None
+    # roc_curve can put the Youden-J optimum at its +inf sentinel; that (and
+    # anything outside (0, 1)) would keep or reject every cell.
+    if not np.isfinite(t) or not 0.0 < t < 1.0:
+        return None
+    return t
+
+
+def read_decision_threshold(model_path):
+    """Return the tuned P(bad) cutoff stored beside ``model_path``, or None.
+
+    Looks for ``decision_threshold`` in ``training_config.json`` in the same
+    folder as the ``.pth`` (as ModelPrep writes it). Returns None when the file
+    or key is missing, unreadable, or not a value strictly between 0 and 1.
+    """
+    import json
+
+    if model_path is None:
+        return None
+    cfg_path = Path(model_path).parent / "training_config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    return _valid_decision_threshold(cfg.get("decision_threshold"))
+
+
+def effective_p_bad_cutoff(confidence_threshold, decision_threshold=None):
+    """P(bad) value above which ``classify_and_filter_mask`` rejects a cell.
+
+    Puts both rules on the P(bad) axis that the ROC / PR curves use:
+
+    - tuned: reject iff P(bad) >= ``decision_threshold``;
+    - default: keep iff argmax is "good" and P(good) >= ``confidence_threshold``,
+      i.e. P(good) >= max(confidence_threshold, 0.5), so the cutoff is
+      1 - max(confidence_threshold, 0.5). Slider values below 0.5 therefore
+      change nothing: argmax already rejects every cell with P(bad) > 0.5.
+    """
+    if decision_threshold is not None:
+        return float(decision_threshold)
+    return 1.0 - max(float(confidence_threshold), 0.5)
+
+
 # ── Main filtering API ────────────────────────────────────────────────────────
 
 def classify_and_filter_mask(
@@ -496,6 +569,7 @@ def classify_and_filter_mask(
     use_rules=True,
     device=None,
     verbose=True,
+    decision_threshold=None,
 ):
     """
     Classify each cell in a labeled mask and return a filtered version
@@ -508,10 +582,20 @@ def classify_and_filter_mask(
        - Debris: area below minimum threshold
 
     2. CNN-based (requires trained model):
-       - Classifies remaining cells into quality categories
-       - Keeps only cells whose predicted class is in keep_classes
+       - Classifies remaining cells as good / bad
+       - Keeps only cells whose class is in keep_classes
 
     If no model_path is provided, only rule-based filtering is applied.
+
+    The CNN's class is decided in one of two ways:
+
+    - Default (``decision_threshold=None``): argmax of the softmax, and the
+      cell is also rejected if that class's probability is below
+      ``confidence_threshold``.
+    - Tuned (``decision_threshold=t``): the cell is "good" iff P(bad) < t,
+      otherwise "bad". ``confidence_threshold`` is ignored. ``t`` is the
+      P(bad) cutoff ModelPrep stores as ``decision_threshold`` (see
+      ``read_decision_threshold``).
 
     Args:
         labeled_mask:   (Y, X) integer array from Cellpose (0=bg, N=cell)
@@ -521,14 +605,25 @@ def classify_and_filter_mask(
         pixels_per_um:  pixel scale for area calculations
         keep_classes:   tuple of class names to keep (default: only "good")
         confidence_threshold: minimum softmax probability to trust prediction
+                        (default rule only)
         use_rules:      whether to apply rule-based pre-filtering
         device:         torch device (None = auto)
         verbose:        print filtering statistics
+        decision_threshold: P(bad) cutoff in (0, 1); None = default rule
 
     Returns:
         filtered_mask:  (Y, X) integer array with rejected cells set to 0
         report:         dict with filtering statistics
     """
+    if decision_threshold is not None:
+        t = _valid_decision_threshold(decision_threshold)
+        if t is None:
+            raise ValueError(
+                f"decision_threshold must be a P(bad) cutoff strictly between "
+                f"0 and 1, got {decision_threshold!r}"
+            )
+        decision_threshold = t
+
     filtered = labeled_mask.copy()
     all_labels = set(np.unique(labeled_mask)) - {0}
     n_total = len(all_labels)
@@ -540,6 +635,7 @@ def classify_and_filter_mask(
         "removed_cnn": 0,
         "kept": 0,
         "details": {},  # label -> (class_name, confidence)
+        "decision_threshold": decision_threshold,
     }
 
     if n_total == 0:
@@ -603,12 +699,20 @@ def classify_and_filter_mask(
         cnn_removed = 0
 
         for lbl, cls_idx, probs in zip(labels_list, class_indices, probabilities):
+            if decision_threshold is not None:
+                # Tuned rule: the P(bad) cutoff alone decides the class.
+                cls_idx = (_GOOD_INDEX if float(probs[_BAD_INDEX]) < decision_threshold
+                           else _BAD_INDEX)
+                reject = cls_idx not in keep_indices
+            else:
+                # Remove if not in keep_classes OR below confidence threshold
+                reject = (cls_idx not in keep_indices
+                          or float(probs[cls_idx]) < confidence_threshold)
             cls_name = CLASS_NAMES[cls_idx]
             confidence = float(probs[cls_idx])
             report["details"][int(lbl)] = (cls_name, confidence)
 
-            # Remove if not in keep_classes OR below confidence threshold
-            if cls_idx not in keep_indices or confidence < confidence_threshold:
+            if reject:
                 filtered[filtered == lbl] = 0
                 cnn_removed += 1
 

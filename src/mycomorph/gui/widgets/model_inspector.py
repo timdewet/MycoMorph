@@ -5,9 +5,11 @@ Given a path to a trained .pth, looks in the same directory for:
   - roc_pr_curves.png    → fallback static image
   - training_config.json → summary stats
 
-The live plot re-renders whenever the user changes the confidence threshold;
-the threshold is drawn as a vertical line on both the ROC (in threshold
-space) and PR curves, with the operating point highlighted.
+The live plot re-renders whenever the Classify tab's rule changes. Both
+trainers compute the curves on P(bad) (class "bad" is the positive class),
+so the operating point is placed at the P(bad) cutoff the Classify stage
+actually applies: the model's tuned ``decision_threshold`` when that's in
+use, otherwise 1 - max(confidence, 0.5) for argmax + the P(good) slider.
 """
 
 from __future__ import annotations
@@ -30,6 +32,11 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from mycomorph.core.cell_quality_classifier import (
+    effective_p_bad_cutoff,
+    read_decision_threshold,
+)
+
 
 class ModelInspector(QWidget):
     """Renders classifier metadata for the currently selected model."""
@@ -37,8 +44,10 @@ class ModelInspector(QWidget):
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._model_dir: Path | None = None
+        self._model_path: Path | None = None
         self._metrics: dict | None = None
         self._threshold = 0.5
+        self._decision_threshold: float | None = None
         self._build_ui()
         self.set_model(None)
 
@@ -85,6 +94,7 @@ class ModelInspector(QWidget):
         """Point the inspector at a specific .pth (or None = no model)."""
         if model_path is None:
             self._model_dir = None
+            self._model_path = None
             self._metrics = None
             self._header.setText("No classifier selected")
             self._stats.setText("Rule-based filtering only (edge / debris).")
@@ -92,12 +102,20 @@ class ModelInspector(QWidget):
             self._png_scroll.hide()
             return
 
-        self._model_dir = Path(model_path).parent
+        self._model_path = Path(model_path)
+        self._model_dir = self._model_path.parent
         self._load_metadata()
         self._refresh()
 
-    def set_threshold(self, t: float) -> None:
+    def set_threshold(self, t: float, decision_threshold: float | None = None) -> None:
+        """Set the Classify rule to mark on the curves.
+
+        ``t`` is the P(good) confidence slider; ``decision_threshold`` is the
+        P(bad) cutoff when the model's tuned threshold is in use (None = the
+        default argmax + slider rule).
+        """
         self._threshold = float(t)
+        self._decision_threshold = decision_threshold
         self._refresh_live_plot()
 
     # ---------------------------------------------------------------- loading
@@ -137,6 +155,9 @@ class ModelInspector(QWidget):
                     stats_lines.append(f"Classes: {', '.join(classes)}")
             except Exception:  # noqa: BLE001
                 pass
+        tuned = read_decision_threshold(self._model_path)
+        if tuned is not None:
+            stats_lines.append(f"Tuned threshold: keep if P(bad) < {tuned:.3f}")
 
         self._header.setText(f"Model: {name}")
         self._stats.setText("  ·  ".join(stats_lines) if stats_lines else "")
@@ -177,7 +198,9 @@ class ModelInspector(QWidget):
         ap_v  = b["pr"]["ap"]
         base  = b["pr"]["baseline"]
 
-        t = self._threshold
+        # Curves are on P(bad), so mark the P(bad) cutoff the filter uses,
+        # not the P(good) slider value itself.
+        t = effective_p_bad_cutoff(self._threshold, self._decision_threshold)
         # Nearest operating point on each curve
         idx_roc = int(np.argmin(np.abs(thr_r - t))) if len(thr_r) else 0
         # Note: PR thresholds have len = len(precision) - 1
@@ -194,13 +217,13 @@ class ModelInspector(QWidget):
         ax_roc.plot(fpr, tpr, color="#2166ac", lw=1.2, label=f"AUC {auc_v:.2f}")
         ax_roc.plot([0, 1], [0, 1], "k--", lw=0.7, alpha=0.4)
         ax_roc.plot(fpr[idx_roc], tpr[idx_roc], "o", ms=5, color="#e0402b",
-                    label=f"τ {t:.2f}")
+                    label=f"P(bad) cut {t:.2f}")
         if "optimal_threshold" in b:
             idx_opt = int(np.argmin(np.abs(thr_r - b["optimal_threshold"])))
             ax_roc.plot(fpr[idx_opt], tpr[idx_opt], "^", ms=5, color="#2ca02c",
                         label=f"opt {b['optimal_threshold']:.2f}")
         ax_roc.set_xlabel("FPR", fontsize=8); ax_roc.set_ylabel("TPR", fontsize=8)
-        ax_roc.set_title("ROC", fontsize=8)
+        ax_roc.set_title("ROC (positive = bad)", fontsize=8)
         ax_roc.grid(True, alpha=0.2)
         ax_roc.legend(loc="lower right", fontsize=7, frameon=False)
 
@@ -208,9 +231,9 @@ class ModelInspector(QWidget):
         ax_pr.plot(rec, prec, color="#b2182b", lw=1.2, label=f"AP {ap_v:.2f}")
         ax_pr.axhline(base, color="k", ls="--", lw=0.7, alpha=0.4)
         ax_pr.plot(rec[idx_pr_clamped], prec[idx_pr_clamped], "o", ms=5, color="#e0402b",
-                   label=f"τ {t:.2f}")
+                   label=f"P(bad) cut {t:.2f}")
         ax_pr.set_xlabel("Recall", fontsize=8); ax_pr.set_ylabel("Precision", fontsize=8)
-        ax_pr.set_title("PR", fontsize=8)
+        ax_pr.set_title("PR (positive = bad)", fontsize=8)
         ax_pr.grid(True, alpha=0.2)
         ax_pr.legend(loc="lower left", fontsize=7, frameon=False)
 

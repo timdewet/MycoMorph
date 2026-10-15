@@ -114,6 +114,53 @@ def _read_fov_source_files(tiff_path: Path) -> list[str]:
     return [str(s) for s in payload.get("fov_source_files") or []]
 
 
+def _input_provenance(tiff_path: Path) -> dict[str, str]:
+    """Where the masks being cropped came from, for the crops HDF5.
+
+    ``input_stage`` is the stage that wrote ``tiff_path``: "classify",
+    "segment" or "unknown". ``classifier_prefilter`` says whether cells were
+    already removed before cropping: "cnn" (Classify ran with a CNN model),
+    "rules" (Classify ran edge / debris rules only), "none" (Segment output)
+    or "unknown". A quality classifier trained on "cnn" crops never sees the
+    cells that CNN rejected, so its hold-out metrics are conditional on it.
+
+    Reads the input's ``.provenance.json`` sidecar; for older, unsigned
+    outputs it falls back to the pipeline folder name (``03_classify`` /
+    ``02_segment``), which can't tell whether a CNN was used.
+    """
+    from ..provenance import artifact_signature_path
+
+    stage: Optional[str] = None
+    model_sha = ""
+    used_cnn: Optional[bool] = None
+    try:
+        sig = json.loads(artifact_signature_path(tiff_path).read_text(encoding="utf-8"))
+        stage = sig.get("stage")
+        model = sig.get("model")
+        used_cnn = isinstance(model, dict)
+        if used_cnn:
+            model_sha = str(model.get("sha256", ""))
+    except (OSError, ValueError, AttributeError):
+        pass
+    if stage not in ("classify", "segment"):
+        folder = tiff_path.parent.name
+        stage = ("classify" if folder.endswith("_classify")
+                 else "segment" if folder.endswith("_segment") else "unknown")
+        used_cnn, model_sha = None, ""
+
+    if stage == "classify":
+        prefilter = "unknown" if used_cnn is None else ("cnn" if used_cnn else "rules")
+    elif stage == "segment":
+        prefilter, model_sha = "none", ""
+    else:
+        prefilter = "unknown"
+    return {
+        "input_stage": stage,
+        "classifier_prefilter": prefilter,
+        "classifier_prefilter_model_sha256": model_sha,
+    }
+
+
 def _resolve_intensity_channels(
     n_image_channels: int,
     requested: Optional[list[int]],
@@ -340,6 +387,10 @@ def extract_features_tiff(
             crop_size=opts.crop_size,
             n_channels=n_crop_channels,
             channel_names=crop_channel_names,
+            attrs={
+                **crops_mod.crop_opts_attrs(crop_opts),
+                **_input_provenance(tiff_path),
+            },
         )
 
     all_dfs: list[pd.DataFrame] = []

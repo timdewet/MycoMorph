@@ -238,6 +238,7 @@ def segment_single_fov(channels, phase_channel, model, diameter=None,
             use_rules=classify_opts.get("use_rules", True),
             device=classify_opts.get("device"),
             verbose=True,
+            decision_threshold=classify_opts.get("decision_threshold"),
         )
         n_cells = report["kept"]
 
@@ -595,6 +596,15 @@ def main():
         default=0.5,
         help="Minimum confidence to trust CNN prediction (default: 0.5)"
     )
+    parser.add_argument(
+        "--use-model-threshold",
+        action="store_true",
+        default=False,
+        help="Keep a cell iff P(bad) < the model's tuned decision_threshold "
+             "(read from training_config.json next to the .pth, as written "
+             "by ModelPrep), instead of argmax + --classify-threshold. "
+             "Errors if the model has no usable decision_threshold."
+    )
     
     args = parser.parse_args()
 
@@ -747,11 +757,24 @@ def main():
             "use_rules": True,  # Always apply rules when filtering is enabled
             "device": "mps" if has_mps else ("cuda" if has_cuda else "cpu"),
         }
+        if args.use_model_threshold:
+            from .cell_quality_classifier import read_decision_threshold
+            tuned = read_decision_threshold(classify_model_path)
+            if tuned is None:
+                print("ERROR: --use-model-threshold needs a CNN model with a "
+                      "decision_threshold between 0 and 1 in the "
+                      "training_config.json next to it")
+                sys.exit(1)
+            classify_opts["decision_threshold"] = tuned
         if classify_model_path:
             print(f"Cell quality filter: CNN model + rules")
             print(f"  Model: {classify_model_path}")
             print(f"  Keep classes: {keep_classes}")
-            print(f"  Confidence threshold: {args.classify_threshold}")
+            if classify_opts.get("decision_threshold") is not None:
+                print(f"  Decision rule: keep if P(bad) < "
+                      f"{classify_opts['decision_threshold']:.3f} (model's tuned threshold)")
+            else:
+                print(f"  Confidence threshold: {args.classify_threshold}")
         else:
             print(f"Cell quality filter: rule-based only (edge cells, debris)")
         print()

@@ -103,6 +103,7 @@ def process_tiff_file(tiff_path, model, phase_channel, diameter=None,
                 use_rules=classify_opts.get("use_rules", True),
                 device=classify_opts.get("device"),
                 verbose=True,
+                decision_threshold=classify_opts.get("decision_threshold"),
             )
             n_cells = report["kept"]
 
