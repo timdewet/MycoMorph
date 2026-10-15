@@ -50,9 +50,16 @@ from PyQt6.QtWidgets import (
 )
 
 from ...core._render import outline_of, to_outlined_rgb
+from ...core.cell_filter import CellFilter
 from ...core.cli import list_preset_models
 from ...core.crops_h5 import CropRecord, HDF5CropsReader
 from ...core.fov_context import FovContextProvider
+from ...core.label_cells import (
+    PoolCancelled,
+    PoolResult,
+    build_pool,
+    sampling_record,
+)
 from ...core.labels_store import (
     LABEL_TO_IDX,
     SPLIT_TEST,
@@ -65,6 +72,8 @@ from ...core.labels_store import (
 
 # Default target size for a balanced hold-out test set (≈ half per class).
 TEST_SET_TARGET = 1000
+# Seed for random-order pools; recorded with each session in manifest.json.
+SAMPLING_SEED = 42
 from ..palette import COLORS, LABEL_COLORS
 from ..ui import tokens
 from ..ui.flow_layout import FlowLayout
@@ -107,7 +116,8 @@ from ..trained_models import list_trained_models, new_run_dir  # noqa: E402
 # ─────────────────────────────────────────────────────────────────────────────
 
 class _ActiveLearningWorker(QThread):
-    """Score every unlabelled cell in the HDF5, build a ranked pool."""
+    """Build the next pool off the UI thread (``core.label_cells.build_pool``):
+    filter → seeded order → skip seen cells → optionally score and rank."""
 
     progress = pyqtSignal(float, str)
     finished = pyqtSignal(object, str)  # list[CropRecord+score], error
@@ -124,6 +134,8 @@ class _ActiveLearningWorker(QThread):
         uncertain_only: bool = False,
         confidence_threshold: float = 0.85,
         select: str = "uncertain",
+        cell_filter: Optional[CellFilter] = None,
+        seed: int = SAMPLING_SEED,
     ) -> None:
         super().__init__()
         self.h5_path = h5_path
@@ -138,6 +150,9 @@ class _ActiveLearningWorker(QThread):
         # "good" (highest P(good) first — surfaces the rare class for a balanced
         # hold-out set), or "random" (representative sampling, no model needed).
         self.select = select
+        self.cell_filter = cell_filter or CellFilter()
+        self.seed = seed
+        self.result: Optional[PoolResult] = None  # set before ``finished``
         # The model whose scores the pool carries: None when nothing was scored
         # (no model, or random sampling). Labels saved from this pool record it.
         self.scored_with: Optional[Path] = None
@@ -145,59 +160,6 @@ class _ActiveLearningWorker(QThread):
 
     def cancel(self) -> None:
         self._cancel = True
-
-    def _diversified(self, reader, ranked_idx, ranked_scores):
-        """Spread the most-uncertain candidates across fields of view so a
-        single noisy FOV can't dominate a page. Falls back to plain order."""
-        try:
-            from collections import OrderedDict, deque
-            k = min(len(ranked_idx), self.n_target * 5)
-            cand = ranked_idx[:k]
-            cand_scores = ranked_scores[:k]
-            fovs = reader.fov_groups[cand]
-            buckets: "OrderedDict[int, deque]" = OrderedDict()
-            for j, f in enumerate(fovs):
-                buckets.setdefault(int(f), deque()).append(j)
-            order: list[int] = []
-            queues = list(buckets.values())
-            while len(order) < self.n_target and any(queues):
-                for q in queues:
-                    if q:
-                        order.append(q.popleft())
-                        if len(order) >= self.n_target:
-                            break
-            order = order[: self.n_target]
-            return cand[order], cand_scores[order]
-        except Exception:  # noqa: BLE001 — diversity is best-effort
-            return ranked_idx[: self.n_target], ranked_scores[: self.n_target]
-
-    def _score(self, reader, idx: np.ndarray) -> Optional[np.ndarray]:
-        """P(good) for ``idx``, scoring only cells not already in the
-        per-(model, HDF5) cache. None if cancelled (partial scores are kept)."""
-        from ...core.score_cache import ScoreCache
-
-        cache = ScoreCache.open(self.h5_path, self.model_path, len(reader))
-        todo = cache.missing(idx)
-        if todo.size:
-            from ...core.cell_quality_classifier import CellQualityClassifier
-
-            clf = CellQualityClassifier(str(self.model_path), in_channels=3)
-            B = 256
-            try:
-                for lo in range(0, len(todo), B):
-                    if self._cancel:
-                        return None
-                    hi = min(lo + B, len(todo))
-                    batch = reader.get_classifier_batch(todo[lo:hi].tolist())
-                    _, probs = clf.predict_batch(batch)
-                    cache.scores[todo[lo:hi]] = probs[:, 0]
-                    self.progress.emit(hi / len(todo), f"Scoring cells: {hi}/{len(todo)}")
-            finally:
-                cache.save()
-        n_cached = len(idx) - todo.size
-        if n_cached:
-            self.progress.emit(1.0, f"Reused cached scores for {n_cached:,} cells")
-        return cache.scores[idx].copy()
 
     def run(self) -> None:  # noqa: D401
         try:
@@ -207,67 +169,39 @@ class _ActiveLearningWorker(QThread):
             return
 
         try:
-            unseen_mask = np.array(
-                [uid not in self.seen_uids for uid in reader.cell_uids],
-                dtype=bool,
-            )
-            unseen_idx = np.flatnonzero(unseen_mask)
-            if unseen_idx.size == 0:
-                self.finished.emit([], "No unseen cells in this HDF5.")
+            try:
+                result = build_pool(
+                    reader,
+                    exclude_uids=self.seen_uids,
+                    n_target=self.n_target,
+                    model_path=self.model_path,
+                    select=self.select,
+                    cell_filter=self.cell_filter,
+                    seed=self.seed,
+                    diversify=self.diversify and not self.review,
+                    uncertain_only=self.uncertain_only,
+                    confidence_threshold=self.confidence_threshold,
+                    cache_scores=True,
+                    progress_cb=self.progress.emit,
+                    should_cancel=lambda: self._cancel,
+                )
+            except PoolCancelled:
+                self.finished.emit([], "Cancelled.")
                 return
-
-            if self.model_path is None or self.select == "random":
-                # No scoring at all: a random sample has no model confidence, so
-                # carry NaN rather than a 0.5 placeholder that reads as a score.
-                rng = np.random.default_rng(42)
-                rng.shuffle(unseen_idx)
-                picked = unseen_idx[: self.n_target]
-                scores = np.full(len(picked), np.nan, dtype=np.float32)
-            else:
-                scores_all = self._score(reader, unseen_idx)
-                if scores_all is None:
-                    self.finished.emit([], "Cancelled.")
-                    return
-                self.scored_with = self.model_path
-                if self.select == "good":
-                    # Highest P(good) first — surfaces the rare 'good' class so a
-                    # balanced hold-out set fills without labelling thousands of
-                    # mostly-'bad' cells. (Human label remains ground truth.)
-                    rank = np.argsort(-scores_all)
-                    picked = unseen_idx[rank][: self.n_target]
-                    scores = scores_all[rank][: self.n_target]
-                else:
-                    # max-class confidence per cell (== how sure the model is).
-                    maxconf = np.maximum(scores_all, 1.0 - scores_all)
-                    if self.uncertain_only:
-                        keep = np.flatnonzero(maxconf < self.confidence_threshold)
-                        if keep.size == 0:
-                            self.finished.emit(
-                                [], f"No cells below confidence {self.confidence_threshold:.2f}. "
-                                    f"Raise the threshold or turn off 'uncertain only'.")
-                            return
-                        sub_idx = unseen_idx[keep]
-                        sub_scores = scores_all[keep]
-                        sub_conf = maxconf[keep]
-                    else:
-                        sub_idx, sub_scores, sub_conf = unseen_idx, scores_all, maxconf
-                    # Least-confident first (identical to |0.5 - P(good)| ascending).
-                    rank = np.argsort(sub_conf)
-                    ranked_idx = sub_idx[rank]
-                    ranked_scores = sub_scores[rank]
-                    if self.diversify and not self.review:
-                        picked, scores = self._diversified(reader, ranked_idx, ranked_scores)
-                    else:
-                        picked = ranked_idx[: self.n_target]
-                        scores = ranked_scores[: self.n_target]
+            self.result = result
+            if not len(result):
+                # Not an error: the panel shows ``result.message``.
+                self.finished.emit([], "")
+                return
+            self.scored_with = self.model_path if result.mode != "random" else None
 
             if self._cancel:
                 self.finished.emit([], "Cancelled.")
                 return
-            self.progress.emit(1.0, f"Loading {len(picked)} crops…")
+            self.progress.emit(1.0, f"Loading {len(result)} crops…")
             records = [
                 (reader.get(int(i)), float(s))
-                for i, s in zip(picked.tolist(), scores.tolist())
+                for i, s in zip(result.indices.tolist(), result.scores.tolist())
             ]
             self.progress.emit(1.0, f"Loaded {len(records)} cells for labelling")
             self.finished.emit(records, "")
@@ -355,7 +289,7 @@ class _CellThumb(QPushButton):
         conf = "n/a" if math.isnan(self.score) else f"{self.score:.3f}"
         return (
             f"{r.cell_uid}\n"
-            f"  {r.condition_label}  gene={r.gene}  drug={r.drug}\n"
+            f"  {r.condition}  {r.condition_label}  gene={r.gene}  drug={r.drug}\n"
             f"  reporter={r.reporter}  fov={r.fov_index}  area={r.area_px}px\n"
             f"  P(good)={conf}\n"
             f"  (click cycles · g/b/u on keyboard · double-click to enlarge)"
@@ -575,6 +509,11 @@ class LabelTrainPanel(QWidget):
         self._session_started_at = datetime.now(timezone.utc).isoformat()
         self._session_seen_uids: set[str] = set()
         self._session_label_count = 0
+        # How this session's pool was drawn (mode, filter, seed, …). One session
+        # ↔ one draw spec, so a labels.csv row's session_id says how it was sampled.
+        self._session_sampling: Optional[dict] = None
+        self._cell_filter = CellFilter()  # "Only show cells from…"
+        self._pool_desc = ""  # e.g. "random order · gene = dnaN", for the status line
         self._last_model_dir: Optional[Path] = None
         self._model_name = ""  # set from the Source page; names the trained run
 
@@ -602,6 +541,9 @@ class LabelTrainPanel(QWidget):
         if self._reader is not None:
             self._reader.close()
             self._reader = None
+        # Filter values belong to the old file's metadata.
+        self._cell_filter = CellFilter()
+        self._update_filter_button()
         if h5_path is None:
             self._h5_path = None
             self._labels_dir = None
@@ -651,9 +593,7 @@ class LabelTrainPanel(QWidget):
         self._page_labels.clear()
         self._saved_labels.clear()
         self._session_seen_uids.clear()
-        self._session_id = make_session_id()
-        self._session_started_at = datetime.now(timezone.utc).isoformat()
-        self._session_label_count = 0
+        self._new_session()
         self._review_mode = False
         self._populate_grid_from_page()
         self._save_action.setEnabled(False)
@@ -796,6 +736,26 @@ class LabelTrainPanel(QWidget):
         bar.addWidget(self._review_btn)
         v.addWidget(bar_host)
         self._sync_model_controls()
+
+        # Row 2 — which cells may be drawn (gene / condition / well filter).
+        filter_host, filter_row = _flow_row()
+        self._filter_btn = QPushButton("All cells ▾")
+        self._filter_btn.setToolTip(
+            "Restrict labelling to cells of chosen genes, conditions or wells. "
+            "Random and uncertainty-ranked pools are both drawn only from the "
+            "matching cells; the filter is recorded with the labelling session."
+        )
+        self._filter_btn.clicked.connect(self._edit_cell_filter)
+        self._filter_clear_btn = QPushButton("Show all cells")
+        self._filter_clear_btn.setObjectName("ghost")
+        self._filter_clear_btn.clicked.connect(lambda: self._set_cell_filter(CellFilter()))
+        self._filter_clear_btn.setVisible(False)
+        self._filter_summary = QLabel("")
+        self._filter_summary.setObjectName("caption")
+        filter_row.addWidget(_labeled("Only show cells from:", self._filter_btn))
+        filter_row.addWidget(self._filter_clear_btn)
+        filter_row.addWidget(self._filter_summary)
+        v.addWidget(filter_host)
 
         # Prominent banner shown only while labelling the hold-out test set.
         self._test_banner = QLabel(
@@ -1095,6 +1055,58 @@ class LabelTrainPanel(QWidget):
             return None
         return Path(data)
 
+    # ── cell filter ("Only show cells from…") ─────────────────────────
+
+    def _edit_cell_filter(self) -> None:
+        if self._reader is None or self._store is None:
+            QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
+            return
+        from .cell_filter_dialog import CellFilterDialog
+        dialog = CellFilterDialog(self._reader, self._store.labeled_uids(),
+                                  self._cell_filter, parent=self.label_section)
+        if dialog.exec():
+            self._set_cell_filter(dialog.cell_filter())
+
+    def _set_cell_filter(self, cell_filter: CellFilter) -> None:
+        if cell_filter == self._cell_filter:
+            return
+        self._cell_filter = cell_filter
+        self._update_filter_button()
+        self._refresh_filter_summary()
+        if self._pool:
+            self._status.setText(
+                "Filter changed — click 'Load pool' to draw cells from it "
+                "(the current page is from the previous pool)."
+            )
+
+    def _update_filter_button(self) -> None:
+        f = self._cell_filter
+        text = "All cells" if f.is_empty() else f.describe()
+        if len(text) > 60:
+            text = text[:57] + "…"
+        self._filter_btn.setText(text + " ▾")
+        self._filter_clear_btn.setVisible(not f.is_empty())
+
+    def _refresh_filter_summary(self) -> None:
+        """'N cells match · M unlabelled' for the current filter."""
+        self._filter_btn.setEnabled(self._reader is not None)
+        if self._reader is None or self._store is None:
+            self._filter_summary.setText("")
+            return
+        mask = self._cell_filter.mask(self._reader)
+        labelled = self._store.labeled_uids()
+        n_match = int(mask.sum())
+        n_left = sum(1 for uid in self._reader.cell_uids[mask] if uid not in labelled)
+        p = tokens.active()
+        if n_match == 0:
+            self._filter_summary.setText("No cells match this filter.")
+            self._filter_summary.setStyleSheet(f"color: {p.warning};")
+            return
+        what = ("cells" if self._cell_filter.is_empty()
+                else f"of {len(self._reader):,} cells match")
+        self._filter_summary.setText(f"{n_match:,} {what} · {n_left:,} unlabelled")
+        self._filter_summary.setStyleSheet(f"color: {p.text_subtle};")
+
     # ── events: label flow ────────────────────────────────────────────
 
     def _on_test_mode_toggled(self, checked: bool) -> None:
@@ -1163,8 +1175,10 @@ class LabelTrainPanel(QWidget):
         self._progress.setValue(0)
         what = ("test-set cells" if self._test_mode
                 else "predictions to review" if review else "cells")
+        where = ("" if self._cell_filter.is_empty()
+                 else f" where {self._cell_filter.describe()}")
         self._status.setText(
-            f"Loading up to {self._pool_size.value()} {what} "
+            f"Loading up to {self._pool_size.value()} {what}{where} "
             f"(skipping {len(seen_uids)} seen)…"
         )
 
@@ -1178,6 +1192,8 @@ class LabelTrainPanel(QWidget):
             uncertain_only=uncertain_only,
             confidence_threshold=self._conf_thresh.value(),
             select=select,
+            cell_filter=self._cell_filter,
+            seed=SAMPLING_SEED,
         )
         self._al_worker.progress.connect(self._on_al_progress)
         self._al_worker.finished.connect(self._on_al_finished)
@@ -1190,7 +1206,8 @@ class LabelTrainPanel(QWidget):
         self._status.setText(msg)
 
     def _on_al_finished(self, records, error: str) -> None:
-        if self.sender() is not self._al_worker:
+        worker = self._al_worker
+        if self.sender() is not worker:
             return  # a superseded worker — ignore its late result
         self._load_btn.setEnabled(True)
         self._review_btn.setEnabled(True)
@@ -1199,7 +1216,7 @@ class LabelTrainPanel(QWidget):
             return
 
         self._pool = list(records)
-        self._pool_model = self._al_worker.scored_with
+        self._pool_model = worker.scored_with
         self._page_index = 0
         self._page_labels.clear()
         self._saved_labels.clear()  # pool indices now map to different cells
@@ -1217,10 +1234,41 @@ class LabelTrainPanel(QWidget):
             self._populate_grid_from_page()
             self._save_action.setEnabled(False)
             self._save_next_btn.setEnabled(False)
+            reason = worker.result.message if worker.result is not None else ""
             self._status.setText(
-                "No more unseen cells. Use 'Reset session' to revisit skipped cells."
+                reason or "No more unseen cells. Use 'Reset session' to revisit "
+                          "skipped cells."
             )
             return
+
+        result = worker.result
+        sampling = sampling_record(
+            result,
+            cell_filter=worker.cell_filter,
+            seed=worker.seed,
+            n_target=worker.n_target,
+            model_path=worker.model_path,
+            split=SPLIT_TEST if self._test_mode else SPLIT_TRAIN,
+            review=worker.review,
+            diversify=bool(worker.diversify and not worker.review
+                           and result.mode == "uncertain"),
+            uncertain_only=bool(worker.uncertain_only and result.mode == "uncertain"),
+            confidence_threshold=(worker.confidence_threshold
+                                  if worker.uncertain_only and result.mode == "uncertain"
+                                  else None),
+            excluded=("hold-out test cells and cells already shown this session"
+                      if worker.review else
+                      "cells already labelled (any split) and cells already "
+                      "shown this session"),
+            source_h5=self._h5_path.name if self._h5_path else "",
+            source="ModelPrep GUI",
+        )
+        self._begin_session_for(sampling)
+        order = {"random": "random order", "uncertain": "least certain first",
+                 "good": "most likely good first"}[result.mode]
+        self._pool_desc = order + (
+            "" if worker.cell_filter.is_empty()
+            else f" · {result.n_matching:,} cells where {worker.cell_filter.describe()}")
 
         self._populate_grid_from_page()
         self._save_action.setEnabled(True)
@@ -1385,8 +1433,9 @@ class LabelTrainPanel(QWidget):
         start = self._page_index * page_size
         end = min(start + page_size, len(self._pool))
         n_pages = max(1, (len(self._pool) + page_size - 1) // page_size)
+        desc = f" ({self._pool_desc})" if self._pool_desc else ""
         self._status.setText(
-            f"Pool: {len(self._pool)} cells · page {self._page_index + 1}/{n_pages} "
+            f"Pool: {len(self._pool)} cells{desc} · page {self._page_index + 1}/{n_pages} "
             f"(cells {start + 1}–{end})."
         )
 
@@ -1435,6 +1484,9 @@ class LabelTrainPanel(QWidget):
             ))
         n_saved = self._store.append_batch(rows)
         self._session_label_count += n_saved
+        # Record the session (and how its pool was drawn) after every save, so
+        # the provenance survives a crash.
+        self._record_session()
         # Remember what we persisted so these cells aren't re-written and don't
         # read as "unsaved" while their thumbnails stay coloured on screen.
         for idx, lbl in to_save:
@@ -1538,6 +1590,7 @@ class LabelTrainPanel(QWidget):
     # ── training ──────────────────────────────────────────────────────
 
     def _refresh_dataset_stats(self) -> None:
+        self._refresh_filter_summary()
         if self._store is None:
             self._stats_label.setText("(no source — pick an HDF5)")
             self._train_btn.setEnabled(False)
@@ -1719,18 +1772,44 @@ class LabelTrainPanel(QWidget):
             worker.cancel()
         worker.wait(5000)
 
+    def _new_session(self) -> None:
+        self._session_id = make_session_id()
+        self._session_started_at = datetime.now(timezone.utc).isoformat()
+        self._session_label_count = 0
+        self._session_sampling = None
+        self._pool_desc = ""
+
+    def _begin_session_for(self, sampling: dict) -> None:
+        """Keep one draw spec per session: a pool drawn differently from the
+        current session's (another filter, mode, model, …) starts a new session
+        once the current one has saved labels. Reloading with the same spec
+        continues the session."""
+        if sampling == self._session_sampling:
+            return
+        if self._session_label_count > 0:
+            self._record_session_if_any()
+            self._new_session()
+        self._session_sampling = sampling
+
+    def _record_session(self) -> None:
+        """Write or update this session's manifest entry (no-op until a label
+        has been saved)."""
+        if self._store is None or self._session_label_count == 0:
+            return
+        try:
+            self._store.record_session(
+                self._session_id,
+                self._session_started_at,
+                datetime.now(timezone.utc).isoformat(),
+                self._session_label_count,
+                sampling=self._session_sampling,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
     def _record_session_if_any(self) -> None:
-        if self._store is not None and self._session_label_count > 0:
-            try:
-                self._store.record_session(
-                    self._session_id,
-                    self._session_started_at,
-                    datetime.now(timezone.utc).isoformat(),
-                    self._session_label_count,
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            self._session_label_count = 0
+        self._record_session()
+        self._session_label_count = 0
 
     def shutdown(self) -> None:
         """Stop workers, record the session, release the HDF5 reader. Called by

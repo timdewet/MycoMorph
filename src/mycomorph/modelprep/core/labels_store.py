@@ -7,6 +7,7 @@ Layout (chosen to never mutate the HDF5):
     └── modelprep_labels/
         ├── labels.csv       # append-only; latest cell_uid row wins
         └── manifest.json    # source HDF5 fingerprint + session history
+                             # (each session: how its cells were sampled)
 
 CSV columns:
     cell_uid, label_idx, label_name, area_px, labeled_at, labeler,
@@ -213,8 +214,14 @@ class LabelsStore:
             return json.load(f)
 
     def _write_manifest(self, manifest: dict) -> None:
-        with open(self.manifest_path, "w") as f:
+        # Atomic replace: the manifest holds the sampling provenance and is
+        # rewritten after every save, so a crash mid-write must not corrupt it.
+        tmp = self.manifest_path.with_suffix(".json.tmp")
+        with open(tmp, "w") as f:
             json.dump(manifest, f, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, self.manifest_path)
 
     # ── read ────────────────────────────────────────────────────────────
 
@@ -407,17 +414,39 @@ class LabelsStore:
         started_at: str,
         ended_at: str,
         n_labels: int,
+        sampling: Optional[dict] = None,
     ) -> None:
+        """Add a session to the manifest, or update it if ``session_id`` is
+        already there — so callers can record after every save and a crash
+        never loses the session. ``sampling`` describes how the session's cells
+        were drawn (mode, filter, seed, …; see ``label_cells.sampling_record``)
+        and is what labels.csv rows link to via their ``session_id``."""
         manifest = self._read_manifest()
         if not manifest:
             return
-        manifest.setdefault("sessions", []).append({
+        entry = {
             "id": session_id,
             "started_at": started_at,
             "ended_at": ended_at,
             "n_labels": int(n_labels),
-        })
+        }
+        if sampling is not None:
+            entry["sampling"] = sampling
+        sessions = manifest.setdefault("sessions", [])
+        for i, existing in enumerate(sessions):
+            if existing.get("id") == session_id:
+                sessions[i] = {**existing, **entry}
+                break
+        else:
+            sessions.append(entry)
         self._write_manifest(manifest)
+
+    def session(self, session_id: str) -> Optional[dict]:
+        """The manifest entry for ``session_id`` (None if unrecorded)."""
+        for entry in self._read_manifest().get("sessions", []):
+            if entry.get("id") == session_id:
+                return entry
+        return None
 
     # ── training dataset assembly ───────────────────────────────────────
 
