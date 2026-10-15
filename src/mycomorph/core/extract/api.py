@@ -295,7 +295,7 @@ def extract_features_tiff(
     HDF5 crops). ``out_path`` is the Parquet path; the ``__crops.h5``
     companion is written next to it.
     """
-    from ..label_cells import load_hyperstack
+    from ..hyperstack import load_hyperstack
     from ..api import _read_imagej_labels, _read_pixels_per_um  # type: ignore[attr-defined]
     from ..provenance import (
         atomic_output_path,

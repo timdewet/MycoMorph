@@ -880,7 +880,7 @@ class LivePreviewPanel(QWidget):
             return
         fov = self._fov_spin.value()
         try:
-            from mycomorph.core.label_cells import load_hyperstack
+            from mycomorph.core.hyperstack import load_hyperstack
             data, _meta = load_hyperstack(sample.path)
             if fov >= data.shape[0]:
                 self._canvas.clear()

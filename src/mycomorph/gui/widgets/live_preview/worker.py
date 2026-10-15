@@ -699,7 +699,7 @@ class PreviewWorker(QThread):
                 # artifact whose provenance we can't vouch for.
                 return None
 
-            from mycomorph.core.label_cells import load_hyperstack
+            from mycomorph.core.hyperstack import load_hyperstack
             data, _meta = load_hyperstack(candidate)
             if req.fov_index >= data.shape[0]:
                 return None
@@ -833,7 +833,7 @@ class PreviewWorker(QThread):
         ``self._req.phase_channel`` to the resolved int so downstream
         stages see a concrete index.
         """
-        from mycomorph.core.label_cells import load_hyperstack
+        from mycomorph.core.hyperstack import load_hyperstack
         data, _meta = load_hyperstack(self._req.sample_path)
         if self._req.fov_index >= data.shape[0]:
             raise IndexError(

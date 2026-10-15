@@ -156,7 +156,7 @@ def test_fluor_norm_stage_applies_fixed_k_and_writes_sidecars(tmp_path: Path):
     assert len(outputs) == 1
     out = outputs[0]
 
-    from mycomorph.core.label_cells import load_hyperstack
+    from mycomorph.core.hyperstack import load_hyperstack
     got, _ = load_hyperstack(out)
     expected_green = np.clip(data[:, 2] - 0.1 * data[:, 1], 0, None)
     np.testing.assert_allclose(got[:, 2], expected_green, atol=1e-3)
@@ -209,7 +209,7 @@ def test_fluor_norm_stage_reuse_honours_crosstalk_options(tmp_path: Path):
     messages.clear()
     outputs = stage.run(ctx, lambda f, m: messages.append(m))
     assert not any("Reused" in m for m in messages)
-    from mycomorph.core.label_cells import load_hyperstack
+    from mycomorph.core.hyperstack import load_hyperstack
     got, _ = load_hyperstack(outputs[0])
     expected_green = np.clip(data[:, 2] - 0.2 * data[:, 1], 0, None)
     np.testing.assert_allclose(got[:, 2], expected_green, atol=1e-3)

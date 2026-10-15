@@ -33,7 +33,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from mycomorph.core.label_cells import (
+from mycomorph.core.hyperstack import (
     get_labeled_mask_from_fov,
     load_hyperstack,
 )

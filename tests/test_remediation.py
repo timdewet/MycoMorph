@@ -237,7 +237,7 @@ def _synthetic_segmented_tiff(path: Path, pixels_per_um: float = 2.0) -> None:
 
 def test_segmentation_tiff_adapter_preserves_fovs_and_scale(monkeypatch, tmp_path: Path):
     from mycomorph.core import cellpose_pipeline
-    from mycomorph.core.label_cells import load_hyperstack
+    from mycomorph.core.hyperstack import load_hyperstack
 
     source = tmp_path / "input.tif"
     _synthetic_segmented_tiff(source)
@@ -276,7 +276,7 @@ def test_segmentation_tiff_adapter_preserves_fovs_and_scale(monkeypatch, tmp_pat
 
 def test_classification_adapter_uses_physical_scale(monkeypatch, tmp_path: Path):
     from mycomorph.core import cell_quality_classifier
-    from mycomorph.core.label_cells import load_hyperstack
+    from mycomorph.core.hyperstack import load_hyperstack
 
     source = tmp_path / "segmented.tif"
     output = tmp_path / "classified.tif"
