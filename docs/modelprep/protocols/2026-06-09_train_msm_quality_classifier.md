@@ -1,5 +1,8 @@
 # Train *M. smegmatis* cell-quality classifier — ModelPrep (net-new)
 
+> **Note:** written for standalone ModelPrep and MycoPrep, before ModelPrep moved into MycoMorph (0.5.0).
+> Where its paths and commands are now: [../README.md](../README.md#written-before-the-move).
+
 **Date:** _________________  **Operator:** _________________  **Status:** ☐ Planned ☐ Running ☐ Done
 
 > **Dry-lab protocol.** Mirror this in the Notion **🧬 Lab Notebook**. Conventions:
