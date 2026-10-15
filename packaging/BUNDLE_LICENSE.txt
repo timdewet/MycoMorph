@@ -12,7 +12,9 @@ Company Ltd.), which are licensed under the GNU Lesser General Public License
 version 3 (LGPL v3). Because the bundle includes PyQt6, the bundle as a whole
 is distributed under the terms of the GPL v3.
 
-The licence texts are in this bundle:
+The licence texts are in this bundle: in the _internal folder next to the
+MycoMorph executable (Windows, Linux), or in MycoMorph.app/Contents/Resources
+(macOS).
 
     licenses/PyQt6/LICENSE    GNU GPL v3
     licenses/Qt6/LICENSE      GNU LGPL v3

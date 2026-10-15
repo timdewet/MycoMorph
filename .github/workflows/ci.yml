@@ -99,6 +99,13 @@ jobs:
           $process = Start-Process -FilePath "dist/MycoMorph/MycoMorph.exe" -ArgumentList "--modelprep" -PassThru -Wait
           exit $process.ExitCode
 
+      - name: Check the licence notice sits next to the executable
+        shell: pwsh
+        run: |
+          foreach ($f in "BUNDLE_LICENSE.txt", "LICENSE") {
+            if (-not (Test-Path "dist/MycoMorph/$f")) { Write-Error "dist/MycoMorph/$f is missing"; exit 1 }
+          }
+
   macos-bundle:
     if: github.event_name == 'pull_request'
     runs-on: macos-latest

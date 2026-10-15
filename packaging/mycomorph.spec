@@ -169,6 +169,16 @@ coll = COLLECT(
     name="MycoMorph",
 )
 
+# Windows / Linux: PyInstaller puts every data file in _internal/, so also put
+# the licence notice and MycoMorph's licence next to the executable, where
+# people look. (The macOS app keeps them in Contents/Resources/.)
+if sys.platform != "darwin":
+    import shutil
+
+    top = Path(DISTPATH) / "MycoMorph"
+    shutil.copy2(Path(SPECPATH) / "BUNDLE_LICENSE.txt", top)
+    shutil.copy2(Path(SPECPATH).parent / "LICENSE", top)
+
 
 # macOS: wrap the folder in MycoMorph.app, so users get an app rather than a
 # folder holding a Unix executable. Not signed or notarised.
