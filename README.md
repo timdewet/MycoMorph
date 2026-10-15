@@ -30,7 +30,9 @@ Everything runs from one desktop app. The same functionality is also available a
 2. Unzip it anywhere (e.g. `C:\Program Files\MycoMorph\`).
 3. Double-click `MycoMorph.exe`.
 
-You don't need to install Python. The first segmentation run downloads a few hundred MB of Cellpose model weights to `%USERPROFILE%\.cellpose\`, so it needs internet access once. After that the app works offline. The Windows bundle runs on the CPU.
+You don't need to install Python. The first segmentation run downloads a few hundred MB of Cellpose model weights to `%USERPROFILE%\.cellpose\`, so it needs internet access once. After that the app works offline.
+
+The Windows bundle runs on the CPU only. To use an NVIDIA GPU, [install from source](#for-developers-from-source) with the CUDA build of PyTorch.
 
 ### For developers (from source)
 
