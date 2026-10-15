@@ -27,9 +27,12 @@ import threading
 import numpy as np
 from pathlib import Path
 
-# The block below is hash-checked against ModelPrep's copy
-# (tests/test_classifier_model_def.py in both repos), so it must stay
-# byte-identical: edit both copies together and refresh GOLDEN_SHA in both.
+# The block below is frozen: every saved .pth (the bundled presets and every
+# model trained with ModelPrep, mycomorph.modelprep) depends on it, and
+# tests/test_classifier_model_def.py pins its SHA-256. ModelPrep now imports
+# this block instead of keeping a copy. The block's own header still names that
+# former copy; it is kept verbatim so the hash stays the one the archived
+# ModelPrep, and the Fig. S2 models trained with it, used.
 
 # ── BEGIN SHARED MODEL DEFINITION ─────────────────────────────────────────────
 # Keep byte-identical with:

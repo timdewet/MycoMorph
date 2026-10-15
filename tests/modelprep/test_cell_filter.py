@@ -212,7 +212,7 @@ def test_random_select_ignores_model(multi_condition_h5, tmp_path):
 def test_filtered_pools_share_the_score_cache(multi_condition_h5, tmp_path, monkeypatch):
     """Scores cached while labelling one gene are reused when the filter
     changes: only cells not scored before are run through the model."""
-    import modelprep.core.cell_quality_classifier as cqc
+    import mycomorph.core.cell_quality_classifier as cqc
     from modelprep.core import score_cache
 
     monkeypatch.setattr(score_cache, "score_cache_root", lambda: tmp_path / "cache")

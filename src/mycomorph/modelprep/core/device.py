@@ -1,8 +1,9 @@
 """Compute-device detection — single source of truth for the GUI + trainer.
 
 NOTE: ``CellQualityClassifier.__init__`` keeps its own inlined probe because it
-lives inside the drift-guarded shared model block (kept byte-identical with
-MycoMorph). Everything *outside* that block routes through here.
+lives inside the frozen model block in ``mycomorph.core.cell_quality_classifier``
+(hash-pinned by ``tests/test_classifier_model_def.py``). Everything *outside*
+that block routes through here.
 """
 
 from __future__ import annotations

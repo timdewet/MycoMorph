@@ -12,7 +12,7 @@ from pathlib import Path
 
 
 def _models_dir() -> Path:
-    import modelprep.core.cell_quality_classifier as m
+    import mycomorph.core.cell_quality_classifier as m
     return Path(m.__file__).parent / "models"
 
 
@@ -33,7 +33,7 @@ def test_mtb_sidecar_sha_matches():
 def test_mtb_loads_and_runs():
     import numpy as np
 
-    from modelprep.core.cell_quality_classifier import (
+    from mycomorph.core.cell_quality_classifier import (
         CROP_SIZE, NUM_CLASSES, CellQualityClassifier,
     )
     from modelprep.core.cli import resolve_classifier_preset

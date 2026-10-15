@@ -35,7 +35,7 @@ from typing import Optional
 
 import numpy as np
 
-from .cell_quality_classifier import CLASS_NAMES, CROP_SIZE, CellQualityClassifier
+from mycomorph.core.cell_quality_classifier import CLASS_NAMES, CROP_SIZE, CellQualityClassifier
 from .crops_h5 import CropRecord, HDF5CropsReader
 from .label_cells import _make_contour_thumb
 from .labels_store import (

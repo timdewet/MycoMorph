@@ -32,7 +32,7 @@ from typing import Iterator, Optional, Sequence
 
 import numpy as np
 
-from .cell_quality_classifier import (
+from mycomorph.core.cell_quality_classifier import (
     CROP_SIZE,
     _append_area_channel_batch,
     _append_area_channel_single,

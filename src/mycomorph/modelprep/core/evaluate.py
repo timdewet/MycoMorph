@@ -36,7 +36,7 @@ def _metrics(y: np.ndarray, p_bad: np.ndarray, pred: np.ndarray) -> dict:
         roc_auc_score,
     )
 
-    from .cell_quality_classifier import CLASS_NAMES
+    from mycomorph.core.cell_quality_classifier import CLASS_NAMES
     from .train_classifier import single_class_warning
 
     counts = {CLASS_NAMES[i]: int((y == i).sum()) for i in range(len(CLASS_NAMES))}
@@ -105,7 +105,7 @@ def evaluate_model(h5_path: Path, labels_dir: Path, model: Path,
 
 
 def _score_cnn(h5_path, labels_dir, model_file, cfg, device, batch_size):
-    from .cell_quality_classifier import CellQualityClassifier
+    from mycomorph.core.cell_quality_classifier import CellQualityClassifier
     from .crops_h5 import HDF5CropsReader
     from .labels_store import LabelsStore
 

@@ -387,7 +387,7 @@ class _TrainWorker(QThread):
         try:
             from ...core.train_classifier import train as run_train
             from ...core.labels_store import LABELS_SCHEMA_VERSION, cell_uids_sha256
-            from ...core.cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
+            from mycomorph.core.cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
             from ...core.crop_provenance import crop_options
 
             reader = HDF5CropsReader(self.h5_path)

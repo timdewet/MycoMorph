@@ -167,7 +167,7 @@ def verify_model(
 
     import numpy as np
 
-    from .cell_quality_classifier import (
+    from mycomorph.core.cell_quality_classifier import (
         CLASS_NAMES, NUM_CLASSES, CROP_SIZE, CellQualityClassifier,
     )
 
@@ -469,7 +469,7 @@ def train(
     """Train the binary cell-quality CNN from labelled HDF5 crops."""
     import numpy as np
 
-    from .cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
+    from mycomorph.core.cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
     from .crop_provenance import crop_options
     from .labels_store import LABELS_SCHEMA_VERSION, cell_uids_sha256
     from .train_classifier import train as run_train

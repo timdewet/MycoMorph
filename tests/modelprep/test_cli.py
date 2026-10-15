@@ -118,7 +118,7 @@ def test_evaluate_preprocesses_like_training(synthetic_h5, tmp_path, monkeypatch
     """The hold-out pass in train() (and MycoMorph's inference crops) min-max
     the phase channel to [0, 1] after the resize; re-scoring must too, or its
     numbers drift from the ones training reported."""
-    import modelprep.core.cell_quality_classifier as cqc
+    import mycomorph.core.cell_quality_classifier as cqc
     from modelprep.core.evaluate import evaluate_model
 
     ld = _labels(synthetic_h5, tmp_path)

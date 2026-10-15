@@ -309,7 +309,7 @@ def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_pat
     say model 'none' with NaN confidence, even with a model in the picker
     (review M9)."""
     import math
-    import modelprep.core.cell_quality_classifier as cqc
+    import mycomorph.core.cell_quality_classifier as cqc
     from modelprep.core.labels_store import LabelsStore
     from modelprep.gui.panels.label_train_panel import LabelTrainPanel
 
@@ -345,7 +345,7 @@ def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_pat
 def test_pool_scores_are_cached_per_model_and_h5(synthetic_h5, tmp_path, monkeypatch):
     """A second Load pool with the same model + HDF5 doesn't rescore (review M5)."""
     import numpy as np
-    import modelprep.core.cell_quality_classifier as cqc
+    import mycomorph.core.cell_quality_classifier as cqc
     import modelprep.core.score_cache as sc
     from modelprep.gui.panels.label_train_panel import _ActiveLearningWorker
 

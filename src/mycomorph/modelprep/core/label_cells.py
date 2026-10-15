@@ -36,7 +36,7 @@ from typing import Optional
 import numpy as np
 
 from .cell_filter import CellFilter
-from .cell_quality_classifier import CROP_SIZE
+from mycomorph.core.cell_quality_classifier import CROP_SIZE
 from .crops_h5 import CropRecord, HDF5CropsReader
 from .labels_store import (
     LABEL_TO_IDX,
@@ -244,7 +244,7 @@ def _score_cells(reader, indices, model_path, progress_cb, should_cancel,
     batch_size = 256
     try:
         if todo.size:
-            from .cell_quality_classifier import CellQualityClassifier
+            from mycomorph.core.cell_quality_classifier import CellQualityClassifier
 
             clf = CellQualityClassifier(str(model_path), in_channels=3)
             for lo in range(0, len(todo), batch_size):

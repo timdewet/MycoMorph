@@ -219,7 +219,7 @@ def train_and_save(h5_path: Path, labels_dir: Path, output_dir: Path,
     import json
     import joblib
 
-    from .cell_quality_classifier import CLASS_NAMES
+    from mycomorph.core.cell_quality_classifier import CLASS_NAMES
     from .train_classifier import _binary_curves
 
     matrix = load_feature_matrix(h5_path, labels_dir, phase_only=phase_only)  # all 4 groups

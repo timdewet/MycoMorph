@@ -2,12 +2,9 @@
 """
 Train Cell Quality Classifier — ModelPrep
 =========================================
-Trains the CNN on labeled cell crops. Two input modes:
-
-  1. **Arrays** (preferred for HDF5 pipeline). Pass ``crops`` and ``labels``
-     directly; ``data_dir`` is ignored. Used by ``modelprep-cli train``.
-  2. **Legacy directory**. Pass ``data_dir`` pointing at a
-     ``crops/*.npy + labels.csv`` layout. Kept for migrations only.
+Trains the CNN on labeled cell crops, passed in as arrays (``crops`` +
+``labels``, e.g. from ``LabelsStore.to_training_dataset()``). Used by the
+GUI and ``modelprep-cli train``.
 
 Features:
     - Stratified three-way train/validation/test split, with graceful
@@ -304,9 +301,8 @@ def _binary_curves(true, scores_pos):
 
 def train(
     *,
-    data_dir=None,
-    crops=None,
-    labels=None,
+    crops,
+    labels,
     eval_crops=None,
     eval_labels=None,
     output_dir,
@@ -319,8 +315,6 @@ def train(
     device=None,
     seed=42,
     freeze_backbone=False,
-    phase_only=True,
-    phase_channel_in_crop=0,
     pretrained_path=None,
     provenance=None,
     progress_cb=None,
@@ -328,9 +322,8 @@ def train(
     """
     Train the cell quality CNN.
 
-    Either pass ``crops`` + ``labels`` (preferred — comes straight out of
-    ``LabelsStore.to_training_dataset()``) or ``data_dir`` for the legacy
-    ``crops/*.npy + labels.csv`` layout.
+    ``crops`` + ``labels`` come straight out of
+    ``LabelsStore.to_training_dataset()``.
 
     The split is three-way (train/val/test): the model is checkpointed on
     validation accuracy, the decision threshold is chosen on validation, and
@@ -355,15 +348,11 @@ def train(
     import torch.nn as nn
     from torch.utils.data import DataLoader
 
-    from .cell_quality_classifier import (
+    from mycomorph.core.cell_quality_classifier import (
         CLASS_NAMES,
         NUM_CLASSES,
         _build_model,
-        load_crop_dataset,
     )
-
-    if crops is None and data_dir is None:
-        raise ValueError("train(): pass either `crops`+`labels` or `data_dir`.")
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -379,15 +368,8 @@ def train(
         _os.environ.setdefault("PYTORCH_ENABLE_MPS_FALLBACK", "1")
 
     # ── Load data ─────────────────────────────────────────────────────────
-    if crops is None:
-        log.info("Loading dataset from disk...")
-        crops, labels, _meta = load_crop_dataset(
-            data_dir, phase_only=phase_only,
-            phase_channel_in_crop=phase_channel_in_crop,
-        )
-    else:
-        crops = np.asarray(crops, dtype=np.float32)
-        labels = np.asarray(labels, dtype=np.int64)
+    crops = np.asarray(crops, dtype=np.float32)
+    labels = np.asarray(labels, dtype=np.int64)
 
     have_external_eval = eval_crops is not None and eval_labels is not None and len(eval_labels) > 0
     if have_external_eval:
