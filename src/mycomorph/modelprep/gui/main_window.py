@@ -32,6 +32,7 @@ from PyQt6.QtWidgets import (
 
 from ._resources import resource_root
 from ..core.device import device_label, gpu_available
+from ..core.paths import modelprep_home
 from .panels.label_train_panel import LabelTrainPanel
 from .panels.models_panel import ModelsPanel
 from .panels.source_panel import SourcePanel
@@ -43,7 +44,7 @@ from .ui.nav_sidebar import NavEntry, NavSidebar
 def settings_file() -> Path:
     # Resolved per call rather than at import so it follows $HOME (the test
     # suite points HOME at a temp dir; see tests/conftest.py).
-    return Path.home() / ".modelprep" / "settings.json"
+    return modelprep_home() / "settings.json"
 
 
 # The three workflow steps. ``pipeline=False`` keeps the sidebar clean — no

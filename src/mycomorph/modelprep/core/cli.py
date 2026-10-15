@@ -24,6 +24,7 @@ import typer
 
 from .crops_h5 import HDF5CropsReader
 from .labels_store import LabelsStore, default_labels_dir_for
+from .paths import modelprep_home
 
 
 app = typer.Typer(
@@ -88,7 +89,7 @@ _FILTER_OPTIONS = {
 # ── Default outputs ──────────────────────────────────────────────────────────
 
 def _default_output_dir() -> Path:
-    return Path.home() / ".modelprep" / "models" / f"trained_{int(time.time())}"
+    return modelprep_home() / "models" / f"trained_{int(time.time())}"
 
 
 # ── Commands ─────────────────────────────────────────────────────────────────
@@ -758,7 +759,7 @@ def learning_curve(
     )
     if output is None:
         from ..gui.trained_models import human_timestamp
-        output = Path.home() / ".modelprep" / "learning_curves" / f"{h5.stem}_{human_timestamp()}"
+        output = modelprep_home() / "learning_curves" / f"{h5.stem}_{human_timestamp()}"
     output.mkdir(parents=True, exist_ok=True)
     (output / "curve.json").write_text(_json.dumps(
         {"h5": str(h5), "labels_dir": str(ld), "epochs": epochs, "seed": seed,

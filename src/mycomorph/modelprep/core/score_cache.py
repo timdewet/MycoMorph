@@ -20,12 +20,14 @@ from typing import Optional
 
 import numpy as np
 
+from .paths import modelprep_home
+
 _VERSION = "1"
 _MEMORY: dict[str, np.ndarray] = {}
 
 
 def score_cache_root() -> Path:
-    return Path.home() / ".modelprep" / "score_cache"
+    return modelprep_home() / "score_cache"
 
 
 def _file_key(path: Path) -> str:

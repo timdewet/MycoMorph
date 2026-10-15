@@ -35,6 +35,7 @@ from PyQt6.QtWidgets import (
 
 from ...core.crops_h5 import HDF5CropsReader
 from ...core.labels_store import SPLIT_TEST, LabelsStore
+from ...core.paths import modelprep_home
 from ..trained_models import (
     TrainedModel,
     human_timestamp,
@@ -564,7 +565,7 @@ class ModelsPanel(QWidget):
     def _save_curve(self, points: list[dict]) -> Optional[str]:
         try:
             stem = self._h5_path.stem if self._h5_path else "curve"
-            out = Path.home() / ".modelprep" / "learning_curves" / f"{stem}_{human_timestamp()}"
+            out = modelprep_home() / "learning_curves" / f"{stem}_{human_timestamp()}"
             out.mkdir(parents=True, exist_ok=True)
             (out / "curve.json").write_text(json.dumps(
                 {"h5": str(self._h5_path), "points": points}, indent=2), encoding="utf-8")

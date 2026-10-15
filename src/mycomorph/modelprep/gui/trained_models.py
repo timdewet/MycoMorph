@@ -16,9 +16,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from ..core.paths import modelprep_home
+
 
 def trained_models_root() -> Path:
-    return Path.home() / ".modelprep" / "models"
+    return modelprep_home() / "models"
 
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9._-]+")
