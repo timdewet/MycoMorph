@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.4.1](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.4.0...mycomorph-v0.4.1) (2026-10-15)
+
+
+### Documentation
+
+* point GPU users to the from-source install ([b2b59fe](https://github.com/timdewet/MycoMorph/commit/b2b59feb2a2d53f2d328e27f499f0509933edfa8))
+* rewrite README to cover the current pipeline ([ae994f0](https://github.com/timdewet/MycoMorph/commit/ae994f0295acd4b3e3e3089981f476e60d798f2e))
+* rewrite README to cover the current pipeline ([9fc45b6](https://github.com/timdewet/MycoMorph/commit/9fc45b60aede58f88d6deeaae4c31578c31d46a5))
+
 ## [0.4.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.3.0...mycomorph-v0.4.0) (2026-10-15)
 
 
