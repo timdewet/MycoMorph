@@ -5,7 +5,9 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
+from PyQt6 import sip
 from PyQt6.QtCore import QByteArray, QSettings, QSize, Qt as _Qt, QTimer, QUrl
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QDesktopServices, QIcon, QPainter, QPixmap
@@ -50,6 +52,9 @@ from .ui.nav_sidebar import NavEntry, NavSidebar, StageStatus
 from .updater import ReleaseInfo, UpdateChecker
 from .widgets.library_browser import LibraryBrowser
 from .widgets.live_preview import LivePreviewPanel
+
+if TYPE_CHECKING:
+    from mycomorph.modelprep.gui.main_window import MainWindow as ModelPrepWindow
 
 
 def _gpu_available() -> bool:
@@ -140,7 +145,9 @@ class MainWindow(QMainWindow):
         self.resize(target_w, target_h)
 
         self._runner: PipelineRunner | None = None
-        self._labeller_window: _LabelTrainerWindow | None = None
+        # ModelPrep (labeller + trainer) opens in this process (decision D3).
+        self._modelprep_window: ModelPrepWindow | None = None
+        self._gpu_share_warning: QMessageBox | None = None
         self._model_details_window: _ModelDetailsWindow | None = None
         self._library_browser_window: _LibraryBrowserWindow | None = None
         self._pending_update: ReleaseInfo | None = None
@@ -713,6 +720,12 @@ class MainWindow(QMainWindow):
             self._status_msg.setText("Stopping safely before closing…")
             event.ignore()
             return
+        # ModelPrep's window lives in this process, so it closes with
+        # MycoMorph. It asks about unsaved labels; a Cancel there keeps both
+        # windows open.
+        if not self._close_modelprep_window():
+            event.ignore()
+            return
         self._save_state()
         super().closeEvent(event)
 
@@ -1117,11 +1130,91 @@ class MainWindow(QMainWindow):
             return []
 
     def _open_label_trainer(self) -> None:
-        if self._labeller_window is None:
-            self._labeller_window = _LabelTrainerWindow(self.label_train_panel, parent=self)
-        self._labeller_window.show()
-        self._labeller_window.raise_()
-        self._labeller_window.activateWindow()
+        """Open ModelPrep, the cell-quality labeller and trainer, in this
+        process. One window: a second request raises the open one."""
+        win = self._live_modelprep_window()
+        fresh = win is None
+        if win is None:
+            from mycomorph.modelprep.gui.main_window import MainWindow as ModelPrepWindow
+
+            win = ModelPrepWindow()
+            win.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+            win.label_train_panel.trainingStarted.connect(
+                self._on_modelprep_training_started
+            )
+            self._modelprep_window = win
+        self._preselect_modelprep_source(win, fresh=fresh)
+        if win.isMinimized():
+            win.showNormal()
+        win.show()
+        win.raise_()
+        win.activateWindow()
+
+    def _current_crops_h5(self) -> Path | None:
+        """This run's ``04_features/all_crops.h5``, if the Features stage
+        wrote one (it does when "Save HDF5 crops" is on)."""
+        out = self.input_panel.output_dir
+        if out is None:
+            return None
+        h5 = Path(out) / "04_features" / "all_crops.h5"
+        return h5 if h5.is_file() else None
+
+    def _preselect_modelprep_source(self, win: ModelPrepWindow, *, fresh: bool) -> None:
+        """Point ModelPrep's Source page at this run's crops.
+
+        A new window switches to them even if ModelPrep reopened another
+        file from its own settings. An open window is only given them when
+        it has no source yet, so raising it never swaps out a dataset that
+        is being labelled.
+        """
+        h5 = self._current_crops_h5()
+        if h5 is None:
+            return
+        current = win.source_panel.current_h5_path()
+        if current is not None:
+            if not fresh or Path(current).resolve() == h5.resolve():
+                return
+        win.source_panel.set_h5_path(h5)
+
+    def _live_modelprep_window(self) -> ModelPrepWindow | None:
+        """The open ModelPrep window, or None once it has been closed."""
+        win = self._modelprep_window
+        if win is not None and (sip.isdeleted(win) or not win.isVisible()):
+            # Closing it stopped its workers and released its HDF5 (and
+            # deletes it), so a closed window is never shown again.
+            win = self._modelprep_window = None
+        return win
+
+    def _close_modelprep_window(self) -> bool:
+        """Close ModelPrep's window, if open. False if the user cancelled."""
+        win = self._live_modelprep_window()
+        if win is None:
+            return True
+        # Its closeEvent offers to save unsaved labels, then shuts down the
+        # label / train workers (label_train_panel.shutdown()).
+        if not win.close():
+            return False
+        self._modelprep_window = None
+        return True
+
+    def _on_modelprep_training_started(self) -> None:
+        """Warn, without blocking, when training starts during a pipeline run."""
+        if not self._run_active:
+            return
+        box = QMessageBox(
+            QMessageBox.Icon.Warning,
+            "Pipeline run in progress",
+            "MycoMorph's pipeline is still running. It and ModelPrep's training "
+            "share the GPU, so both will run slower, and a GPU with little "
+            "memory can run out.\n\nTraining continues; stop either one if the "
+            "other should finish first.",
+            QMessageBox.StandardButton.Ok,
+            self._modelprep_window or self,
+        )
+        box.setWindowModality(Qt.WindowModality.NonModal)
+        box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        box.show()
+        self._gpu_share_warning = box
 
     def _open_model_details(self) -> None:
         if self._model_details_window is None:

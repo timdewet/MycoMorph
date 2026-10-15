@@ -60,6 +60,9 @@ test = [
 mycomorph = "mycomorph.gui.app:main"
 mycomorph-cli = "mycomorph.core.cli:app"
 mycomorph-focus = "mycomorph.core.focus.cli:app"
+# ModelPrep (the cell-quality labeller / trainer) keeps its own commands.
+modelprep = "mycomorph.modelprep.gui.app:main"
+modelprep-cli = "mycomorph.modelprep.core.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]

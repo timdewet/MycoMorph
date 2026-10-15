@@ -50,6 +50,7 @@ from PyQt6.QtWidgets import (
 
 from mycomorph.gui.ui import tokens
 from mycomorph.gui.ui.flow_layout import FlowLayout
+from mycomorph.gui.widgets.model_inspector import ModelInspector
 
 from ...core._render import outline_of, to_outlined_rgb
 from ...core.cell_filter import CellFilter
@@ -78,7 +79,6 @@ TEST_SET_TARGET = 1000
 SAMPLING_SEED = 42
 from ..palette import COLORS, LABEL_COLORS
 from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
-from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
 
 
@@ -482,6 +482,10 @@ class _TrainWorker(QThread):
 
 class LabelTrainPanel(QWidget):
     """The single workhorse panel: active-learning labeller + fine-tune trainer."""
+
+    # A training run has just started (MycoMorph warns if its pipeline is
+    # running too: both use the GPU).
+    trainingStarted = pyqtSignal()
 
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
@@ -971,7 +975,10 @@ class LabelTrainPanel(QWidget):
         self._train_status.setWordWrap(True)
         v.addWidget(self._train_status)
 
-        self._inspector = ModelInspector()
+        self._inspector = ModelInspector(
+            empty_title="No trained model selected",
+            empty_hint="Train a model to see its curves + metrics here.",
+        )
         v.addWidget(self._inspector)
 
         return box
@@ -1654,6 +1661,7 @@ class LabelTrainPanel(QWidget):
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.finished.connect(self._on_train_finished)
         self._train_worker.start()
+        self.trainingStarted.emit()
 
     def _on_train_progress(self, frac: float, msg: str) -> None:
         if self.sender() is not self._train_worker:
