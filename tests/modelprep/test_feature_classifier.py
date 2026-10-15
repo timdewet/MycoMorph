@@ -48,6 +48,17 @@ def test_train_feature_classifier_learns_signal():
     assert "signal" in top
 
 
+def test_train_feature_classifier_drops_all_nan_features():
+    # An all-NaN feature in the train split (e.g. frag_bright_continuation when no
+    # mask skeleton has endpoints) carries no information and crashes
+    # HistGradientBoosting's binning on scikit-learn 1.9 — it must be dropped.
+    m = _separable_matrix()
+    m["empty"] = np.nan
+    s = train_feature_classifier(m, n_importance_repeats=2, return_estimator=True)
+    assert "empty" not in s["_feature_cols"]
+    assert s["n_features"] == 2 and s["balanced_acc"] > 0.8
+
+
 def test_train_feature_classifier_requires_holdout():
     m = _separable_matrix()
     m["split"] = "train"     # no test rows

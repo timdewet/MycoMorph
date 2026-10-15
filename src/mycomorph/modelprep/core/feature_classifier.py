@@ -118,6 +118,12 @@ def train_feature_classifier(matrix, seed: int = 42, n_importance_repeats: int =
         raise ValueError("Feature model needs a hold-out test set (no 'test' split labels).")
     if tr["label"].nunique() < 2:
         raise ValueError("Train split has only one class.")
+    # Drop features with no observed value in the train split: they carry no
+    # information, and scikit-learn 1.9's HistGradientBoosting binning crashes on
+    # an all-NaN column ("window shape cannot be larger than input array shape").
+    # E.g. frag_bright_continuation is NaN for every cell whose mask skeleton has
+    # no endpoints, which a small early-round label set can hit.
+    cols = [c for c in cols if tr[c].notna().any()]
 
     Xtr, ytr = tr[cols].to_numpy(dtype=np.float64), tr["label"].to_numpy()
     Xte, yte = te[cols].to_numpy(dtype=np.float64), te["label"].to_numpy()
