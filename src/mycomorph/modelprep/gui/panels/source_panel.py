@@ -167,7 +167,7 @@ class SourcePanel(QGroupBox):
         """Flag crops that won't match what MycoMorph classifies (background
         masking) or that the previous model pre-filtered."""
         from ...core.crop_provenance import crop_warnings
-        from ..ui import tokens
+        from mycomorph.gui.ui import tokens
 
         try:
             warnings = crop_warnings(path)

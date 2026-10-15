@@ -8,9 +8,10 @@ import sys
 from PyQt6.QtGui import QIcon
 from PyQt6.QtWidgets import QApplication
 
+from mycomorph.gui.ui import theme
+
 from ._resources import resource_root
 from .main_window import MainWindow
-from .ui import theme
 
 
 def _ensure_qt_plugin_path() -> None:

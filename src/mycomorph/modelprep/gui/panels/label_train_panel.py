@@ -29,7 +29,6 @@ import numpy as np
 from PyQt6.QtCore import QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QAction, QDesktopServices
 from PyQt6.QtWidgets import (
-    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
@@ -48,6 +47,9 @@ from PyQt6.QtWidgets import (
     QVBoxLayout,
     QWidget,
 )
+
+from mycomorph.gui.ui import tokens
+from mycomorph.gui.ui.flow_layout import FlowLayout
 
 from ...core._render import outline_of, to_outlined_rgb
 from ...core.cell_filter import CellFilter
@@ -75,8 +77,6 @@ TEST_SET_TARGET = 1000
 # Seed for random-order pools; recorded with each session in manifest.json.
 SAMPLING_SEED = 42
 from ..palette import COLORS, LABEL_COLORS
-from ..ui import tokens
-from ..ui.flow_layout import FlowLayout
 from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
 from ..widgets.model_inspector import ModelInspector
 from .cell_detail_dialog import CellDetailView
@@ -626,11 +626,6 @@ class LabelTrainPanel(QWidget):
         # whole, so it carries no layout of its own.
         self.label_section = self._build_label_section()
         self.train_section = self._build_train_section()
-        # Plain numeric fields — no stepper arrows. Type the value; the scroll
-        # wheel and ↑/↓ keys still adjust it.
-        for section in (self.label_section, self.train_section):
-            for sb in section.findChildren(QAbstractSpinBox):
-                sb.setButtonSymbols(QAbstractSpinBox.ButtonSymbols.NoButtons)
 
     def _build_label_section(self) -> QWidget:
         box = QGroupBox("Label cells")

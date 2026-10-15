@@ -28,7 +28,7 @@ def _app():
 
 def test_main_window_constructs_and_navigates(isolated_home):
     app = _app()
-    from mycomorph.modelprep.gui.ui import theme
+    from mycomorph.gui.ui import theme
     from mycomorph.modelprep.gui.main_window import MainWindow, settings_file
 
     # Settings come from the temp HOME, so the user's last HDF5 isn't reopened.

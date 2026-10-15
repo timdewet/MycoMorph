@@ -2,8 +2,8 @@
 
 A header bar (breadcrumb + brand + logo), a left navigation sidebar with a
 live system-info footer, and a stacked set of cards for the three steps of
-the workflow (Source → Label cells → Fine-tune). Shares its visual language
-with MycoMorph via the ported ``gui.ui`` design system.
+the workflow (Source → Label cells → Fine-tune). Built on MycoMorph's design
+system (``mycomorph.gui.ui``).
 """
 
 from __future__ import annotations
@@ -30,15 +30,16 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from mycomorph.gui.ui import tokens
+from mycomorph.gui.ui.elevation import apply_shadow
+from mycomorph.gui.ui.nav_sidebar import NavEntry, NavSidebar
+
 from ._resources import resource_root
 from ..core.device import device_label, gpu_available
 from ..core.paths import modelprep_home
 from .panels.label_train_panel import LabelTrainPanel
 from .panels.models_panel import ModelsPanel
 from .panels.source_panel import SourcePanel
-from .ui import tokens
-from .ui.elevation import apply_shadow
-from .ui.nav_sidebar import NavEntry, NavSidebar
 
 
 def settings_file() -> Path:

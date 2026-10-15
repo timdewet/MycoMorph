@@ -1,6 +1,6 @@
 """Shared colour palette for ModelPrep GUI widgets.
 
-Thin, theme-aware shim over the design tokens in :mod:`modelprep.gui.ui.tokens`.
+Thin, theme-aware shim over the design tokens in :mod:`mycomorph.gui.ui.tokens`.
 ``COLORS`` and ``LABEL_COLORS`` behave like the dicts they replaced, but each
 lookup resolves against the *currently active* palette, so widgets that read
 them at paint time (cell thumbnails, the detail dialog) automatically track
@@ -10,7 +10,7 @@ share it without import cycles.
 
 from __future__ import annotations
 
-from .ui import tokens
+from mycomorph.gui.ui import tokens
 
 
 class _ActiveColors:

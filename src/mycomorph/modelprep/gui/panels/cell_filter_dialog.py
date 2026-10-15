@@ -27,8 +27,9 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from mycomorph.gui.ui import tokens
+
 from ...core.cell_filter import FILTER_FIELDS, CellFilter, distinct_values
-from ..ui import tokens
 
 BLANK = "(blank)"
 _SEARCH_MIN_VALUES = 8  # show a search box above lists longer than this

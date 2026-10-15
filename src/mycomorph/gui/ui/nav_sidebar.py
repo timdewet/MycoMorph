@@ -219,7 +219,13 @@ class NavSidebar(QFrame):
 
     currentChanged = pyqtSignal(int)
 
-    def __init__(self, entries: list[NavEntry], parent: Optional[QWidget] = None) -> None:
+    def __init__(
+        self,
+        entries: list[NavEntry],
+        parent: Optional[QWidget] = None,
+        *,
+        brand: str = "MycoMorph",
+    ) -> None:
         super().__init__(parent)
         self.setObjectName("sidebar")
         self.setFixedWidth(tokens.SIDEBAR_WIDTH)
@@ -231,10 +237,10 @@ class NavSidebar(QFrame):
         root.setContentsMargins(0, tokens.S4, 0, tokens.S3)
         root.setSpacing(0)
 
-        brand = QLabel("MycoMorph")
-        brand.setObjectName("brand")
-        brand.setContentsMargins(tokens.S4, tokens.S2, tokens.S4, tokens.S4)
-        root.addWidget(brand)
+        brand_lbl = QLabel(brand)
+        brand_lbl.setObjectName("brand")
+        brand_lbl.setContentsMargins(tokens.S4, tokens.S2, tokens.S4, tokens.S4)
+        root.addWidget(brand_lbl)
 
         # Subheader widgets keyed by entry key, so we can hide them when
         # their group is hidden (e.g. Image Processing group in train mode).

@@ -33,6 +33,8 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from mycomorph.gui.ui import tokens
+
 from ...core.crops_h5 import HDF5CropsReader
 from ...core.labels_store import SPLIT_TEST, LabelsStore
 from ...core.paths import modelprep_home
@@ -43,7 +45,6 @@ from ..trained_models import (
     trained_models_root,
 )
 from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
-from ..ui import tokens
 from ..widgets.model_inspector import ModelInspector
 
 # Column order. Numeric columns get numeric-aware sort items.
