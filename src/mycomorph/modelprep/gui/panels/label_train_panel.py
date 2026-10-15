@@ -483,6 +483,10 @@ class _TrainWorker(QThread):
 class LabelTrainPanel(QWidget):
     """The single workhorse panel: active-learning labeller + fine-tune trainer."""
 
+    # A training run has just started (MycoMorph warns if its pipeline is
+    # running too: both use the GPU).
+    trainingStarted = pyqtSignal()
+
     def __init__(self, parent: Optional[QWidget] = None) -> None:
         super().__init__(parent)
         self._h5_path: Optional[Path] = None
@@ -1657,6 +1661,7 @@ class LabelTrainPanel(QWidget):
         self._train_worker.progress.connect(self._on_train_progress)
         self._train_worker.finished.connect(self._on_train_finished)
         self._train_worker.start()
+        self.trainingStarted.emit()
 
     def _on_train_progress(self, frac: float, msg: str) -> None:
         if self.sender() is not self._train_worker:

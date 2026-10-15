@@ -513,9 +513,10 @@ class ClassifyPanel(QWidget):
         self._open_labeler_btn = QPushButton("  Labeller / trainer")
         self._open_labeler_btn.setIcon(icons.icon("label", role="muted"))
         self._open_labeler_btn.setToolTip(
-            "Open the active-learning labeller and classifier fine-tuner in a "
-            "separate window. Use it to build training data from the current "
-            "segmented output and retrain the model."
+            "Open ModelPrep, the active-learning labeller and classifier "
+            "trainer, in its own window. It opens on this output folder's "
+            "04_features/all_crops.h5 (written when Features saves HDF5 "
+            "crops)."
         )
         self._open_labeler_btn.clicked.connect(self.openLabelTrainerRequested.emit)
 
