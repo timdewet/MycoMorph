@@ -749,7 +749,7 @@ class PreviewWorker(QThread):
         from mycomorph.core.cell_quality_classifier import classify_and_filter_mask
 
         opts = req.classify_opts
-        _filtered, report = classify_and_filter_mask(
+        filtered, report = classify_and_filter_mask(
             labeled_mask=mask.astype(int),
             image_channels=channels,
             phase_channel=req.phase_channel,
@@ -759,14 +759,18 @@ class PreviewWorker(QThread):
             confidence_threshold=opts.confidence_threshold,
             use_rules=opts.use_rules,
             verbose=False,
+            decision_threshold=getattr(opts, "decision_threshold", None),
         )
 
         # Build per-label decision map matching the legacy preview's scheme.
+        # Kept vs rejected comes from the filtered mask itself, so the
+        # overlay always agrees with the filter's rule (default or tuned).
         details = report.get("details", {})
+        kept = set(np.unique(filtered).tolist()) - {0}
         decisions: dict[int, str] = {}
         n_cells = int(mask.max())
         for lbl, (cls_name, conf) in details.items():
-            if cls_name in ("good",) and conf >= opts.confidence_threshold:
+            if int(lbl) in kept:
                 decisions[int(lbl)] = "good"
             elif cls_name == "edge_cell":
                 decisions[int(lbl)] = "edge"

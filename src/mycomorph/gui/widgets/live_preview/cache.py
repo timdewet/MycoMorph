@@ -138,6 +138,7 @@ def classify_key(seg_k: SegmentKey, classify_opts: Any) -> ClassifyKey:
         getattr(classify_opts, "confidence_threshold", None),
         tuple(getattr(classify_opts, "keep_classes", ()) or ()),
         getattr(classify_opts, "pixels_per_um", None),
+        getattr(classify_opts, "decision_threshold", None),
     )
 
 

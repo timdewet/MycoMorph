@@ -496,6 +496,68 @@ def _cached_classifier(model_path, in_channels, device=None):
         return entry
 
 
+# ── Tuned decision threshold (from ModelPrep) ─────────────────────────────────
+#
+# ModelPrep writes ``decision_threshold`` to the ``training_config.json`` next
+# to the ``.pth``. It is the Youden-J cutoff on the validation ROC of
+# P(bad) (class index 1), so it is applied as "keep the cell iff P(bad) < t".
+# That is a different rule from the default argmax + P(good) confidence
+# threshold, and the two numbers are not interchangeable.
+
+_BAD_INDEX = CLASS_NAMES.index("bad")
+_GOOD_INDEX = CLASS_NAMES.index("good")
+
+
+def _valid_decision_threshold(value):
+    """Return ``value`` as a float if it is a usable P(bad) cutoff, else None."""
+    try:
+        t = float(value)
+    except (TypeError, ValueError):
+        return None
+    # roc_curve can put the Youden-J optimum at its +inf sentinel; that (and
+    # anything outside (0, 1)) would keep or reject every cell.
+    if not np.isfinite(t) or not 0.0 < t < 1.0:
+        return None
+    return t
+
+
+def read_decision_threshold(model_path):
+    """Return the tuned P(bad) cutoff stored beside ``model_path``, or None.
+
+    Looks for ``decision_threshold`` in ``training_config.json`` in the same
+    folder as the ``.pth`` (as ModelPrep writes it). Returns None when the file
+    or key is missing, unreadable, or not a value strictly between 0 and 1.
+    """
+    import json
+
+    if model_path is None:
+        return None
+    cfg_path = Path(model_path).parent / "training_config.json"
+    try:
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(cfg, dict):
+        return None
+    return _valid_decision_threshold(cfg.get("decision_threshold"))
+
+
+def effective_p_bad_cutoff(confidence_threshold, decision_threshold=None):
+    """P(bad) value above which ``classify_and_filter_mask`` rejects a cell.
+
+    Puts both rules on the P(bad) axis that the ROC / PR curves use:
+
+    - tuned: reject iff P(bad) >= ``decision_threshold``;
+    - default: keep iff argmax is "good" and P(good) >= ``confidence_threshold``,
+      i.e. P(good) >= max(confidence_threshold, 0.5), so the cutoff is
+      1 - max(confidence_threshold, 0.5). Slider values below 0.5 therefore
+      change nothing: argmax already rejects every cell with P(bad) > 0.5.
+    """
+    if decision_threshold is not None:
+        return float(decision_threshold)
+    return 1.0 - max(float(confidence_threshold), 0.5)
+
+
 # ── Main filtering API ────────────────────────────────────────────────────────
 
 def classify_and_filter_mask(
@@ -509,6 +571,7 @@ def classify_and_filter_mask(
     use_rules=True,
     device=None,
     verbose=True,
+    decision_threshold=None,
 ):
     """
     Classify each cell in a labeled mask and return a filtered version
@@ -521,10 +584,20 @@ def classify_and_filter_mask(
        - Debris: area below minimum threshold
 
     2. CNN-based (requires trained model):
-       - Classifies remaining cells into quality categories
-       - Keeps only cells whose predicted class is in keep_classes
+       - Classifies remaining cells as good / bad
+       - Keeps only cells whose class is in keep_classes
 
     If no model_path is provided, only rule-based filtering is applied.
+
+    The CNN's class is decided in one of two ways:
+
+    - Default (``decision_threshold=None``): argmax of the softmax, and the
+      cell is also rejected if that class's probability is below
+      ``confidence_threshold``.
+    - Tuned (``decision_threshold=t``): the cell is "good" iff P(bad) < t,
+      otherwise "bad". ``confidence_threshold`` is ignored. ``t`` is the
+      P(bad) cutoff ModelPrep stores as ``decision_threshold`` (see
+      ``read_decision_threshold``).
 
     Args:
         labeled_mask:   (Y, X) integer array from Cellpose (0=bg, N=cell)
@@ -534,14 +607,25 @@ def classify_and_filter_mask(
         pixels_per_um:  pixel scale for area calculations
         keep_classes:   tuple of class names to keep (default: only "good")
         confidence_threshold: minimum softmax probability to trust prediction
+                        (default rule only)
         use_rules:      whether to apply rule-based pre-filtering
         device:         torch device (None = auto)
         verbose:        print filtering statistics
+        decision_threshold: P(bad) cutoff in (0, 1); None = default rule
 
     Returns:
         filtered_mask:  (Y, X) integer array with rejected cells set to 0
         report:         dict with filtering statistics
     """
+    if decision_threshold is not None:
+        t = _valid_decision_threshold(decision_threshold)
+        if t is None:
+            raise ValueError(
+                f"decision_threshold must be a P(bad) cutoff strictly between "
+                f"0 and 1, got {decision_threshold!r}"
+            )
+        decision_threshold = t
+
     filtered = labeled_mask.copy()
     all_labels = set(np.unique(labeled_mask)) - {0}
     n_total = len(all_labels)
@@ -553,6 +637,7 @@ def classify_and_filter_mask(
         "removed_cnn": 0,
         "kept": 0,
         "details": {},  # label -> (class_name, confidence)
+        "decision_threshold": decision_threshold,
     }
 
     if n_total == 0:
@@ -616,12 +701,20 @@ def classify_and_filter_mask(
         cnn_removed = 0
 
         for lbl, cls_idx, probs in zip(labels_list, class_indices, probabilities):
+            if decision_threshold is not None:
+                # Tuned rule: the P(bad) cutoff alone decides the class.
+                cls_idx = (_GOOD_INDEX if float(probs[_BAD_INDEX]) < decision_threshold
+                           else _BAD_INDEX)
+                reject = cls_idx not in keep_indices
+            else:
+                # Remove if not in keep_classes OR below confidence threshold
+                reject = (cls_idx not in keep_indices
+                          or float(probs[cls_idx]) < confidence_threshold)
             cls_name = CLASS_NAMES[cls_idx]
             confidence = float(probs[cls_idx])
             report["details"][int(lbl)] = (cls_name, confidence)
 
-            # Remove if not in keep_classes OR below confidence threshold
-            if cls_idx not in keep_indices or confidence < confidence_threshold:
+            if reject:
                 filtered[filtered == lbl] = 0
                 cnn_removed += 1
 

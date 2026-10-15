@@ -38,6 +38,7 @@ from mycomorph.core.api import (
     SegmentOpts,
     resolve_classifier_preset,
 )
+from mycomorph.core.cell_quality_classifier import read_decision_threshold
 from mycomorph.core.foci import DetectorOpts
 from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
 
@@ -453,10 +454,22 @@ class ClassifyPanel(QWidget):
 
         self.confidence = LabeledSlider(
             "Confidence threshold", 0.0, 1.0, 0.5, step=0.01, decimals=2,
-            helper="Cells classified as 'good' below this score are rejected. "
-                   "Higher = stricter. Default 0.5.",
+            helper="Cells classified as 'good' with P(good) below this are "
+                   "rejected. Higher = stricter; values below 0.5 change "
+                   "nothing. Default 0.5.",
         )
         self.confidence.valueChanged.connect(self._on_confidence_changed)
+
+        # Models trained in ModelPrep carry a tuned P(bad) cutoff
+        # (decision_threshold in training_config.json). Opt-in: unticked,
+        # Classify keeps the argmax + confidence-slider rule above.
+        self._model_threshold: float | None = None
+        self.use_model_threshold = QCheckBox("Use the model's tuned threshold")
+        self.use_model_threshold.setChecked(False)
+        self.use_model_threshold.toggled.connect(self._apply_rule_state)
+        self._model_threshold_note = QLabel()
+        self._model_threshold_note.setObjectName("muted")
+        self._model_threshold_note.setWordWrap(True)
 
         form.addRow("Classifier:", self.preset)
         form.addRow("Custom model (.pth):", path_wrap)
@@ -467,6 +480,13 @@ class ClassifyPanel(QWidget):
         _conf_l.setContentsMargins(0, tokens.S2, 0, 0)
         _conf_l.addWidget(self.confidence)
         form.addRow(_conf_holder)
+        _thr_holder = QWidget()
+        _thr_l = _QVB(_thr_holder)
+        _thr_l.setContentsMargins(0, 0, 0, 0)
+        _thr_l.setSpacing(2)
+        _thr_l.addWidget(self.use_model_threshold)
+        _thr_l.addWidget(self._model_threshold_note)
+        form.addRow("", _thr_holder)
         root.addWidget(opt_box)
 
         # Pop-out buttons grouped in a card: model details and the
@@ -486,7 +506,7 @@ class ClassifyPanel(QWidget):
         self._show_details_btn.setToolTip(
             "Show ROC / precision-recall curves and training stats for the "
             "currently-selected classifier model in a separate window. The live "
-            "threshold marker on the plot tracks this tab's confidence spinner."
+            "marker on the plot shows the P(bad) cutoff this tab's settings apply."
         )
         self._show_details_btn.clicked.connect(self.showModelDetailsRequested.emit)
 
@@ -518,6 +538,7 @@ class ClassifyPanel(QWidget):
         self.custom_path.textChanged.connect(self._emit_options_changed)
         self.use_rules.toggled.connect(self._emit_options_changed)
         self.confidence.valueChanged.connect(self._emit_options_changed)
+        self.use_model_threshold.toggled.connect(self._emit_options_changed)
 
     def _emit_options_changed(self, *_args) -> None:
         if not self._loading:
@@ -534,41 +555,70 @@ class ClassifyPanel(QWidget):
             self.custom_path.setText(path)
 
     def _on_confidence_changed(self, value: float) -> None:
-        self.inspector.set_threshold(value)
+        self.inspector.set_threshold(value, self._active_decision_threshold())
+
+    def _selected_model_path(self) -> Path | None:
+        text = self.preset.currentText()
+        if text.startswith("none"):
+            return None
+        if text == "custom…":
+            p = self.custom_path.text().strip()
+            return Path(p) if p else None
+        try:
+            return resolve_classifier_preset(text)
+        except (KeyError, FileNotFoundError):
+            return None
 
     def _refresh_inspector(self) -> None:
         """Point the inspector at the currently-selected model (or None)."""
-        text = self.preset.currentText()
-        if text.startswith("none"):
-            self.inspector.set_model(None)
-            return
-        if text == "custom…":
-            p = self.custom_path.text().strip()
-            self.inspector.set_model(Path(p) if p else None)
-            return
-        try:
-            self.inspector.set_model(resolve_classifier_preset(text))
-        except (KeyError, FileNotFoundError):
-            self.inspector.set_model(None)
-        self.inspector.set_threshold(self.confidence.value())
+        model_path = self._selected_model_path()
+        self.inspector.set_model(model_path)
+        self._refresh_model_threshold(model_path)
+
+    def _refresh_model_threshold(self, model_path: Path | None) -> None:
+        """Offer the selected model's tuned P(bad) cutoff, if it has one."""
+        t = read_decision_threshold(model_path)
+        self._model_threshold = t
+        self.use_model_threshold.setEnabled(t is not None)
+        if t is not None:
+            self.use_model_threshold.setText(
+                f"Use the model's tuned threshold: keep a cell if P(bad) < {t:.3f}"
+            )
+            note = ("Tuned in ModelPrep when this model was trained (stored in "
+                    "training_config.json next to the .pth). When ticked, it "
+                    "replaces the confidence threshold above.")
+        else:
+            # Untick rather than leave a greyed-out tick that looks active;
+            # the opt-in is per model.
+            self.use_model_threshold.setChecked(False)
+            self.use_model_threshold.setText("Use the model's tuned threshold")
+            if model_path is None:
+                note = "Needs a CNN model."
+            else:
+                note = ("This model has no tuned threshold. Models trained in "
+                        "ModelPrep store one in training_config.json; keep that "
+                        "file next to the .pth.")
+        self._model_threshold_note.setText(note)
+        self._apply_rule_state()
+
+    def _active_decision_threshold(self) -> float | None:
+        """The P(bad) cutoff Classify will use, or None for argmax + slider."""
+        if self.use_model_threshold.isChecked() and self._model_threshold is not None:
+            return self._model_threshold
+        return None
+
+    def _apply_rule_state(self, *_args) -> None:
+        tuned = self._active_decision_threshold()
+        # The slider plays no part in the tuned rule; grey it out to say so.
+        self.confidence.setEnabled(tuned is None)
+        self.inspector.set_threshold(self.confidence.value(), tuned)
 
     def opts(self) -> ClassifyOpts:
-        text = self.preset.currentText()
-        model_path: Path | None = None
-        if text.startswith("none"):
-            model_path = None
-        elif text == "custom…":
-            p = self.custom_path.text().strip()
-            model_path = Path(p) if p else None
-        else:
-            try:
-                model_path = resolve_classifier_preset(text)
-            except (KeyError, FileNotFoundError):
-                model_path = None
         return ClassifyOpts(
-            model_path=model_path,
+            model_path=self._selected_model_path(),
             use_rules=self.use_rules.isChecked(),
             confidence_threshold=self.confidence.value(),
+            decision_threshold=self._active_decision_threshold(),
         )
 
     def state(self) -> dict:
@@ -577,6 +627,7 @@ class ClassifyPanel(QWidget):
             "custom_path": self.custom_path.text(),
             "use_rules": self.use_rules.isChecked(),
             "confidence": self.confidence.value(),
+            "use_model_threshold": self.use_model_threshold.isChecked(),
         }
 
     def restore_state(self, s: dict) -> None:
@@ -594,6 +645,10 @@ class ClassifyPanel(QWidget):
                 self.use_rules.setChecked(bool(s["use_rules"]))
             if "confidence" in s:
                 self.confidence.setValue(float(s["confidence"]))
+            if "use_model_threshold" in s:
+                self.use_model_threshold.setChecked(
+                    bool(s["use_model_threshold"]) and self._model_threshold is not None
+                )
         finally:
             self._loading = False
 

@@ -530,6 +530,23 @@ class ClassifyOpts:
     confidence_threshold: float = 0.5
     use_rules: bool = True
     pixels_per_um: float = DEFAULT_PIXELS_PER_UM
+    # P(bad) cutoff in (0, 1). When set, a cell is kept iff P(bad) < this,
+    # replacing argmax + confidence_threshold. Normally the model's
+    # ModelPrep-tuned value (cell_quality_classifier.read_decision_threshold).
+    decision_threshold: Optional[float] = None
+
+    def signature_payload(self) -> dict:
+        """Options as hashed into provenance signatures.
+
+        ``decision_threshold`` is left out when unset so Classify outputs
+        signed before the option existed still count as reusable.
+        """
+        from dataclasses import asdict
+
+        payload = asdict(self)
+        if payload["decision_threshold"] is None:
+            del payload["decision_threshold"]
+        return payload
 
 
 # Bundled model presets. Resolved via importlib.resources so the lookup
@@ -614,6 +631,12 @@ def classify_filter_tiff(
                           f"input channels: {embedded}  ·  {px_msg}")
     else:
         progress_cb(0.03, f"Phase channel = {phase_channel}  ·  {px_msg}")
+    if opts.model_path is not None:
+        if opts.decision_threshold is not None:
+            rule = f"keep if P(bad) < {opts.decision_threshold:.3f} (model's tuned threshold)"
+        else:
+            rule = f"keep if argmax = good and P(good) ≥ {opts.confidence_threshold:.2f}"
+        progress_cb(0.03, f"CNN rule: {rule}")
 
     # Mask is the last channel; image channels are everything else.
     from skimage.measure import label as sk_label
@@ -687,6 +710,7 @@ def classify_filter_tiff(
             confidence_threshold=opts.confidence_threshold,
             use_rules=opts.use_rules,
             verbose=False,
+            decision_threshold=opts.decision_threshold,
         )
         fov_totals = (
             int(report.get("total_cells", 0)),
