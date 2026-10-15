@@ -84,28 +84,26 @@ def _moved_to_modelprep(command: str) -> None:
     raise typer.Exit(code=2)
 
 
-@app.command(
-    "label", help="Moved to ModelPrep: use `modelprep-cli label`.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def label(ctx: typer.Context) -> None:
-    _moved_to_modelprep("label")
+# Accept any arguments, and no --help of their own, so whatever an old
+# script passes still reaches the pointer.
+_MOVED_CONTEXT = {
+    "allow_extra_args": True,
+    "ignore_unknown_options": True,
+    "help_option_names": [],
+}
 
 
-@app.command(
-    "review", help="Moved to ModelPrep: use `modelprep-cli review`.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def review(ctx: typer.Context) -> None:
-    _moved_to_modelprep("review")
+def _add_moved_command(command: str) -> None:
+    @app.command(
+        command, help=f"Moved to ModelPrep: use `modelprep-cli {command}`.",
+        context_settings=_MOVED_CONTEXT,
+    )
+    def moved() -> None:
+        _moved_to_modelprep(command)
 
 
-@app.command(
-    "train", help="Moved to ModelPrep: use `modelprep-cli train`.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def train(ctx: typer.Context) -> None:
-    _moved_to_modelprep("train")
+for _command in _MOVED_TO_MODELPREP:
+    _add_moved_command(_command)
 
 
 # ── Feature library subcommands ───────────────────────────────────────────────

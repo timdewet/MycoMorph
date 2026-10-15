@@ -22,10 +22,11 @@ def test_old_command_points_to_modelprep(args):
     command = args[0]
     res = runner.invoke(app, args)
     assert res.exit_code == 2
-    assert f"`mycomorph-cli {command}` has moved to ModelPrep" in res.stderr
-    assert f"modelprep-cli {command} --h5" in res.stderr
-    assert "all_crops.h5" in res.stderr
-    assert res.stdout == ""
+    # .output holds what the user sees, stdout and stderr alike, on every
+    # click version (.stderr is only captured separately from click 8.2).
+    assert f"`mycomorph-cli {command}` has moved to ModelPrep" in res.output
+    assert f"modelprep-cli {command} --h5" in res.output
+    assert "all_crops.h5" in res.output
 
 
 def test_cli_help_lists_them_as_moved():
