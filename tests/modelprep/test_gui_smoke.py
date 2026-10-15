@@ -26,13 +26,16 @@ def _app():
     return QApplication.instance() or QApplication([])
 
 
-def test_main_window_constructs_and_navigates():
+def test_main_window_constructs_and_navigates(isolated_home):
     app = _app()
     from modelprep.gui.ui import theme
-    from modelprep.gui.main_window import MainWindow
+    from modelprep.gui.main_window import MainWindow, settings_file
 
+    # Settings come from the temp HOME, so the user's last HDF5 isn't reopened.
+    assert settings_file().is_relative_to(isolated_home)
     theme.apply_theme(app)
     win = MainWindow()
+    assert win.source_panel.current_h5_path() is None
     assert win._stack.count() == 4  # source, label, train, models
     for i in range(win._stack.count()):
         win._sidebar.set_current(i)

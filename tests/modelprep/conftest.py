@@ -8,6 +8,21 @@ import numpy as np
 import pytest
 
 
+@pytest.fixture(autouse=True)
+def isolated_home(tmp_path_factory: pytest.TempPathFactory,
+                  monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Point the home directory at a fresh temp dir for every test.
+
+    Settings, trained models, the score cache and learning curves all live
+    under ``~/.modelprep``. Without this a test run reads and rewrites the
+    user's real ones, and MainWindow reopens their last real HDF5.
+    """
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))  # Path.home() on Windows
+    return home
+
+
 @pytest.fixture
 def synthetic_h5(tmp_path: Path) -> Path:
     """Create a tiny ``all_crops.h5`` file matching MycoMorph's schema.

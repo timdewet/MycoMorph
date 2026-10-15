@@ -40,7 +40,10 @@ from .ui.elevation import apply_shadow
 from .ui.nav_sidebar import NavEntry, NavSidebar
 
 
-SETTINGS_FILE = Path.home() / ".modelprep" / "settings.json"
+def settings_file() -> Path:
+    # Resolved per call rather than at import so it follows $HOME (the test
+    # suite points HOME at a temp dir; see tests/conftest.py).
+    return Path.home() / ".modelprep" / "settings.json"
 
 
 # The three workflow steps. ``pipeline=False`` keeps the sidebar clean — no
@@ -303,10 +306,11 @@ class MainWindow(QMainWindow):
     # ── persistence ─────────────────────────────────────────────────────────
 
     def _restore_settings(self) -> None:
-        if not SETTINGS_FILE.exists():
+        path = settings_file()
+        if not path.exists():
             return
         try:
-            data = json.loads(SETTINGS_FILE.read_text())
+            data = json.loads(path.read_text())
         except Exception:  # noqa: BLE001
             return
         name = data.get("last_model_name")
@@ -320,10 +324,11 @@ class MainWindow(QMainWindow):
                 self.source_panel.set_h5_path(p)
 
     def _save_settings(self) -> None:
-        SETTINGS_FILE.parent.mkdir(parents=True, exist_ok=True)
+        path = settings_file()
+        path.parent.mkdir(parents=True, exist_ok=True)
         h5 = self.source_panel.current_h5_path()
         try:
-            SETTINGS_FILE.write_text(json.dumps({
+            path.write_text(json.dumps({
                 "last_h5": str(h5) if h5 else "",
                 "last_model_name": self.source_panel.current_model_name(),
             }, indent=2))
