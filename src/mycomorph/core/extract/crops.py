@@ -179,18 +179,58 @@ def _strip_suffix(part: str) -> str:
 
 HDF5_SCHEMA_VERSION = "1.0"
 
+# Root attributes describing how the crops were made, written to every
+# per-well file and carried into all_crops.h5. They are additive, so
+# schema_version stays "1.0" (ModelPrep only accepts "1.0"). A consumer
+# should treat a missing attribute as "unknown": files written before these
+# existed don't have them.
+#
+# Crop options (crop_size is already a schema attribute):
+CROP_OPTION_ATTRS = (
+    "mask_background",
+    "dilate_px",
+    "pad",
+    "normalise_per_crop",
+    "include_mask_channel",
+)
+# Where the masks came from (see extract.api._input_provenance):
+#   input_stage                        "classify" | "segment" | "unknown"
+#   classifier_prefilter               "cnn" | "rules" | "none" | "unknown"
+#   classifier_prefilter_model_sha256  SHA-256 of the CNN weights, or ""
+INPUT_PROVENANCE_ATTRS = (
+    "input_stage",
+    "classifier_prefilter",
+    "classifier_prefilter_model_sha256",
+)
+CARRIED_ATTRS = CROP_OPTION_ATTRS + INPUT_PROVENANCE_ATTRS
+
+
+def crop_opts_attrs(opts: CropOpts) -> dict:
+    """``CropOpts`` as HDF5 root attributes (see ``CROP_OPTION_ATTRS``)."""
+    return {
+        "mask_background": bool(opts.mask_background),
+        "dilate_px": int(opts.dilate_px),
+        "pad": int(opts.pad),
+        "normalise_per_crop": bool(opts.normalise_per_crop),
+        "include_mask_channel": bool(opts.include_mask_channel),
+    }
+
 
 def open_well_h5(
     h5_path: Path,
     crop_size: int,
     n_channels: int,
     channel_names: list[str],
+    attrs: Optional[dict] = None,
 ):
     """Open a per-well HDF5 file with the canonical schema, ready for streaming.
 
     Returns ``(h5_file, crops_ds)`` for incremental ``crops_ds.resize`` /
     ``crops_ds[lo:hi] = batch`` writes. The metadata datasets are created at
     close time via ``finalise_well_h5`` once cell counts are known.
+
+    ``attrs`` are extra root attributes, normally ``crop_opts_attrs(...)``
+    plus the input provenance (``CARRIED_ATTRS``).
     """
     import h5py
 
@@ -209,6 +249,8 @@ def open_well_h5(
     f.attrs["n_channels"] = int(n_channels)
     f.attrs["channel_names"] = list(channel_names)
     f.attrs["schema_version"] = HDF5_SCHEMA_VERSION
+    for key, value in (attrs or {}).items():
+        f.attrs[key] = value
     return f, crops_ds
 
 
@@ -288,7 +330,9 @@ def consolidate_well_h5_files(
     """Concatenate per-well ``<well>__crops.h5`` into a single ``all_crops.h5``.
 
     Schema is identical to the per-well files. Crops are streamed batch-wise
-    so peak RAM is bounded.
+    so peak RAM is bounded. Each ``CARRIED_ATTRS`` attribute is copied only
+    when every well file has it with the same value; otherwise it is left
+    out (unknown) rather than guessed.
     """
     import h5py
     from ..provenance import atomic_output_path
@@ -301,6 +345,7 @@ def consolidate_well_h5_files(
         crop_size = int(first.attrs["crop_size"])
         n_channels = int(first.attrs["n_channels"])
         channel_names = [str(s) for s in first.attrs["channel_names"]]
+        carried = {k: first.attrs[k] for k in CARRIED_ATTRS if k in first.attrs}
 
     out_path = Path(out_path)
     tmp_path = atomic_output_path(out_path)
@@ -344,6 +389,9 @@ def consolidate_well_h5_files(
 
     for src_path in well_files:
         with h5py.File(str(src_path), "r") as src:
+            for k in list(carried):
+                if k not in src.attrs or src.attrs[k] != carried[k]:
+                    del carried[k]
             src_n = int(src["crops"].shape[0])
             if src_n == 0:
                 continue
@@ -392,6 +440,8 @@ def consolidate_well_h5_files(
     out.attrs["total_cells"] = n_total
     out.attrs["n_fovs"] = fov_id_offset
     out.attrs["schema_version"] = HDF5_SCHEMA_VERSION
+    for k, v in carried.items():
+        out.attrs[k] = v
     out.close()
     tmp_path.replace(out_path)
     return out_path

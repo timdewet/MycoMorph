@@ -199,7 +199,18 @@ class FeaturesPanel(QWidget):
 
         self.mask_background = QCheckBox("Suppress background outside dilated cell mask")
         self.mask_background.setChecked(True)
-        crops_form.addRow("", self.mask_background)
+        self.mask_background.setToolTip(
+            "Classify feeds the cell-quality classifier unmasked crops, so a "
+            "model trained on masked crops sees different inputs in use. For "
+            "classifier training crops, untick this and use an output folder "
+            "where Classify hasn't run, so the crops include cells the current "
+            "model would reject. Both are recorded in the .h5 file."
+        )
+        crops_form.addRow("", _with_helper(
+            self.mask_background,
+            "Untick when making crops to train the cell-quality classifier "
+            "(e.g. in ModelPrep): Classify feeds that model unmasked crops.",
+        ))
 
         self.normalise_per_crop = QCheckBox("Per-crop min-max normalise to [0, 1]")
         self.normalise_per_crop.setChecked(True)
