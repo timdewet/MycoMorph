@@ -30,12 +30,10 @@ from pathlib import Path
 # The block below is hash-checked against ModelPrep's copy
 # (tests/test_classifier_model_def.py in both repos), so it must stay
 # byte-identical: edit both copies together and refresh GOLDEN_SHA in both.
-# Its "MycoPrep" path is MycoMorph's former name; the text is left as is
-# because changing it changes the hash.
 
 # ── BEGIN SHARED MODEL DEFINITION ─────────────────────────────────────────────
 # Keep byte-identical with:
-#   MycoPrep:   src/mycoprep/core/cell_quality_classifier.py
+#   MycoMorph:  src/mycomorph/core/cell_quality_classifier.py
 #   ModelPrep:  src/modelprep/core/cell_quality_classifier.py
 #
 # Anything inside this block is reproduced verbatim across both repos. A drift-
