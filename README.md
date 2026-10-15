@@ -40,7 +40,7 @@ You don't need to install Python. Download the latest release from the [Releases
 
 1. Download `MycoMorph-macos.zip` and unzip it.
 2. Move `MycoMorph.app` to your Applications folder.
-3. The app is not signed or notarised, so macOS blocks the first launch. Control-click the app, choose **Open**, then **Open** again. You only need to do this once.
+3. The app is not signed or notarised, so macOS blocks the first launch. Double-click it once and dismiss the warning, then open **System Settings > Privacy & Security**, scroll to the message about MycoMorph, and click **Open Anyway**. (On macOS 14 and earlier you can instead Control-click the app and choose **Open**.) You only need to do this once.
 
 The first segmentation run downloads a few hundred MB of Cellpose model weights to `~/.cellpose/` (`%USERPROFILE%\.cellpose\` on Windows), so it needs internet access once. After that the app works offline.
 
@@ -193,7 +193,7 @@ ModelPrep labels cells as good or bad and trains the cell-quality classifier tha
 - **From MycoMorph:** on the Segment & Classify page, click **Labeller / trainer**. ModelPrep opens in its own window on the current output folder's `all_crops.h5`, if there is one. If a pipeline run is going when you start training, you get a warning: the two share the GPU, so both run slower.
 - **On its own:** run `modelprep` (or `python -m mycomorph.modelprep`). In the desktop bundle, start the app with `--modelprep`:
   - Windows: `MycoMorph.exe --modelprep` (for example as a shortcut's target).
-  - macOS: `open -a MycoMorph --args --modelprep`.
+  - macOS: `open -n -a MycoMorph --args --modelprep` (`-n` starts a new copy even if MycoMorph is already open).
 
 Closing MycoMorph also closes its ModelPrep window. ModelPrep offers to save any unsaved labels first, and **Cancel** keeps both windows open.
 
@@ -407,4 +407,4 @@ Our implementations are written from scratch on top of scikit-image and SciPy; n
 
 MycoMorph's source code, including ModelPrep, is MIT-licensed. See [LICENSE](LICENSE).
 
-The desktop bundles also contain PyQt6 (GPL v3) and Qt (LGPL v3), so each bundle as a whole is distributed under the GNU GPL v3. [packaging/BUNDLE_LICENSE.txt](packaging/BUNDLE_LICENSE.txt) says so and ships inside every bundle, with the licence texts.
+The desktop bundles also contain PyQt6 (GPL v3) and Qt (LGPL v3), so each bundle as a whole is distributed under the GNU GPL v3. [packaging/BUNDLE_LICENSE.txt](packaging/BUNDLE_LICENSE.txt) says so. It ships in every bundle with the licence texts, and on Windows sits next to `MycoMorph.exe`.
