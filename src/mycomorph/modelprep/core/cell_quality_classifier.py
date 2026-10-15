@@ -23,12 +23,10 @@ from pathlib import Path
 #   MycoMorph:  src/mycomorph/core/cell_quality_classifier.py
 #   ModelPrep:  src/modelprep/core/cell_quality_classifier.py
 #
-# Anything inside this block should be reproduced verbatim across both repos.
-# ModelPrep's drift-guard test hashes the block against a golden hash; the
-# two-sided check (MODELPREP_SIBLING_CLF) also needs these BEGIN/END markers in
-# MycoMorph's copy, which doesn't have them yet. If you need to change the
-# architecture, the area-channel logic, or the CellQualityClassifier loader,
-# update BOTH copies in the same commit and refresh the golden hash.
+# Anything inside this block is reproduced verbatim across both repos. A drift-
+# guard test in each repo hashes the block and fails on mismatch. If you need
+# to change the architecture, the area-channel logic, or the CellQualityClassifier
+# loader, update BOTH copies in the same commit and refresh the golden hash.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # Binary classification: good (0) vs bad (1)

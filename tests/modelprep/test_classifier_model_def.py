@@ -25,7 +25,7 @@ from pathlib import Path
 import pytest
 
 
-GOLDEN_SHA = "55b258ec61e63f1e77eaf72d8c6bdc217cfd8c97c7508f76f0ea96d6132f99cf"
+GOLDEN_SHA = "cb4ac9818d5e9f6eb6ee4bc9bd068a57f3dac937efc1346868c4ccaf433ed4f7"
 
 
 def _hash_shared_block(py_path: Path) -> str:
