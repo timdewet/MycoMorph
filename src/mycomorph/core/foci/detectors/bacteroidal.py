@@ -25,6 +25,7 @@ from typing import Optional
 
 import numpy as np
 
+from ...mask_index import label_index
 from .._types import DetectorOpts, Focus
 from ._common import label_at, refine_gaussian_peak
 
@@ -51,21 +52,23 @@ class BacteroidalDetector:
 
         out: list[Focus] = []
         n_cells = int(labeled_mask.max())
+        labels, _, slices = label_index(labeled_mask)
+        slice_of = dict(zip(labels.tolist(), slices))
         for cell_id in range(1, n_cells + 1):
-            cell_pixels = labeled_mask == cell_id
-            if not cell_pixels.any():
+            if cell_id not in slice_of:
                 continue
-            cell_values = image[cell_pixels].astype(np.float64)
+            # Everything below reads only the cell's tight bounding box.
+            rows, cols = slice_of[cell_id]
+            y0, y1 = rows.start, rows.stop
+            x0, x1 = cols.start, cols.stop
+            mask_crop = labeled_mask[y0:y1, x0:x1] == cell_id
+            cell_values = image[y0:y1, x0:x1][mask_crop].astype(np.float64)
             cell_median = float(np.median(cell_values))
             cell_std = float(cell_values.std())
             if cell_std < 1e-9:
                 continue
 
             # Local bbox crop, background-subtracted in-cell, zeroed elsewhere.
-            ys, xs = np.where(cell_pixels)
-            y0, y1 = int(ys.min()), int(ys.max()) + 1
-            x0, x1 = int(xs.min()), int(xs.max()) + 1
-            mask_crop = cell_pixels[y0:y1, x0:x1]
             sub = image[y0:y1, x0:x1].astype(np.float64) - cell_median
             sub = np.where(mask_crop, sub, 0.0)
 

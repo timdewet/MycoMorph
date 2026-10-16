@@ -51,6 +51,7 @@ from .cell_quality_classifier import (
 # Re-exported for older importers; removed in Phase E when the old Label & Train
 # is retired. New code imports these from mycomorph.core.hyperstack.
 from .hyperstack import load_hyperstack, get_labeled_mask_from_fov
+from .mask_index import label_index
 
 # ── Class colours (matplotlib-compatible) ─────────────────────────────────────
 CLASS_COLORS = {
@@ -174,14 +175,18 @@ def extract_all_cells(tiff_files, phase_channel, mask_channel):
                 continue
 
             img_channels = np.delete(fov, mask_channel, axis=0)
+            labels, areas, slices = label_index(labeled_mask)
+            cell_index = dict(zip(labels.tolist(), zip(areas, slices)))
 
             for cell_label in range(1, n + 1):
-                crop, _ = extract_cell_crop(img_channels, labeled_mask, cell_label)
-                if crop is None:
+                if cell_label not in cell_index:
                     continue
+                area, cell_slice = cell_index[cell_label]
+                crop, _ = extract_cell_crop(img_channels, labeled_mask, cell_label,
+                                            cell_slice=cell_slice)
 
                 # True pixel area from original mask (shape-independent size)
-                area_px = int(np.sum(labeled_mask == cell_label))
+                area_px = int(area)
 
                 stem = tiff_path.stem
                 cell_id = f"{stem}_fov{fov_idx:03d}_cell{cell_label:04d}"
@@ -503,9 +508,7 @@ def run_napari_labeling(tiff_files, save_dir, phase_channel, mask_channel):
     def _build_int_labels(labeled_mask, tiff_name, fov_idx, selected):
         """Map segmentation mask to class-coloured integer array for napari Labels."""
         out = np.zeros_like(labeled_mask, dtype=np.int32)
-        for lbl in np.unique(labeled_mask):
-            if lbl == 0:
-                continue
+        for lbl, _, cell_slice in zip(*label_index(labeled_mask)):
             cell_id = _cell_id(tiff_name, fov_idx, lbl)
             if lbl == selected:
                 val = SELECTED_LABEL
@@ -513,7 +516,7 @@ def run_napari_labeling(tiff_files, save_dir, phase_channel, mask_channel):
                 val = labels[cell_id] + LABEL_OFFSET
             else:
                 val = LABEL_OFFSET + len(CLASS_NAMES)  # unlabeled
-            out[labeled_mask == lbl] = val
+            out[cell_slice][labeled_mask[cell_slice] == lbl] = val
         return out
 
     # Colour map for napari Labels: index → RGBA

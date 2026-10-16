@@ -101,6 +101,7 @@ class _ActiveLearningWorker(QThread):
                 extract_cell_crop,
             )
             from mycomorph.core.label_cells import load_hyperstack
+            from mycomorph.core.mask_index import label_index
 
             tiffs = (
                 sorted(self.segment_dir.glob("*.tif"))
@@ -137,7 +138,9 @@ class _ActiveLearningWorker(QThread):
                         labeled = sk_label(raw_mask > 0, connectivity=1).astype(np.int32)
                     else:
                         labeled = raw_mask.astype(np.int32)
-                    cell_labels = sorted(set(np.unique(labeled)) - {0})
+                    labels, areas, slices = label_index(labeled)
+                    cell_index = dict(zip(labels, zip(areas, slices)))
+                    cell_labels = sorted(cell_index)
                     if not cell_labels:
                         continue
                     # Skip cells we've already labelled (or shown this session)
@@ -152,13 +155,15 @@ class _ActiveLearningWorker(QThread):
                     crops_list = []
                     valid_labels = []
                     for lbl in cell_labels:
+                        area, cell_slice = cell_index[lbl]
                         crop, _ = extract_cell_crop(
                             image_channels, labeled, lbl,
                             phase_channel=self.phase_channel,
+                            cell_slice=cell_slice,
                         )
                         if crop is None:
                             continue
-                        true_area = int(np.sum(labeled == lbl))
+                        true_area = int(area)
                         crop = _append_area_channel_single(crop, true_area_px=true_area)
                         crops_list.append(crop)
                         valid_labels.append(lbl)

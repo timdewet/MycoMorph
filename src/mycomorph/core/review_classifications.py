@@ -57,6 +57,7 @@ from .cell_quality_classifier import (
     _append_area_channel_batch,
 )
 from .cell_quality_classifier import extract_cell_crop
+from .mask_index import label_index
 
 from .label_cells import (
     _make_contour_thumb,
@@ -125,13 +126,17 @@ def extract_and_predict(tiff_files, model_path, phase_channel, mask_channel,
             continue
 
         img_channels = np.delete(fov, mask_channel, axis=0)
+        labels, areas, slices = label_index(labeled_mask)
+        cell_index = dict(zip(labels.tolist(), zip(areas, slices)))
         count = 0
         for cell_label in range(1, n + 1):
-            crop, _ = extract_cell_crop(img_channels, labeled_mask, cell_label,
-                                        phase_channel=ph_in_crop)
-            if crop is None:
+            if cell_label not in cell_index:
                 continue
-            area_px = int(np.sum(labeled_mask == cell_label))
+            area, cell_slice = cell_index[cell_label]
+            crop, _ = extract_cell_crop(img_channels, labeled_mask, cell_label,
+                                        phase_channel=ph_in_crop,
+                                        cell_slice=cell_slice)
+            area_px = int(area)
             stem = tiff_path.stem
             cell_id = f"{stem}_fov{fov_idx:03d}_cell{cell_label:04d}"
             thumb = _make_contour_thumb(crop, ph_in_crop)

@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
+from ..mask_index import label_index
 from . import crops as crops_mod
 from . import per_cell
 
@@ -239,14 +240,19 @@ def _process_fov(
 
     crops_list: list[np.ndarray] = []
     crop_meta: list[dict] = []
+    labels, _, slices = label_index(labeled_mask)
+    slice_of = dict(zip(labels.tolist(), slices))
     for row in df.itertuples(index=False):
         cell_id = int(row.cell_id)
+        if cell_id not in slice_of:
+            continue
         crop, area_px = crops_mod.extract_cell_crop(
             image_channels=image_channels,
             labeled_mask=labeled_mask,
             cell_label=cell_id,
             selected_channels=crop_channels,
             opts=crop_opts,
+            cell_slice=slice_of[cell_id],
         )
         if crop is None:
             continue
