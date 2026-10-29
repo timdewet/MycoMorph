@@ -3,12 +3,22 @@ each now prints where it went and exits 2, whatever arguments it gets."""
 
 from __future__ import annotations
 
+import re
+
 import pytest
 from typer.testing import CliRunner
 
 from mycomorph.core.cli import _MOVED_TO_MODELPREP, app
 
 runner = CliRunner()
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def _plain(text: str) -> str:
+    """Help text without colour codes. Typer colours its help when it detects
+    CI (GITHUB_ACTIONS) or FORCE_COLOR, which splits "--h5" into styled runs."""
+    return _ANSI.sub("", text)
 
 
 @pytest.mark.parametrize("args", [
@@ -33,7 +43,7 @@ def test_cli_help_lists_them_as_moved():
     res = runner.invoke(app, ["--help"])
     assert res.exit_code == 0
     for command in ("label", "review", "train"):
-        assert f"`modelprep-cli {command}`" in res.output
+        assert f"`modelprep-cli {command}`" in _plain(res.output)
 
 
 @pytest.mark.parametrize("command", sorted(_MOVED_TO_MODELPREP))
@@ -46,4 +56,4 @@ def test_suggested_modelprep_command_exists(command):
     suggested = _MOVED_TO_MODELPREP[command].split()
     assert suggested[:2] == ["modelprep-cli", command]
     for option in (word for word in suggested if word.startswith("--")):
-        assert option in res.output
+        assert option in _plain(res.output)
