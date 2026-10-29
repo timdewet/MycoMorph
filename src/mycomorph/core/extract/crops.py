@@ -19,6 +19,8 @@ import numpy as np
 from scipy.ndimage import binary_dilation
 from skimage.transform import resize
 
+from ..mask_index import CellSlice, label_bbox
+
 
 @dataclass
 class CropOpts:
@@ -42,25 +44,30 @@ def extract_cell_crop(
     cell_label: int,
     selected_channels: list[int],
     opts: CropOpts,
+    cell_slice: Optional[CellSlice] = None,
 ) -> tuple[Optional[np.ndarray], int]:
     """Return a ``(C_out, crop_size, crop_size)`` float32 crop and the cell's
     pixel area, or ``(None, 0)`` if the label is empty.
 
     ``C_out`` = ``len(selected_channels)`` + (1 if ``include_mask_channel``).
+    ``cell_slice`` is the cell's tight ``(rows, cols)`` bounding box, as from
+    ``mask_index.label_index``; passing it saves a whole-mask scan.
     """
     h, w = labeled_mask.shape
-    cell_pixels = labeled_mask == cell_label
-    if not cell_pixels.any():
-        return None, 0
+    if cell_slice is None:
+        cell_slice = label_bbox(labeled_mask, cell_label)
+        if cell_slice is None:
+            return None, 0
 
-    ys, xs = np.where(cell_pixels)
+    rows, cols = cell_slice
     pad = opts.pad
-    y_min = max(int(ys.min()) - pad, 0)
-    y_max = min(int(ys.max()) + pad + 1, h)
-    x_min = max(int(xs.min()) - pad, 0)
-    x_max = min(int(xs.max()) + pad + 1, w)
+    y_min = max(int(rows.start) - pad, 0)
+    y_max = min(int(rows.stop - 1) + pad + 1, h)
+    x_min = max(int(cols.start) - pad, 0)
+    x_max = min(int(cols.stop - 1) + pad + 1, w)
 
-    mask_crop = cell_pixels[y_min:y_max, x_min:x_max]
+    mask_crop = labeled_mask[y_min:y_max, x_min:x_max] == cell_label
+    area_px = int(np.count_nonzero(labeled_mask[cell_slice] == cell_label))
 
     if opts.mask_background:
         dilated = binary_dilation(mask_crop, iterations=opts.dilate_px)
@@ -113,7 +120,7 @@ def extract_cell_crop(
     elif opts.include_mask_channel:
         resized[-1] = (resized[-1] > 0.5).astype(np.float32)
 
-    return resized, int(cell_pixels.sum())
+    return resized, area_px
 
 
 # ──────────────────────────────────────────────────────────────────────────────

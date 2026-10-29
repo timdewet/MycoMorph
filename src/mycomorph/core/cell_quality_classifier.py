@@ -27,6 +27,8 @@ import threading
 import numpy as np
 from pathlib import Path
 
+from .mask_index import label_bbox, label_index
+
 # The block below is frozen: every saved .pth (the bundled presets and every
 # model trained with ModelPrep, mycomorph.modelprep) depends on it, and
 # tests/test_classifier_model_def.py pins its SHA-256. ModelPrep now imports
@@ -279,7 +281,7 @@ MAX_AREA_UM2 = 25.0    # Maximum single-cell area in µm² (clump indicator)
 # ── Cell crop extraction ──────────────────────────────────────────────────────
 
 def extract_cell_crop(image_channels, labeled_mask, cell_label, pad=10,
-                      phase_channel=None):
+                      phase_channel=None, cell_slice=None):
     """
     Extract a square crop of a single cell from multi-channel image data.
 
@@ -297,6 +299,9 @@ def extract_cell_crop(image_channels, labeled_mask, cell_label, pad=10,
         pad:            pixels of padding around bounding box
         phase_channel:  if set, extract only this channel (+ mask → 2-ch crop).
                         If None, extract all channels (+ mask → C+1-ch crop).
+        cell_slice:     the cell's tight (rows, cols) bounding box, as from
+                        ``mask_index.label_index``. Saves a whole-mask scan;
+                        pass it when looping over many cells.
 
     Returns:
         crop: (2, CROP_SIZE, CROP_SIZE) or (C+1, CROP_SIZE, CROP_SIZE) float32
@@ -306,16 +311,19 @@ def extract_cell_crop(image_channels, labeled_mask, cell_label, pad=10,
     from skimage.transform import resize
 
     h, w = labeled_mask.shape
-    cell_pixels = labeled_mask == cell_label
+    if cell_slice is None:
+        cell_slice = label_bbox(labeled_mask, cell_label)
+        if cell_slice is None:
+            return None, None
 
-    if not cell_pixels.any():
-        return None, None
-
-    ys, xs = np.where(cell_pixels)
-    y_min = max(ys.min() - pad, 0)
-    y_max = min(ys.max() + pad + 1, h)
-    x_min = max(xs.min() - pad, 0)
-    x_max = min(xs.max() + pad + 1, w)
+    rows, cols = cell_slice
+    # np.intp keeps the bbox values typed as they were when they came
+    # from np.where over the whole mask.
+    y_min = max(np.intp(rows.start) - pad, 0)
+    y_max = min(np.intp(rows.stop - 1) + pad + 1, h)
+    x_min = max(np.intp(cols.start) - pad, 0)
+    x_max = min(np.intp(cols.stop - 1) + pad + 1, w)
+    cell_pixels = labeled_mask[y_min:y_max, x_min:x_max] == cell_label
 
     # Crop imaging channel(s)
     if phase_channel is not None:
@@ -327,7 +335,7 @@ def extract_cell_crop(image_channels, labeled_mask, cell_label, pad=10,
         channel_crops = image_channels[:, y_min:y_max, x_min:x_max].astype(np.float32)
 
     # Crop mask (binary for this cell only)
-    mask_crop = cell_pixels[y_min:y_max, x_min:x_max].astype(np.float32)
+    mask_crop = cell_pixels.astype(np.float32)
     mask_crop = mask_crop[np.newaxis, :, :]  # (1, h_crop, w_crop)
 
     combined = np.concatenate([channel_crops, mask_crop], axis=0)  # (N_ch+1, h, w)
@@ -375,15 +383,16 @@ def extract_all_crops(image_channels, labeled_mask, pad=10, phase_channel=None):
         crops:  dict mapping cell_label -> crop array
         bboxes: dict mapping cell_label -> (y_min, y_max, x_min, x_max)
     """
-    cell_labels = np.unique(labeled_mask)
-    cell_labels = cell_labels[cell_labels > 0]
+    labels, _, slices = label_index(labeled_mask)
 
     crops = {}
     bboxes = {}
 
-    for label in cell_labels:
+    for label, sl in zip(labels, slices):
+        if label < 0:   # only positive labels are cells
+            continue
         crop, bbox = extract_cell_crop(image_channels, labeled_mask, label, pad,
-                                       phase_channel=phase_channel)
+                                       phase_channel=phase_channel, cell_slice=sl)
         if crop is not None:
             crops[label] = crop
             bboxes[label] = bbox
@@ -400,18 +409,17 @@ def detect_edge_cells(labeled_mask, margin=EDGE_MARGIN):
     Returns:
         set of cell labels that are edge cells
     """
-    h, w = labeled_mask.shape
-    edge_labels = set()
+    labels, _, slices = label_index(labeled_mask)
+    return _edge_labels(labels, slices, labeled_mask.shape, margin)
 
-    for label in np.unique(labeled_mask):
-        if label == 0:
-            continue
-        ys, xs = np.where(labeled_mask == label)
-        if (ys.min() < margin or ys.max() >= h - margin or
-                xs.min() < margin or xs.max() >= w - margin):
-            edge_labels.add(label)
 
-    return edge_labels
+def _edge_labels(labels, slices, shape, margin):
+    h, w = shape
+    return {
+        label for label, (rows, cols) in zip(labels, slices)
+        if (rows.start < margin or rows.stop - 1 >= h - margin or
+                cols.start < margin or cols.stop - 1 >= w - margin)
+    }
 
 
 def detect_debris_by_area(labeled_mask, pixels_per_um=13.8767, min_area_um2=MIN_AREA_UM2):
@@ -421,18 +429,14 @@ def detect_debris_by_area(labeled_mask, pixels_per_um=13.8767, min_area_um2=MIN_
     Returns:
         set of cell labels classified as debris
     """
+    labels, areas, _ = label_index(labeled_mask)
+    return _debris_labels(labels, areas, pixels_per_um, min_area_um2)
+
+
+def _debris_labels(labels, areas, pixels_per_um, min_area_um2):
     px_area_per_um2 = pixels_per_um ** 2
     min_area_px = min_area_um2 * px_area_per_um2
-    debris_labels = set()
-
-    for label in np.unique(labeled_mask):
-        if label == 0:
-            continue
-        area = np.sum(labeled_mask == label)
-        if area < min_area_px:
-            debris_labels.add(label)
-
-    return debris_labels
+    return {label for label, area in zip(labels, areas) if area < min_area_px}
 
 
 def detect_large_clumps(labeled_mask, pixels_per_um=13.8767, max_area_um2=MAX_AREA_UM2):
@@ -445,16 +449,14 @@ def detect_large_clumps(labeled_mask, pixels_per_um=13.8767, max_area_um2=MAX_AR
     """
     px_area_per_um2 = pixels_per_um ** 2
     max_area_px = max_area_um2 * px_area_per_um2
-    large_labels = set()
+    labels, areas, _ = label_index(labeled_mask)
+    return {label for label, area in zip(labels, areas) if area > max_area_px}
 
-    for label in np.unique(labeled_mask):
-        if label == 0:
-            continue
-        area = np.sum(labeled_mask == label)
-        if area > max_area_px:
-            large_labels.add(label)
 
-    return large_labels
+def _erase_label(mask, label, cell_slice):
+    """Zero ``label`` in ``mask`` in place, touching only its bounding box."""
+    sub = mask[cell_slice]
+    sub[sub == label] = 0
 
 
 # Constructing a CellQualityClassifier means a torch.load + load_state_dict
@@ -628,7 +630,12 @@ def classify_and_filter_mask(
         decision_threshold = t
 
     filtered = labeled_mask.copy()
-    all_labels = set(np.unique(labeled_mask)) - {0}
+    # One pass for every cell's area and bounding box; the per-cell work
+    # below only reads each cell's own bbox.
+    labels, areas, slices = label_index(labeled_mask)
+    area_of = dict(zip(labels, areas))
+    slice_of = dict(zip(labels, slices))
+    all_labels = set(labels)
     n_total = len(all_labels)
 
     report = {
@@ -648,20 +655,18 @@ def classify_and_filter_mask(
     removed = set()
 
     if use_rules:
-        edge_cells = detect_edge_cells(labeled_mask, margin=EDGE_MARGIN)
+        edge_cells = _edge_labels(labels, slices, labeled_mask.shape, EDGE_MARGIN)
         for lbl in edge_cells:
-            filtered[filtered == lbl] = 0
+            _erase_label(filtered, lbl, slice_of[lbl])
             report["details"][int(lbl)] = ("edge_cell", 1.0)
         removed |= edge_cells
         report["removed_edge"] = len(edge_cells)
 
-        debris_cells = detect_debris_by_area(
-            labeled_mask, pixels_per_um=pixels_per_um, min_area_um2=MIN_AREA_UM2
-        )
+        debris_cells = _debris_labels(labels, areas, pixels_per_um, MIN_AREA_UM2)
         # Don't double-count cells already removed as edge
         debris_only = debris_cells - edge_cells
         for lbl in debris_only:
-            filtered[filtered == lbl] = 0
+            _erase_label(filtered, lbl, slice_of[lbl])
             report["details"][int(lbl)] = ("debris", 1.0)
         removed |= debris_only
         report["removed_debris"] = len(debris_only)
@@ -683,10 +688,11 @@ def classify_and_filter_mask(
         crops_list = []
         for lbl in labels_list:
             crop, _ = extract_cell_crop(image_channels, labeled_mask, lbl,
-                                        phase_channel=phase_channel)
+                                        phase_channel=phase_channel,
+                                        cell_slice=slice_of[lbl])
             if crop is not None:
                 # True pixel area from original mask (shape-independent)
-                true_area = int(np.sum(labeled_mask == lbl))
+                true_area = int(area_of[lbl])
                 crop = _append_area_channel_single(crop, true_area_px=true_area)
                 crops_list.append(crop)
             else:
@@ -716,12 +722,13 @@ def classify_and_filter_mask(
             report["details"][int(lbl)] = (cls_name, confidence)
 
             if reject:
-                filtered[filtered == lbl] = 0
+                _erase_label(filtered, lbl, slice_of[lbl])
                 cnn_removed += 1
 
         report["removed_cnn"] = cnn_removed
 
-    report["kept"] = len(set(np.unique(filtered)) - {0})
+    # Every label not removed above is still whole in ``filtered``.
+    report["kept"] = n_total - len(removed) - report["removed_cnn"]
 
     if verbose:
         print(f"    Cell QC: {n_total} total → {report['kept']} kept "
