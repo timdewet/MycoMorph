@@ -1,5 +1,16 @@
 # Changelog
 
+## [0.6.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.5.0...mycomorph-v0.6.0) (2026-10-29)
+
+
+### ⚠ BREAKING CHANGES
+
+* the `mtb` preset name is gone. Use `mtb-2026-06` or `msm-2026-06`.
+
+### Features
+
+* bundle the June 2026 Mtb and Msm classifiers, drop the old mtb preset ([5384248](https://github.com/timdewet/MycoMorph/commit/53842485162214dda768e5ff49313d79cbc79480))
+
 ## [0.5.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.4.0...mycomorph-v0.5.0) (2026-10-29)
 
 
