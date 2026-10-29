@@ -761,6 +761,24 @@ class MainWindow(QMainWindow):
                     + "\n  ".join(str(d) for d in features_candidates)
                 )
 
+        # Restored settings can name a model this version doesn't offer; the
+        # panel warns inline, and a run waits until the user picks one.
+        missing_model = self.segment_panel.missing_saved_model()
+        if enables.get("Segment") and missing_model is not None:
+            blocking.append(
+                f"Segment: your saved Cellpose model '{missing_model}' isn't "
+                "available in this version of MycoMorph. Choose a model on the "
+                "Segment & Classify tab."
+            )
+        missing_preset = self.classify_panel.missing_saved_preset()
+        if enables.get("Classify") and missing_preset is not None:
+            blocking.append(
+                f"Classify: your saved classifier '{missing_preset}' isn't "
+                "available in this version of MycoMorph. Choose a classifier "
+                "on the Segment & Classify tab (\"none (rules only)\" to run "
+                "without one)."
+            )
+
         if enables.get("Segment") and self.segment_panel.opts().gpu:
             if not _gpu_available():
                 warnings.append(

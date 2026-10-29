@@ -78,6 +78,17 @@ def _with_helper(widget: QWidget, helper: str) -> QWidget:
     return holder
 
 
+def _warning_label(text: str = "") -> QLabel:
+    """Inline warning caption for under a form-row widget; starts hidden."""
+    label = QLabel(text)
+    label.setWordWrap(True)
+    label.setStyleSheet(
+        f"color: {tokens.active().warning}; font-size: {tokens.FS_CAPTION}px;"
+    )
+    label.setVisible(False)
+    return label
+
+
 class FocusPanel(QWidget):
     # Fires whenever any option widget on this panel changes value. The
     # live preview controller listens for this and re-runs focus +
@@ -272,17 +283,18 @@ class SegmentPanel(QWidget):
         self.model = QComboBox()
         self.model.addItem("cpsam (default)", "cpsam")
         self.model.addItem("cpsam_v2 (Cellpose ≥ 4.2)", "cpsam_v2")
-        self._model_warning = QLabel(CPSAM_V2_CLASSIFIER_WARNING)
-        self._model_warning.setWordWrap(True)
-        self._model_warning.setStyleSheet(
-            f"color: {tokens.active().warning}; font-size: {tokens.FS_CAPTION}px;"
-        )
-        self._model_warning.setVisible(False)
+        self._model_warning = _warning_label(CPSAM_V2_CLASSIFIER_WARNING)
+        # Saved settings can name weights this version doesn't offer. Say so
+        # (and block runs, see MainWindow._preflight_ok) until the user picks
+        # one, rather than quietly segmenting with the default.
+        self._missing_model: str | None = None
+        self._missing_model_warning = _warning_label()
         model_holder = _with_helper(
             self.model,
             "Cellpose weights. cpsam matches the bundled quality classifiers.",
         )
         model_holder.layout().addWidget(self._model_warning)
+        model_holder.layout().addWidget(self._missing_model_warning)
         form.addRow("Model:", model_holder)
 
         form.addRow("Diameter (px):", _with_helper(
@@ -317,6 +329,10 @@ class SegmentPanel(QWidget):
         root.addWidget(opt_box)
         root.addStretch(1)
 
+        # Any pick resolves a missing saved model, including re-picking the
+        # entry already shown (``activated`` fires for that, index changes don't).
+        self.model.activated.connect(lambda _i: self._set_missing_model(None))
+
         # Fan in option-widget signals → optionsChanged.
         self.model.currentIndexChanged.connect(self._update_model_warning)
         self.model.currentIndexChanged.connect(self._emit_options_changed)
@@ -339,6 +355,20 @@ class SegmentPanel(QWidget):
         self._model_warning.setVisible(
             self.model.currentData() != CLASSIFIER_TRAINING_CELLPOSE_MODEL
         )
+
+    def _set_missing_model(self, name: str | None) -> None:
+        self._missing_model = name
+        if name is not None:
+            self._missing_model_warning.setText(
+                f"Your saved Cellpose model '{name}' isn't available in this "
+                "version of MycoMorph. Choose a model above; runs that include "
+                "Segment are blocked until you do."
+            )
+        self._missing_model_warning.setVisible(name is not None)
+
+    def missing_saved_model(self) -> str | None:
+        """The saved Cellpose model name this version lacks, until the user picks one."""
+        return self._missing_model
 
     def set_detected_pixels_per_um(self, value: float | None) -> None:
         """Called from the Input panel when a CZI is selected."""
@@ -365,7 +395,9 @@ class SegmentPanel(QWidget):
 
     def state(self) -> dict:
         return {
-            "model": self.model.currentData(),
+            # Keep the missing name so the warning survives a restart the
+            # user didn't choose a model in.
+            "model": self._missing_model or self.model.currentData(),
             "diameter": self.diameter.value(),
             "flow_threshold": self.flow_threshold.value(),
             "cellprob_threshold": self.cellprob_threshold.value(),
@@ -382,9 +414,13 @@ class SegmentPanel(QWidget):
         try:
             # ``model_type`` was a dropdown in older (Cellpose 3) builds;
             # ignore it. Only ``model`` names Cellpose 4 weights.
-            if s.get("model") in CELLPOSE_MODELS:
-                self.model.setCurrentIndex(self.model.findData(s["model"]))
+            model = s.get("model")
+            if model in CELLPOSE_MODELS:
+                self.model.setCurrentIndex(self.model.findData(model))
                 self._update_model_warning()
+                self._set_missing_model(None)
+            elif model is not None:
+                self._set_missing_model(str(model))
             if "diameter" in s:
                 self.diameter.setValue(float(s["diameter"]))
             if "flow_threshold" in s:
@@ -452,6 +488,15 @@ class ClassifyPanel(QWidget):
         self.preset = QComboBox()
         self.preset.addItems(["none (rules only)"] + sorted(PRESET_MODELS.keys()) + ["custom…"])
         self.preset.currentIndexChanged.connect(self._on_preset)
+        # A saved preset this version no longer bundles (``mtb`` after
+        # v0.6.0). Say so and block runs (MainWindow._preflight_ok) until the
+        # user picks a classifier, rather than quietly running rules only.
+        self._missing_preset: str | None = None
+        self._preset_warning = _warning_label()
+        # Re-picking the entry already shown counts as a choice too.
+        self.preset.activated.connect(lambda _i: self._set_missing_preset(None))
+        preset_holder = _with_helper(self.preset, "")
+        preset_holder.layout().addWidget(self._preset_warning)
 
         self.custom_path = QLineEdit()
         self.custom_path.setReadOnly(True)
@@ -495,7 +540,7 @@ class ClassifyPanel(QWidget):
         self._model_threshold_note.setObjectName("muted")
         self._model_threshold_note.setWordWrap(True)
 
-        form.addRow("Classifier:", self.preset)
+        form.addRow("Classifier:", preset_holder)
         form.addRow("Trained run:", self.trained_run)
         form.addRow("Custom model (.pth):", path_wrap)
         form.addRow("", self.use_rules)
@@ -574,8 +619,26 @@ class ClassifyPanel(QWidget):
     def _on_preset(self) -> None:
         text = self.preset.currentText()
         self.custom_path.setEnabled(text == "custom…")
+        if not self._loading:
+            # Picked here or via Trained run; restore_state decides for itself.
+            self._set_missing_preset(None)
         self._refresh_inspector()
         self._sync_trained_run()
+
+    def _set_missing_preset(self, name: str | None) -> None:
+        self._missing_preset = name
+        if name is not None:
+            self._preset_warning.setText(
+                f"Your saved classifier '{name}' isn't available in this "
+                "version of MycoMorph, so no classifier is selected. Choose "
+                "one above (or \"none (rules only)\" on purpose); runs that "
+                "include Classify are blocked until you do."
+            )
+        self._preset_warning.setVisible(name is not None)
+
+    def missing_saved_preset(self) -> str | None:
+        """The saved preset name this version lacks, until the user picks a classifier."""
+        return self._missing_preset
 
     def refresh_trained_runs(self) -> None:
         """Re-list ModelPrep's trained CNN runs, keeping the selection."""
@@ -698,7 +761,9 @@ class ClassifyPanel(QWidget):
 
     def state(self) -> dict:
         return {
-            "preset": self.preset.currentText(),
+            # Keep the missing name so the warning survives a restart the
+            # user didn't choose a classifier in.
+            "preset": self._missing_preset or self.preset.currentText(),
             "custom_path": self.custom_path.text(),
             "use_rules": self.use_rules.isChecked(),
             "confidence": self.confidence.value(),
@@ -711,9 +776,15 @@ class ClassifyPanel(QWidget):
         self._loading = True
         try:
             if "preset" in s:
-                i = self.preset.findText(str(s["preset"]))
+                name = str(s["preset"])
+                i = self.preset.findText(name)
                 if i >= 0:
                     self.preset.setCurrentIndex(i)
+                    self._set_missing_preset(None)
+                else:
+                    # No guessed replacement: mtb-2026-06 is not the old mtb.
+                    self.preset.setCurrentIndex(0)
+                    self._set_missing_preset(name)
             if "custom_path" in s:
                 self.custom_path.setText(str(s["custom_path"]))
             if "use_rules" in s:
