@@ -1,0 +1,28 @@
+{
+  "name": "mtb-2026-06",
+  "file": "mtb-2026-06_best_model.pth",
+  "sha256": "0e371c10bc04728392b1dc6c032c8451a9163157ee217c22173836cb4d1eb289",
+  "in_channels": 3,
+  "num_classes": 2,
+  "class_names": [
+    "good",
+    "bad"
+  ],
+  "crop_size": 64,
+  "channels": "[phase, mask, log-area]",
+  "label_criteria": "Bad = out of focus, clumped, debris, or cut off at the image edge. Dividing cells are good.",
+  "trainer": "ModelPrep (June 2026), since integrated into MycoMorph as mycomorph.modelprep",
+  "organism": "Mycobacterium tuberculosis",
+  "summary": "M. tuberculosis cell-quality classifier (June 2026). Labels each segmented cell good or bad.",
+  "training_data": "72 randomly sampled fields from two imaging sessions (8 and 10 June 2026) of ATc-induced CRISPRi knockdown strains carrying the iniB-mScarlet reporter: 67 knockdowns, including non-targeting controls.",
+  "imaging": "Phase contrast, Plan-Apochromat 100x/1.4 Oil Ph3, Axiocam 506 without binning (0.072 um per pixel). A 5-slice z-stack, 0.32 um apart, combined by MycoMorph's extended depth of field. Segmented with Cellpose-SAM (cpsam weights, automatic diameter) using a Cellpose 4 release whose exact version was not recorded, after edge and debris rules.",
+  "labels": "3,560 cells labelled in ModelPrep by T. de Wet, mostly chosen by active learning. Split: 2,000 training, 500 validation, 1,060 held out.",
+  "training": "Trained from scratch in one ModelPrep run (11 June 2026). Input: 64x64 crops with three channels (phase, mask, log cell area). Seed 42, learning rate 1e-4, batch size 32, early stopping (patience 15); best epoch 19 of 34.",
+  "performance": "90.5% agreement with hand labels on the 1,060 held-out cells, about half of which the model found hard. Validation on independent sessions: MycoMorph paper, Figure S2b.",
+  "intended_use": "M. tuberculosis phase-contrast images at 0.072 um per pixel, without binning, like the training data. Not for binned images: the model's cell-size input is measured in pixels. Retrain with ModelPrep for other organisms, reporters or imaging setups.",
+  "decision_threshold": 0.6275500059127808,
+  "decision_threshold_note": "Tuned on validation; opt-in. MycoMorph uses 0.5 by default.",
+  "training_run": "mtb-v2_2026-06-11_17-15-18",
+  "trained": "2026-06-11",
+  "training_record": "assets/models/mtb-2026-06/"
+}

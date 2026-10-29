@@ -156,7 +156,7 @@ def models() -> None:
 def verify_model(
     model: str = typer.Option(
         ..., "--model", "-m",
-        help="Path to a trained .pth, or a bundled preset name (e.g. 'mtb').",
+        help="Path to a trained .pth, or a bundled preset name (e.g. 'mtb-2026-06').",
     ),
     in_channels: int = typer.Option(
         3, "--in-channels", help="Input channels the model expects (default 3).",
@@ -294,7 +294,7 @@ def label(
     ),
     model: Optional[str] = typer.Option(
         None, "--model", "-m",
-        help="Preset name (e.g. 'mtb') or path to a .pth. If omitted, cells "
+        help="Preset name (e.g. 'mtb-2026-06') or path to a .pth. If omitted, cells "
              "are shown in random order rather than ranked by uncertainty.",
     ),
     n_pool: int = typer.Option(
@@ -377,7 +377,7 @@ def review(
     h5: Path = typer.Option(..., "--h5", "-i", exists=True),
     model: str = typer.Option(
         ..., "--model", "-m",
-        help="Preset name (e.g. 'mtb') or path to a .pth file.",
+        help="Preset name (e.g. 'mtb-2026-06') or path to a .pth file.",
     ),
     labels_dir: Optional[Path] = typer.Option(None, "--labels-dir"),
     mode: str = typer.Option(

@@ -1,0 +1,59 @@
+{
+  "in_channels": 3,
+  "num_classes": 2,
+  "class_names": [
+    "good",
+    "bad"
+  ],
+  "n_train": 2000,
+  "n_val": 500,
+  "n_test": 0,
+  "n_holdout": 1060,
+  "eval_split": "holdout",
+  "split_note": "2-way train/val split (val=20%); metrics on external hold-out (n=1060)",
+  "class_counts": {
+    "good": 907,
+    "bad": 1593
+  },
+  "best_val_acc": 0.67,
+  "best_epoch": 19,
+  "eval_acc": 0.9047169811320754,
+  "balanced_acc": 0.9071122994652406,
+  "majority_baseline": 0.5188679245283019,
+  "roc_auc": 0.9421818181818182,
+  "average_precision": 0.9620933533258034,
+  "decision_threshold": 0.6275500059127808,
+  "confusion": {
+    "tn": 495,
+    "fp": 15,
+    "fn": 86,
+    "tp": 464
+  },
+  "total_epochs": 34,
+  "lr": 0.0001,
+  "batch_size": 32,
+  "patience": 15,
+  "val_fraction": 0.2,
+  "test_fraction": 0.15,
+  "seed": 42,
+  "freeze_backbone": false,
+  "trainer": "modelprep",
+  "trainer_version": "0.1.0",
+  "provenance": {
+    "model_name": "mtb-v2",
+    "source_h5": "all_crops.h5",
+    "labels_dir": "<data>/Mtb_CRISPRi/Reimage/IniB/training_data/04_features/modelprep_labels",
+    "n_labelled": 2500,
+    "used_uids_sha256": "90f0980832d52dfacf19dbe2ab3a0061d32c2a6699fd00feba22d278ec6c9453",
+    "class_counts": {
+      "good": 907,
+      "bad": 1593
+    },
+    "n_holdout": 1060,
+    "holdout_class_counts": {
+      "good": 510,
+      "bad": 550
+    },
+    "labels_schema_version": "1.1"
+  }
+}

@@ -174,11 +174,14 @@ Segmentation uses Cellpose-SAM. The default model is `cpsam`, pinned so that mas
 
 ### Cell-quality classifier
 
-On the **Segment & Classify** page, Classify offers three choices:
+On the **Segment & Classify** page, Classify offers four choices:
 
 - **none (rules only)**: the edge and debris filter on its own.
-- **mtb**: the bundled *M. tuberculosis* model (`src/mycomorph/core/models/mtb_best_model.pth`). Its training curves and config are in `assets/models_mtb/`.
+- **mtb-2026-06**: the bundled *M. tuberculosis* model, trained on unbinned (0.072 µm per pixel) phase-contrast images of CRISPRi knockdown strains. Not for binned images.
+- **msm-2026-06**: the bundled *M. smegmatis* model, trained on unbinned images from DNA-damage experiments, including many filamenting cells.
 - **custom…**: your own `.pth`. **Trained run** lists the CNN models you trained in [ModelPrep](#modelprep-label-cells-and-train-the-classifier) by name; picking one selects custom… and that model. Feature models aren't listed, because Classify can't use them. **Browse…** takes any other `.pth`.
+
+Each preset's `src/mycomorph/core/models/<name>_best_model.json` describes its training data, imaging, labels, training and intended use. Its training record and curves are in `assets/models/<name>/`.
 
 By default, a cell is kept only if the classifier calls it good with P(good) at or above the **Confidence threshold** slider (0.5 by default; higher is stricter). Models trained in ModelPrep store a tuned decision threshold in a `training_config.json` next to the `.pth`. When that file is present, you can tick **Use the model's tuned threshold** to keep a cell only if P(bad) is below that threshold. This is off by default.
 

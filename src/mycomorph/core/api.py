@@ -553,8 +553,9 @@ class ClassifyOpts:
 # works in editable installs, wheels, and zipapps alike — the .pth files
 # are shipped with the package via [tool.setuptools.package-data].
 PRESET_MODELS: dict[str, Path] = {
-    "mtb": Path(str(_pkg_files("mycomorph.core") / "models" / "mtb_best_model.pth")),
-    # "msm": Path(...)  # add when an Msm model is trained
+    # Descriptions of what each was trained on: <name>_best_model.json.
+    "mtb-2026-06": Path(str(_pkg_files("mycomorph.core") / "models" / "mtb-2026-06_best_model.pth")),
+    "msm-2026-06": Path(str(_pkg_files("mycomorph.core") / "models" / "msm-2026-06_best_model.pth")),
 }
 
 

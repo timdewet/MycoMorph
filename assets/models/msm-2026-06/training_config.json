@@ -1,0 +1,59 @@
+{
+  "in_channels": 3,
+  "num_classes": 2,
+  "class_names": [
+    "good",
+    "bad"
+  ],
+  "n_train": 3942,
+  "n_val": 986,
+  "n_test": 0,
+  "n_holdout": 1100,
+  "eval_split": "holdout",
+  "split_note": "2-way train/val split (val=20%); metrics on external hold-out (n=1100)",
+  "class_counts": {
+    "good": 2145,
+    "bad": 2783
+  },
+  "best_val_acc": 0.8367139959432048,
+  "best_epoch": 39,
+  "eval_acc": 0.850909090909091,
+  "balanced_acc": 0.8525937134968673,
+  "majority_baseline": 0.5309090909090909,
+  "roc_auc": 0.9125617234788148,
+  "average_precision": 0.9284441470114079,
+  "decision_threshold": 0.51444411277771,
+  "confusion": {
+    "tn": 454,
+    "fp": 62,
+    "fn": 102,
+    "tp": 482
+  },
+  "total_epochs": 40,
+  "lr": 0.0001,
+  "batch_size": 32,
+  "patience": 15,
+  "val_fraction": 0.2,
+  "test_fraction": 0.15,
+  "seed": 42,
+  "freeze_backbone": false,
+  "trainer": "modelprep",
+  "trainer_version": "0.1.0",
+  "provenance": {
+    "model_name": "msm_mmc_v1",
+    "source_h5": "all_crops.h5",
+    "labels_dir": "<data>/DNA_Array/training_data/04_features/modelprep_labels",
+    "n_labelled": 4928,
+    "used_uids_sha256": "34715329e26be8e96cfead64432a73413439fb48436fdb2d892c3f73b34c6009",
+    "class_counts": {
+      "good": 2145,
+      "bad": 2783
+    },
+    "n_holdout": 1100,
+    "holdout_class_counts": {
+      "good": 516,
+      "bad": 584
+    },
+    "labels_schema_version": "1.1"
+  }
+}
