@@ -4,7 +4,7 @@ Bacterial microscopy pipeline and morphological-profiling workbench with a PyQt6
 
 MycoMorph takes raw Zeiss CZI plates or TIFF images from focus picking, through Cellpose-SAM segmentation and cell-quality filtering, to per-cell morphology features, fluorescent foci detection, and CNN embeddings. It also compares morphological profiles across experiments. It was built around *M. tuberculosis* imaging: the bundled cell-quality classifier was trained on Mtb cells. The other stages are not species-specific.
 
-Everything runs from one desktop app. The same functionality is also available as a Python package (`mycomorph.core`) and two command-line tools.
+Everything runs from one desktop app. It includes **ModelPrep**, the labeller and trainer for the cell-quality classifier: you label cells from a run's crops, train a classifier, and use it on the Classify page. The same functionality is also available as Python packages (`mycomorph.core`, `mycomorph.modelprep`) and command-line tools.
 
 ## Contents
 
@@ -14,6 +14,7 @@ Everything runs from one desktop app. The same functionality is also available a
 - [Pipeline stages](#pipeline-stages)
 - [Output folder](#output-folder)
 - [Models](#models)
+- [ModelPrep: label cells and train the classifier](#modelprep-label-cells-and-train-the-classifier)
 - [Analysis and the morphology library](#analysis-and-the-morphology-library)
 - [Command line](#command-line)
 - [Configuration](#configuration)
@@ -21,18 +22,31 @@ Everything runs from one desktop app. The same functionality is also available a
 - [Building a desktop bundle](#building-a-desktop-bundle)
 - [Releases](#releases)
 - [Acknowledgments](#acknowledgments)
+- [License](#license)
 
 ## Install
 
-### For end-users (Windows)
+### For end-users (Windows and macOS)
 
-1. Download the latest `MycoMorph-windows.zip` from the [Releases](https://github.com/timdewet/MycoMorph/releases) page.
+You don't need to install Python. Download the latest release from the [Releases](https://github.com/timdewet/MycoMorph/releases) page.
+
+**Windows:**
+
+1. Download `MycoMorph-windows.zip`.
 2. Unzip it anywhere (e.g. `C:\Program Files\MycoMorph\`).
 3. Double-click `MycoMorph.exe`.
 
-You don't need to install Python. The first segmentation run downloads a few hundred MB of Cellpose model weights to `%USERPROFILE%\.cellpose\`, so it needs internet access once. After that the app works offline.
+**macOS (Apple silicon):**
 
-The Windows bundle runs on the CPU only. To use an NVIDIA GPU, [install from source](#for-developers-from-source) with the CUDA build of PyTorch.
+1. Download `MycoMorph-macos.zip` and unzip it.
+2. Move `MycoMorph.app` to your Applications folder.
+3. The app is not signed or notarised, so macOS blocks the first launch. Double-click it once and dismiss the warning, then open **System Settings > Privacy & Security**, scroll to the message about MycoMorph, and click **Open Anyway**. (On macOS 14 and earlier you can instead Control-click the app and choose **Open**.) You only need to do this once.
+
+The first segmentation run downloads a few hundred MB of Cellpose model weights to `~/.cellpose/` (`%USERPROFILE%\.cellpose\` on Windows), so it needs internet access once. After that the app works offline.
+
+The Windows bundle runs on the CPU only. To use an NVIDIA GPU, [install from source](#for-developers-from-source) with the CUDA build of PyTorch. The macOS app uses the Apple-silicon GPU (MPS).
+
+The same download also opens ModelPrep: see [Launching ModelPrep](#launching-modelprep).
 
 ### For developers (from source)
 
@@ -56,20 +70,18 @@ Install these alongside the core package, e.g. `pip install -e ".[foci,profiling
 | --- | --- | --- |
 | `foci` | `bm3d`, `trackpy`, `basicpy` | BM3D denoising, the trackpy detector, and BaSiC flat-field correction in the foci stages. Each one loads only when you use it, so you can install just the ones you need. |
 | `profiling` | `harmonypy` | Harmony batch correction in Analysis and `library compare-representations`. Without it, batch correction is skipped with a warning. |
-| `napari` | `napari` | `mycomorph-cli label --mode napari` |
 | `test` | `pytest`, `pytest-qt`, `ruff`, `mypy` | The test suite and CI's static checks |
 
 ## Update
 
-### End-users (Windows zip)
+### End-users (Windows zip, macOS app)
 
 When a newer release is available, the app shows a banner at launch. Click **View Release** to open the Releases page, then:
 
-1. Download the new `MycoMorph-windows.zip` from [Releases](https://github.com/timdewet/MycoMorph/releases).
-2. Unzip it over your existing `MycoMorph\` folder, replacing the old files. Your Cellpose weights in `%USERPROFILE%\.cellpose\` and your morphology library in `%USERPROFILE%\.mycomorph\` are kept.
-3. Double-click `MycoMorph.exe`.
+- **Windows:** download the new `MycoMorph-windows.zip`, unzip it over your existing `MycoMorph\` folder (replacing the old files), and double-click `MycoMorph.exe`. If Windows Explorer still shows the old icon, move the folder once or run `ie4uinit.exe -show` to refresh the icon cache.
+- **macOS:** download the new `MycoMorph-macos.zip`, unzip it, and replace `MycoMorph.app` in Applications.
 
-If Windows Explorer still shows the old icon after an update, move the folder once or run `ie4uinit.exe -show` to refresh the icon cache.
+Your data lives outside the app and is kept: Cellpose weights in `~/.cellpose/`, the morphology library in `~/.mycomorph/`, and ModelPrep's trained models and settings in `~/.modelprep/` (under `%USERPROFILE%\` on Windows).
 
 ### Developers (from source)
 
@@ -85,7 +97,7 @@ The update banner only appears in the packaged app. Running from source never sh
 
 ## Using the app
 
-Launch with `mycomorph` (or `python -m mycomorph`). The sidebar lists the pages below. You can visit them in any order, and each stage shows **Done**, **Ready to run**, or **Needs upstream output**.
+Launch with `mycomorph` (or `python -m mycomorph`). ModelPrep has its own window: open it from the Classify page, or on its own (see [Launching ModelPrep](#launching-modelprep)). The sidebar lists the pages below. You can visit them in any order, and each stage shows **Done**, **Ready to run**, or **Needs upstream output**.
 
 1. **Input**. Choose an input mode and an output folder.
    - **Single plate**: one or more multi-position CZIs with Zeiss well metadata. Extra CZIs must have the same channels as the first.
@@ -166,11 +178,59 @@ On the **Segment & Classify** page, Classify offers three choices:
 
 - **none (rules only)**: the edge and debris filter on its own.
 - **mtb**: the bundled *M. tuberculosis* model (`src/mycomorph/core/models/mtb_best_model.pth`). Its training curves and config are in `assets/models_mtb/`.
-- **custom…**: your own `.pth`.
+- **custom…**: your own `.pth`. **Trained run** lists the CNN models you trained in [ModelPrep](#modelprep-label-cells-and-train-the-classifier) by name; picking one selects custom… and that model. Feature models aren't listed, because Classify can't use them. **Browse…** takes any other `.pth`.
 
 By default, a cell is kept only if the classifier calls it good with P(good) at or above the **Confidence threshold** slider (0.5 by default; higher is stricter). Models trained in ModelPrep store a tuned decision threshold in a `training_config.json` next to the `.pth`. When that file is present, you can tick **Use the model's tuned threshold** to keep a cell only if P(bad) is below that threshold. This is off by default.
 
-**Labeller / trainer** opens a window where you label uncertain cells from a segmented folder as good or bad. Once you have 20 labels, you can train a new classifier. **Model details** shows ROC and PR curves for the selected model.
+**Labeller / trainer** opens ModelPrep (next section). **Model details** shows ROC and PR curves for the selected model; the marker shows the P(bad) cutoff the current settings apply.
+
+## ModelPrep: label cells and train the classifier
+
+ModelPrep labels cells as good or bad and trains the cell-quality classifier that Classify uses. It works from the `04_features/all_crops.h5` that the Features stage writes when **Save HDF5 crops** is on (the default). It used to be a separate app and is now part of MycoMorph.
+
+### Launching ModelPrep
+
+- **From MycoMorph:** on the Segment & Classify page, click **Labeller / trainer**. ModelPrep opens in its own window on the current output folder's `all_crops.h5`, if there is one. If a pipeline run is going when you start training, you get a warning: the two share the GPU, so both run slower.
+- **On its own:** run `modelprep` (or `python -m mycomorph.modelprep`). In the desktop bundle, start the app with `--modelprep`:
+  - Windows: `MycoMorph.exe --modelprep` (for example as a shortcut's target).
+  - macOS: `open -n -a MycoMorph --args --modelprep` (`-n` starts a new copy even if MycoMorph is already open).
+
+Closing MycoMorph also closes its ModelPrep window. ModelPrep offers to save any unsaved labels first, and **Cancel** keeps both windows open.
+
+### Pages
+
+1. **Source**. Pick an `all_crops.h5` and name the model you're about to train. Labels are saved next to the HDF5 in `modelprep_labels/`. The page warns if the crops don't match what Classify sees, for example when background masking was on.
+2. **Label cells**. Choose a model (a bundled preset, or one you trained) and click **Load pool**. With a model, the cells it is least sure about come first; with none, cells come in a seeded random order. Press **G** for good, **B** for bad, **U** to clear a label, and the arrow keys to move; **Save & next page** saves. You can also:
+   - review a model's predictions and flip the wrong ones (**Review predictions**);
+   - label into a frozen **hold-out test set**, so that metrics stay comparable from one training round to the next;
+   - restrict the pool to some genes or conditions (**All cells ▾**);
+   - open a cell in the inspector to see it in its original field of view;
+   - check your own consistency by relabelling a blind sample (**More ▾ > Consistency check…**).
+
+   The [labelling rubric](docs/modelprep/labelling_rubric.md) is where the lab writes down what "good" and "bad" mean.
+3. **Fine-tune**. **Start training** needs at least 20 training labels. Training fine-tunes the selected model by default, reports metrics on the hold-out set when there is one, and picks a decision threshold. When the run's features table and a hold-out set are available, a feature-based model (morphology, field-of-view context, focus, and fragment features) is trained alongside it, for comparison.
+4. **Models**. Lists every trained run with its metrics and ROC / PR curves. From here you can use a run for labelling, export it (**Export for MycoMorph…** copies the weights and training record to a folder you choose), delete it, or run a learning curve to see whether more labels would still help.
+
+Trained runs are saved in `~/.modelprep/models/`: a CNN run in `<name>_<date>/` as `best_model.pth`, and its feature model in `<name>-features_<date>/` as `feature_model.joblib`, each with `training_config.json` and `metrics.json`. CNN runs appear under **Trained run** on MycoMorph's Classify page, and the tuned threshold Classify can offer is the one in `training_config.json`. `~/.modelprep/` also holds ModelPrep's settings, learning curves, and a cache of model scores. The folder keeps its name from when ModelPrep was a separate app, so runs trained then are still listed.
+
+### ModelPrep on the command line
+
+`modelprep-cli` does the same from a terminal; each command takes `--help`.
+
+| Command | Purpose |
+| --- | --- |
+| `modelprep-cli info --h5 <all_crops.h5>` | Describe an HDF5 file: cells, channels, schema, metadata |
+| `modelprep-cli models` | List the bundled classifier presets |
+| `modelprep-cli verify-model` | Check that a `.pth` loads and runs |
+| `modelprep-cli doctor` | Report versions, the compute device, and the presets |
+| `modelprep-cli label` | Open the interactive labeller |
+| `modelprep-cli review` | Review and correct a model's predictions |
+| `modelprep-cli train` | Train the CNN from labelled crops |
+| `modelprep-cli feature-model` | Train the feature-based classifier |
+| `modelprep-cli evaluate` | Score a saved model on the current hold-out set |
+| `modelprep-cli learning-curve` | Train on growing subsets of the labels and score each on the hold-out set |
+| `modelprep-cli consistency` | Summarise the saved label-consistency checks |
+| `modelprep-cli export` | Copy a trained CNN to a folder for MycoMorph's custom-model picker |
 
 ## Analysis and the morphology library
 
@@ -193,18 +253,17 @@ The **Analysis** page plots a UMAP of per-condition profiles. Profiles are built
 
 | Command | Purpose |
 | --- | --- |
-| `mycomorph` | Launch the GUI (same as `python -m mycomorph`) |
+| `mycomorph` | Launch the GUI (same as `python -m mycomorph`); `mycomorph --modelprep` opens ModelPrep instead |
+| `modelprep` | Launch ModelPrep (same as `python -m mycomorph.modelprep`) |
+| `modelprep-cli …` | ModelPrep's labelling and training commands (see [ModelPrep on the command line](#modelprep-on-the-command-line)) |
 | `mycomorph-cli split` | Split a multi-position CZI plate into per-well TIFFs |
 | `mycomorph-cli segment` | Run Cellpose-SAM segmentation on CZI or TIFF input |
-| `mycomorph-cli label` | Label cells interactively (grid, napari, or montage) |
-| `mycomorph-cli train` | Train a cell-quality classifier |
-| `mycomorph-cli review` | Active-learning review of classifier predictions |
 | `mycomorph-cli library …` | Manage the morphology library: `list`, `summary`, `add`, `update`, `remove`, `precompute-ot-views`, `gene-template`, `compare-representations` |
 | `mycomorph-cli focus …` | Same as `mycomorph-focus` |
 | `mycomorph-focus process` | Pick best-focus slices from a CZI and write OME-TIFFs |
 | `mycomorph-focus review` / `label` / `compare` | Sample scenes, label best slices by hand, and score the focus metrics against those labels |
 
-Each command takes `--help`. `mycomorph-focus process` defaults to whole-field focus with the `vollath_f4` metric. The GUI defaults to EDF with the ensemble metric. By default, `process` moves the source CZI into `raw/` when it succeeds; pass `--no-archive` to leave it in place.
+Each command takes `--help`. `mycomorph-cli label`, `review`, and `train` have moved to ModelPrep: they now print the `modelprep-cli` command to use and exit. `mycomorph-focus process` defaults to whole-field focus with the `vollath_f4` metric. The GUI defaults to EDF with the ensemble metric. By default, `process` moves the source CZI into `raw/` when it succeeds; pass `--no-archive` to leave it in place.
 
 `scripts/` holds maintenance tools for the morphology library, each run as `python scripts/<name>.py --help`:
 
@@ -219,7 +278,8 @@ Each command takes `--help`. `mycomorph-focus process` defaults to whole-field f
 | `MYCOMORPH_FOCI_WORKERS` | Number of worker processes for batch foci detection |
 | `MYCOMORPH_CROP_CACHE_BYTES` | RAM cache for crops during embedding training (default 12 GB) |
 | `MYCOMORPH_OT_JOBS` | Parallel jobs for optimal-transport precompute |
-| `MYCOMORPH_SMOKE_TEST` | Set to `1` to make the GUI quit shortly after opening (used by CI) |
+| `MYCOMORPH_SMOKE_TEST` | Set to `1` to make the GUI (or ModelPrep, with `--modelprep`) quit shortly after opening and print which window opened (used by CI) |
+| `MODELPREP_GUI_TESTS` | Set to `1` to run ModelPrep's GUI tests, which need an offscreen Qt (CI sets it) |
 
 ## Development
 
@@ -233,33 +293,40 @@ src/mycomorph/
 │   ├── autoencoder/      # CNN embedding models and training
 │   ├── models/           # bundled classifier weights (package data)
 │   └── provenance.py     # output signatures and software versions
-└── gui/
-    ├── panels/           # one panel per sidebar page
-    ├── pipeline/         # stage adapters, runner, run context
-    └── widgets/          # live preview, plate map, library browser, …
+├── gui/
+│   ├── panels/           # one panel per sidebar page
+│   ├── pipeline/         # stage adapters, runner, run context
+│   ├── ui/               # design system (theme, tokens, sidebar), shared with ModelPrep
+│   └── widgets/          # live preview, plate map, library browser, model inspector, …
+└── modelprep/            # ModelPrep: labeller and trainer for the cell-quality classifier
+    ├── core/             # HDF5 crops reader, labels store, trainers, modelprep-cli
+    └── gui/              # ModelPrep's window and pages
 assets/                   # app icon; Mtb classifier training artifacts
-packaging/                # PyInstaller spec
+docs/modelprep/           # labelling rubric and ModelPrep's dry-lab protocols
+packaging/                # PyInstaller spec, bundle licence notice, icon generator
 constraints/              # pinned Python 3.12 stack for the desktop bundle
 validation/               # one-off validation studies (e.g. Cellpose model comparison)
-tests/
+tests/                    # tests/modelprep/ holds ModelPrep's tests
 ```
 
-MycoMorph merges the former **ImagingPipeline** (core library) and **ImagePipelineGUI** (frontend) projects and was previously named `mycoprep`.
+MycoMorph merges the former **ImagingPipeline** (core library) and **ImagePipelineGUI** (frontend) projects and was previously named `mycoprep`. **ModelPrep** joined in 0.5.0, with its git history, under `src/mycomorph/modelprep/`, `tests/modelprep/`, and `docs/modelprep/`. [docs/modelprep/README.md](docs/modelprep/README.md) maps its old commit hashes to the new ones.
 
 Run the same checks as CI:
 
 ```bash
 ruff check src tests
-QT_QPA_PLATFORM=offscreen pytest -q
+QT_QPA_PLATFORM=offscreen MODELPREP_GUI_TESTS=1 pytest -q
 ```
 
-The tests need no GPU or microscopy data, because Cellpose is replaced with a fake. On headless Linux, PyQt6 needs the system libraries listed in [.github/workflows/ci.yml](.github/workflows/ci.yml).
+The tests need no GPU or microscopy data, because Cellpose is replaced with a fake, and they write ModelPrep's settings and models to a temporary home folder, never your own. On headless Linux, PyQt6 needs the system libraries listed in [.github/workflows/ci.yml](.github/workflows/ci.yml).
 
-CI runs on Ubuntu and macOS with Python 3.10 and 3.11. Pull requests also build and smoke-launch the Windows bundle.
+CI runs on Ubuntu and macOS with Python 3.10, 3.11, and 3.12; the 3.12 jobs install the pinned release stack. Pull requests also build the Windows bundle and the macOS app and smoke-launch each one as MycoMorph and as ModelPrep.
 
 ## Building a desktop bundle
 
 The bundle config is in [packaging/mycomorph.spec](packaging/mycomorph.spec). Release builds use Python 3.12 and the pinned stack in [constraints/release-py312.txt](constraints/release-py312.txt). PyInstaller does **not** cross-compile, so build on the OS you intend to ship to.
+
+One bundle holds both apps: the executable opens MycoMorph, and with `--modelprep` it opens ModelPrep. Each bundle also carries [packaging/BUNDLE_LICENSE.txt](packaging/BUNDLE_LICENSE.txt), `LICENSE`, and the PyQt6 and Qt licence texts (see [License](#license)). The app icons are generated from the SVG logos by `python packaging/make_icons.py`.
 
 ### Windows (`.exe`)
 
@@ -280,7 +347,7 @@ pip install -c constraints/release-py312.txt -e . pyinstaller==6.16.0
 pyinstaller packaging/mycomorph.spec
 ```
 
-This produces `dist/MycoMorph/`, which runs only on the OS family it was built on.
+On macOS this produces `dist/MycoMorph.app`; zip it with `ditto -c -k --keepParent dist/MycoMorph.app MycoMorph-macos.zip` so the app's symlinks survive. The app is not signed or notarised. On Linux it produces `dist/MycoMorph/`; on a machine without a display, set `QT_QPA_PLATFORM=offscreen` while building. A bundle runs only on the OS family (and, on macOS, the processor type) it was built on.
 
 ### Building Windows from a non-Windows host
 
@@ -292,7 +359,7 @@ PyInstaller can't cross-compile. Use one of:
 
 ## Releases
 
-Pre-built Windows bundles are published on the [Releases](https://github.com/timdewet/MycoMorph/releases) page. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
+Pre-built Windows bundles and macOS apps (Apple silicon) are published on the [Releases](https://github.com/timdewet/MycoMorph/releases) page. Changes are listed in [CHANGELOG.md](CHANGELOG.md).
 
 ### Cutting a new release
 
@@ -301,7 +368,7 @@ Releases are driven by [release-please](https://github.com/googleapis/release-pl
 1. Merge PRs into `main` with conventional-commit messages (see below).
 2. release-please opens a single "chore(main): release mycomorph X.Y.Z" PR and keeps it up to date. The PR bumps the version in `src/mycomorph/__init__.py` and `pyproject.toml` and writes a CHANGELOG entry.
 3. When you're ready to ship, merge that PR. release-please tags the commit and creates a GitHub Release with the changelog as its body.
-4. A Windows runner builds `dist/MycoMorph/`, checks that the tag matches `__version__`, zips the folder as `MycoMorph-windows.zip`, and uploads it to the release.
+4. A Windows runner and a macOS runner each build the bundle, check that the tag matches `__version__`, and upload `MycoMorph-windows.zip` and `MycoMorph-macos.zip` to the release.
 5. Installed copies of the app show the update banner on their next launch.
 
 **Conventional-commit prefixes that drive version bumps:**
@@ -310,12 +377,12 @@ Releases are driven by [release-please](https://github.com/googleapis/release-pl
 | --- | --- | --- |
 | `feat: …` | new user-facing feature | minor |
 | `fix: …` | bug fix | patch |
-| `feat!: …` or `BREAKING CHANGE:` in the footer | breaking API/UX change | major |
+| `feat!: …` or `BREAKING CHANGE:` in the footer | breaking API/UX change | major (minor while below 1.0) |
 | `chore: …`, `docs: …`, `refactor: …`, `test: …`, `style: …`, `ci: …` | maintenance | none |
 
-A PR with no `feat:` or `fix:` commits doesn't trigger a release, so refactors and README changes ship with the next real release.
+A PR with no `feat:` or `fix:` commits doesn't trigger a release, so refactors and README changes ship with the next real release. While the version is below 1.0, a breaking change (`feat!:` or `BREAKING CHANGE:`) bumps the minor version and is listed under breaking changes in the changelog, because [release-please-config.json](release-please-config.json) sets `bump-minor-pre-major`. Moving to 1.0.0 is a deliberate step: add `Release-As: 1.0.0` to a commit's footer.
 
-**Manual rebuild:** if a build fails for a transient reason, re-run the failed job from the GitHub Actions UI. The release already exists; the re-run only rebuilds and re-uploads the zip.
+**Manual rebuild:** if a build fails for a transient reason, re-run the failed job from the GitHub Actions UI. The release already exists; the re-run only rebuilds and re-uploads that platform's zip.
 
 ## Acknowledgments
 
@@ -338,4 +405,6 @@ Our implementations are written from scratch on top of scikit-image and SciPy; n
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MycoMorph's source code, including ModelPrep, is MIT-licensed. See [LICENSE](LICENSE).
+
+The desktop bundles also contain PyQt6 (GPL v3) and Qt (LGPL v3), so each bundle as a whole is distributed under the GNU GPL v3. [packaging/BUNDLE_LICENSE.txt](packaging/BUNDLE_LICENSE.txt) says so. It ships in every bundle with the licence texts, and on Windows sits next to `MycoMorph.exe`.

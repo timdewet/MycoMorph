@@ -1,11 +1,14 @@
 """The ``all_crops.h5`` contract with ModelPrep.
 
-ModelPrep (the labeller / trainer for the cell-quality CNN) reads the crops
-HDF5 that the Features stage writes and accepts only ``schema_version`` "1.0".
-New information is therefore added as extra root attributes, never by bumping
-the version: the crop options (so a consumer can warn about background-masked
-crops, which the Classify stage never shows the model) and whether Classify had
-already filtered the masks the crops were cut from.
+ModelPrep (``mycomorph.modelprep``, the labeller / trainer for the cell-quality
+CNN) reads the crops HDF5 that the Features stage writes, and its reader accepts
+the ``schema_version`` this stage writes ("1.0"). Other consumers (e.g.
+MorphologicalProfiling_Mtb) pin "1.0" too, so new information is added as extra
+root attributes, never by bumping the version: the crop options (so a consumer
+can warn about background-masked crops, which the Classify stage never shows the
+model) and whether Classify had already filtered the masks the crops were cut
+from. The last tests here write crops with the Features code and read them back
+with ModelPrep's reader and warnings.
 """
 
 from __future__ import annotations
@@ -29,8 +32,8 @@ from mycomorph.core.extract.api import (
 
 
 def test_schema_version_is_pinned():
-    # ModelPrep's crops_h5 loader rejects anything but "1.0". Changing this
-    # needs a coordinated ModelPrep release.
+    # ModelPrep's reader follows this constant, but existing all_crops.h5 files
+    # and external readers say "1.0"; a bump must keep reading them.
     assert crops_mod.HDF5_SCHEMA_VERSION == "1.0"
 
 
@@ -187,3 +190,73 @@ def test_consolidation_keeps_only_attrs_all_wells_agree_on(tmp_path):
     out = _attrs(consolidate_crops([a, a], tmp_path / "aa.h5"))
     assert set(crops_mod.CARRIED_ATTRS) <= set(out)
 
+
+
+# ── Read back with ModelPrep ─────────────────────────────────────────────────
+
+
+def test_modelprep_reader_accepts_the_written_schema():
+    from mycomorph.modelprep.core.crops_h5 import SUPPORTED_SCHEMA_VERSIONS
+
+    assert crops_mod.HDF5_SCHEMA_VERSION in SUPPORTED_SCHEMA_VERSIONS
+
+
+@pytest.mark.parametrize("mask_background", [True, False])
+def test_modelprep_reads_features_crops(tmp_path, mask_background):
+    from mycomorph.core.cell_quality_classifier import CROP_SIZE
+    from mycomorph.modelprep.core.crop_provenance import crop_options, crop_warnings
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+
+    tiff = _segmented_tiff(tmp_path / "out" / "02_segment" / "WT_GFP_rep1.tif")
+    well_h5 = _extract(tiff, tmp_path / "out" / "04_features", mask_background=mask_background)
+    all_h5 = consolidate_crops([well_h5], tmp_path / "out" / "04_features" / "all_crops.h5")
+
+    with HDF5CropsReader(all_h5) as reader:
+        assert len(reader) == 2
+        assert reader.schema_version == "1.0"
+        assert reader.native_crop_size == 32
+        assert reader.channel_names[reader.phase_channel_idx] == "Phase"
+        batch = reader.get_classifier_batch([0, 1])
+        assert batch.shape == (2, 3, CROP_SIZE, CROP_SIZE)        # [phase, mask, area]
+        assert set(np.unique(batch[:, 1])) <= {0.0, 1.0}
+        areas = {int(reader.get(i).area_px) for i in range(2)}
+        assert areas == {10 * 14, 10 * 16}
+
+    info = crop_options(all_h5)
+    assert info["mask_background"] is mask_background
+    assert info["classifier_prefilter"] == "none"
+    assert info["source"] == "HDF5 attributes"
+    warnings = crop_warnings(all_h5)
+    assert any("background masking ON" in w for w in warnings) is mask_background
+    assert not any("removed cells" in w for w in warnings)
+
+
+def test_modelprep_warns_about_cnn_prefiltered_crops(tmp_path, monkeypatch):
+    from mycomorph.modelprep.core.crop_provenance import crop_options, crop_warnings
+    from mycomorph.modelprep.core.crops_h5 import HDF5CropsReader
+
+    seg = _segmented_tiff(tmp_path / "out" / "02_segment" / "WT_GFP_rep1.tif")
+    model = tmp_path / "models" / "best_model.pth"
+    model.parent.mkdir()
+    model.write_bytes(b"pretend weights")
+    monkeypatch.setattr(
+        cqc, "classify_and_filter_mask",
+        lambda *, labeled_mask, **_k: (labeled_mask, {"total_cells": 2, "kept": 2,
+                                                       "removed_edge": 0, "removed_debris": 0,
+                                                       "removed_cnn": 0}),
+    )
+    classified = tmp_path / "out" / "03_classify" / "WT_GFP_rep1.tif"
+    api.classify_filter_tiff(seg, classified, phase_channel=0,
+                             opts=api.ClassifyOpts(model_path=model))
+    well_h5 = _extract(classified, tmp_path / "out" / "04_features", mask_background=False)
+    all_h5 = consolidate_crops([well_h5], tmp_path / "out" / "04_features" / "all_crops.h5")
+
+    with HDF5CropsReader(all_h5) as reader:
+        assert len(reader) == 2
+    sha = hashlib.sha256(model.read_bytes()).hexdigest()
+    info = crop_options(all_h5)
+    assert info["classifier_prefilter"] == "cnn"
+    assert info["classifier_prefilter_model_sha256"] == sha
+    warnings = crop_warnings(all_h5)
+    assert len(warnings) == 1
+    assert "Classify's CNN removed cells" in warnings[0] and sha[:12] in warnings[0]

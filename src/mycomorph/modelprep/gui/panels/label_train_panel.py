@@ -1,0 +1,1830 @@
+"""Active-learning labeller + classifier fine-tuning panel — ModelPrep.
+
+Workflow:
+  1. SourcePanel emits ``sourceChanged(h5_path, labels_dir)`` →
+     ``LabelTrainPanel.set_source(...)`` opens the HDF5.
+  2. User picks a base classifier (a bundled preset, a previously-trained
+     model under ``~/.modelprep/models/``, or "none").
+  3. Click "Load pool" — runs the model over every unlabelled cell, ranks
+     by uncertainty (|0.5 - P(good)|, optionally diversified across fields of
+     view), buffers the top N in memory.
+  4. Click a thumbnail to cycle ``unlabeled → good → bad → unlabeled``, or use
+     the keyboard on the focused cell: ``g`` = good, ``b`` = bad (both advance
+     to the next cell), ``u`` = unlabeled, arrow keys move between cells.
+  5. "Save & next page" persists labels to ``labels.csv`` then advances.
+  6. The training section fine-tunes the classifier from the labels, writes
+     artefacts to ``~/.modelprep/models/trained_<ts>/``, and shows the
+     resulting curves + metrics inline.
+"""
+
+from __future__ import annotations
+
+import math
+import shutil
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+from PyQt6.QtCore import QSize, Qt, QThread, QTimer, QUrl, pyqtSignal
+from PyQt6.QtGui import QAction, QDesktopServices
+from PyQt6.QtWidgets import (
+    QApplication,
+    QCheckBox,
+    QComboBox,
+    QDoubleSpinBox,
+    QFileDialog,
+    QGridLayout,
+    QGroupBox,
+    QHBoxLayout,
+    QLabel,
+    QMenu,
+    QMessageBox,
+    QProgressBar,
+    QPushButton,
+    QScrollArea,
+    QSpinBox,
+    QVBoxLayout,
+    QWidget,
+)
+
+from mycomorph.gui.ui import tokens
+from mycomorph.gui.ui.flow_layout import FlowLayout
+from mycomorph.gui.widgets.model_inspector import ModelInspector
+
+from ...core._render import outline_of, to_outlined_rgb
+from ...core.cell_filter import CellFilter
+from ...core.cli import list_preset_models
+from ...core.crops_h5 import CropRecord, HDF5CropsReader
+from ...core.fov_context import FovContextProvider
+from ...core.label_cells import (
+    PoolCancelled,
+    PoolResult,
+    build_pool,
+    sampling_record,
+)
+from ...core.labels_store import (
+    LABEL_TO_IDX,
+    SPLIT_TEST,
+    SPLIT_TRAIN,
+    LabelRow,
+    LabelsStore,
+    default_labels_dir_for,
+    make_session_id,
+)
+
+# Default target size for a balanced hold-out test set (≈ half per class).
+TEST_SET_TARGET = 1000
+# Seed for random-order pools; recorded with each session in manifest.json.
+SAMPLING_SEED = 42
+from ..palette import COLORS, LABEL_COLORS
+from ..export_action import EXPORT_TOOLTIP, export_run_for_mycomorph
+from .cell_detail_dialog import CellDetailView
+
+
+def _flow_row(spacing: int = 10) -> tuple[QWidget, FlowLayout]:
+    """A host widget carrying a wrapping FlowLayout, sized height-for-width so
+    the containing column can narrow freely. The (slightly larger) spacing is
+    the gap *between groups*; a label and its field are bound tighter via
+    ``_labeled`` so they read as one unit."""
+    host = QWidget()
+    layout = FlowLayout(host, hspacing=spacing, vspacing=spacing)
+    sp = host.sizePolicy()
+    sp.setHeightForWidth(True)
+    host.setSizePolicy(sp)
+    return host, layout
+
+
+def _labeled(text: str, widget: QWidget) -> QWidget:
+    """A caption glued to its field as a single flow item, so the two stay
+    together on wrap and share a vertical centerline."""
+    host = QWidget()
+    h = QHBoxLayout(host)
+    h.setContentsMargins(0, 0, 0, 0)
+    h.setSpacing(5)
+    h.addWidget(QLabel(text))
+    h.addWidget(widget)
+    return host
+
+
+# Trained-model naming + enumeration lives in ..trained_models.
+from ..trained_models import list_trained_models, new_run_dir  # noqa: E402
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Active-learning worker (HDF5)
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _ActiveLearningWorker(QThread):
+    """Build the next pool off the UI thread (``core.label_cells.build_pool``):
+    filter → seeded order → skip seen cells → optionally score and rank."""
+
+    progress = pyqtSignal(float, str)
+    finished = pyqtSignal(object, str)  # list[CropRecord+score], error
+
+    def __init__(
+        self,
+        h5_path: Path,
+        model_path: Optional[Path],
+        n_target: int,
+        seen_uids: set[str],
+        diversify: bool = True,
+        *,
+        review: bool = False,
+        uncertain_only: bool = False,
+        confidence_threshold: float = 0.85,
+        select: str = "uncertain",
+        cell_filter: Optional[CellFilter] = None,
+        seed: int = SAMPLING_SEED,
+    ) -> None:
+        super().__init__()
+        self.h5_path = h5_path
+        self.model_path = model_path
+        self.n_target = n_target
+        self.seen_uids = seen_uids
+        self.diversify = diversify
+        self.review = review
+        self.uncertain_only = uncertain_only
+        self.confidence_threshold = confidence_threshold
+        # Ranking strategy: "uncertain" (active learning, least-confident first),
+        # "good" (highest P(good) first — surfaces the rare class for a balanced
+        # hold-out set), or "random" (representative sampling, no model needed).
+        self.select = select
+        self.cell_filter = cell_filter or CellFilter()
+        self.seed = seed
+        self.result: Optional[PoolResult] = None  # set before ``finished``
+        # The model whose scores the pool carries: None when nothing was scored
+        # (no model, or random sampling). Labels saved from this pool record it.
+        self.scored_with: Optional[Path] = None
+        self._cancel = False
+
+    def cancel(self) -> None:
+        self._cancel = True
+
+    def run(self) -> None:  # noqa: D401
+        try:
+            reader = HDF5CropsReader(self.h5_path)
+        except Exception as e:
+            self.finished.emit([], f"Could not open {self.h5_path}: {e}")
+            return
+
+        try:
+            try:
+                result = build_pool(
+                    reader,
+                    exclude_uids=self.seen_uids,
+                    n_target=self.n_target,
+                    model_path=self.model_path,
+                    select=self.select,
+                    cell_filter=self.cell_filter,
+                    seed=self.seed,
+                    diversify=self.diversify and not self.review,
+                    uncertain_only=self.uncertain_only,
+                    confidence_threshold=self.confidence_threshold,
+                    cache_scores=True,
+                    progress_cb=self.progress.emit,
+                    should_cancel=lambda: self._cancel,
+                )
+            except PoolCancelled:
+                self.finished.emit([], "Cancelled.")
+                return
+            self.result = result
+            if not len(result):
+                # Not an error: the panel shows ``result.message``.
+                self.finished.emit([], "")
+                return
+            self.scored_with = self.model_path if result.mode != "random" else None
+
+            if self._cancel:
+                self.finished.emit([], "Cancelled.")
+                return
+            self.progress.emit(1.0, f"Loading {len(result)} crops…")
+            records = [
+                (reader.get(int(i)), float(s))
+                for i, s in zip(result.indices.tolist(), result.scores.tolist())
+            ]
+            self.progress.emit(1.0, f"Loaded {len(records)} cells for labelling")
+            self.finished.emit(records, "")
+        except Exception as e:
+            self.finished.emit([], str(e))
+        finally:
+            reader.close()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Cell thumbnail widget
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _CellThumb(QPushButton):
+    """Square button showing one cell, recoloured by current label.
+
+    Single click cycles the label; double click emits ``expandRequested`` so the
+    panel can open the large inspector. When the thumb holds keyboard focus,
+    ``g``/``b``/``u`` classify it and the arrow keys move focus (handled by the
+    panel via ``classifyKey`` / ``navKey``).
+    """
+
+    SIDE_PX = 96
+
+    expandRequested = pyqtSignal()
+    classifyKey = pyqtSignal(str)      # "good" | "bad" | "unlabeled"
+    navKey = pyqtSignal(int, int)      # (dx, dy)
+    labelChanged = pyqtSignal()        # this thumb's label changed (any cause)
+
+    def __init__(
+        self,
+        record: CropRecord,
+        score: float,
+        parent: Optional[QWidget] = None,
+    ) -> None:
+        super().__init__(parent)
+        self.record = record
+        self.score = score
+        self.label = "unlabeled"
+        self.setFixedSize(self.SIDE_PX, self.SIDE_PX)
+        self.setIconSize(self._icon_size())
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+        self.setToolTip(self._tooltip())
+        self._render()
+
+        self._click_timer = QTimer(self)
+        self._click_timer.setSingleShot(True)
+        self._click_timer.setInterval(QApplication.doubleClickInterval())
+        self._click_timer.timeout.connect(self._cycle)
+
+    def mouseReleaseEvent(self, event) -> None:
+        super().mouseReleaseEvent(event)
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._click_timer.start()
+
+    def mouseDoubleClickEvent(self, event) -> None:
+        self._click_timer.stop()
+        self.expandRequested.emit()
+
+    def keyPressEvent(self, event) -> None:
+        key = event.key()
+        if key == Qt.Key.Key_G:
+            self.classifyKey.emit("good")
+        elif key == Qt.Key.Key_B:
+            self.classifyKey.emit("bad")
+        elif key == Qt.Key.Key_U:
+            self.classifyKey.emit("unlabeled")
+        elif key == Qt.Key.Key_Left:
+            self.navKey.emit(-1, 0)
+        elif key == Qt.Key.Key_Right:
+            self.navKey.emit(1, 0)
+        elif key == Qt.Key.Key_Up:
+            self.navKey.emit(0, -1)
+        elif key == Qt.Key.Key_Down:
+            self.navKey.emit(0, 1)
+        else:
+            super().keyPressEvent(event)
+
+    def _icon_size(self):
+        return QSize(self.SIDE_PX - 12, self.SIDE_PX - 12)
+
+    def _tooltip(self) -> str:
+        r = self.record
+        conf = "n/a" if math.isnan(self.score) else f"{self.score:.3f}"
+        return (
+            f"{r.cell_uid}\n"
+            f"  {r.condition}  {r.condition_label}  gene={r.gene}  drug={r.drug}\n"
+            f"  reporter={r.reporter}  fov={r.fov_index}  area={r.area_px}px\n"
+            f"  P(good)={conf}\n"
+            f"  (click cycles · g/b/u on keyboard · double-click to enlarge)"
+        )
+
+    def _render(self) -> None:
+        from PyQt6.QtGui import QImage, QPixmap, QIcon
+
+        # crop layout: (3, H, W) = [phase, mask, area]
+        phase = self.record.crop[0]
+        mask = self.record.crop[1] > 0.5
+
+        rgb = to_outlined_rgb(phase, outline_of(mask))
+        h, w = rgb.shape[:2]
+
+        qimg = QImage(rgb.tobytes(), w, h, w * 3, QImage.Format.Format_RGB888)
+        pix = QPixmap.fromImage(qimg).scaled(
+            self._icon_size().width(), self._icon_size().height(),
+            Qt.AspectRatioMode.KeepAspectRatio,
+            Qt.TransformationMode.SmoothTransformation,
+        )
+        self.setIcon(QIcon(pix))
+
+        ring = LABEL_COLORS[self.label]
+        self.setStyleSheet(
+            f"QPushButton {{ background: {COLORS['surface']}; "
+            f"border: 3px solid {ring}; border-radius: 6px; padding: 2px; }}"
+            f"QPushButton:hover {{ border: 3px solid {COLORS['primary']}; }}"
+            f"QPushButton:focus {{ border: 3px solid {COLORS['primary']}; }}"
+        )
+
+    def _cycle(self) -> None:
+        order = ["unlabeled", "good", "bad"]
+        self.label = order[(order.index(self.label) + 1) % len(order)]
+        self._render()
+        self.labelChanged.emit()
+
+    def set_label(self, value: str) -> None:
+        if value in LABEL_COLORS:
+            self.label = value
+            self._render()
+            self.labelChanged.emit()
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training worker
+# ─────────────────────────────────────────────────────────────────────────────
+
+class _TrainWorker(QThread):
+    progress = pyqtSignal(float, str)
+    finished = pyqtSignal(object, str)
+
+    def __init__(
+        self,
+        h5_path: Path,
+        labels_dir: Path,
+        output_dir: Path,
+        *,
+        epochs: int,
+        lr: float,
+        batch_size: int,
+        patience: int,
+        val_fraction: float,
+        test_fraction: float,
+        seed: int,
+        device: Optional[str],
+        freeze_backbone: bool,
+        pretrained: Optional[Path],
+        model_name: str = "",
+        use_holdout: bool = True,
+        feature_phase_only: bool = False,
+    ) -> None:
+        super().__init__()
+        self.h5_path = h5_path
+        self.labels_dir = labels_dir
+        self.output_dir = output_dir
+        self.epochs = epochs
+        self.lr = lr
+        self.batch_size = batch_size
+        self.patience = patience
+        self.val_fraction = val_fraction
+        self.test_fraction = test_fraction
+        self.seed = seed
+        self.device = device
+        self.freeze_backbone = freeze_backbone
+        self.pretrained = pretrained
+        self.model_name = model_name
+        # When True (and a test split exists) evaluate on the frozen hold-out;
+        # otherwise fall back to an internal split of the train cells. Either
+        # way, test-tagged cells are never trained on.
+        self.use_holdout = use_holdout
+        self.feature_phase_only = feature_phase_only
+
+    def run(self) -> None:
+        try:
+            from ...core.train_classifier import train as run_train
+            from ...core.labels_store import LABELS_SCHEMA_VERSION, cell_uids_sha256
+            from mycomorph.core.cell_quality_classifier import CLASS_NAMES, NUM_CLASSES
+            from ...core.crop_provenance import crop_options
+
+            reader = HDF5CropsReader(self.h5_path)
+            store = LabelsStore(self.labels_dir)
+            try:
+                crops, labels, used_uids = store.to_training_dataset(reader)
+                # Frozen hold-out test set (empty arrays when none labelled).
+                # Only consulted when the user opted to evaluate on it; test
+                # cells are excluded from training either way.
+                if self.use_holdout:
+                    eval_crops, eval_labels, eval_uids = store.to_eval_dataset(reader)
+                else:
+                    eval_crops = np.empty((0,), dtype=np.float32)
+                    eval_labels = np.empty((0,), dtype=np.int64)
+                    eval_uids = []
+            finally:
+                reader.close()
+
+            class_counts = {CLASS_NAMES[i]: int((labels == i).sum())
+                            for i in range(NUM_CLASSES)}
+            test_class_counts = {CLASS_NAMES[i]: int((eval_labels == i).sum())
+                                 for i in range(NUM_CLASSES)}
+            provenance = {
+                "model_name": self.model_name or self.output_dir.name,
+                "source_h5": self.h5_path.name,
+                "labels_dir": str(self.labels_dir),
+                "n_labelled": int(len(used_uids)),
+                "used_uids_sha256": cell_uids_sha256(used_uids),
+                "class_counts": class_counts,
+                "n_holdout": int(len(eval_uids)),
+                "holdout_class_counts": test_class_counts,
+                "labels_schema_version": LABELS_SCHEMA_VERSION,
+                "crop_options": crop_options(self.h5_path),
+            }
+
+            self.output_dir.mkdir(parents=True, exist_ok=True)
+            summary = run_train(
+                crops=crops,
+                labels=labels,
+                eval_crops=eval_crops if len(eval_labels) else None,
+                eval_labels=eval_labels if len(eval_labels) else None,
+                output_dir=self.output_dir,
+                epochs=self.epochs,
+                batch_size=self.batch_size,
+                lr=self.lr,
+                val_fraction=self.val_fraction,
+                test_fraction=self.test_fraction,
+                patience=self.patience,
+                seed=self.seed,
+                device=self.device,
+                freeze_backbone=self.freeze_backbone,
+                pretrained_path=str(self.pretrained) if self.pretrained else None,
+                provenance=provenance,
+                progress_cb=lambda f, m: self.progress.emit(f, m),
+            )
+            summary = summary or {}
+            # Also train the feature-based model (morphometrics + FOV-context +
+            # focus + fragment cues) on the same labels/hold-out, for comparison.
+            # Non-fatal: a missing features table or hold-out just skips it.
+            self.progress.emit(1.0, "Training finished. Fitting feature model…")
+            summary["feature_model"], summary["feature_skip"] = self._train_feature_model(provenance)
+            self.progress.emit(1.0, "Training finished.")
+            self.finished.emit(summary, "")
+        except Exception as e:
+            self.finished.emit({}, str(e))
+
+    def _train_feature_model(self, provenance: dict):
+        """Returns (summary, skip_reason). Either may be None."""
+        from ..trained_models import _split_dir_name
+        from ...core.feature_classifier import train_and_save
+
+        name, ts = _split_dir_name(self.output_dir.name)
+        feature_dir = self.output_dir.parent / (
+            f"{name}-features_{ts}" if ts else f"{self.output_dir.name}-features")
+        try:
+            return train_and_save(self.h5_path, self.labels_dir, feature_dir,
+                                  seed=self.seed, provenance=provenance,
+                                  phase_only=self.feature_phase_only), None
+        except FileNotFoundError:
+            return None, "no morphometric features table next to the HDF5"
+        except (ValueError, ImportError) as e:
+            return None, str(e)
+        except Exception as e:  # noqa: BLE001 — never fail the CNN run over this
+            # One line only: the status label isn't the place for a traceback.
+            first = (str(e).strip().splitlines() or [type(e).__name__])[0]
+            return None, f"feature model error: {first}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Panel
+# ─────────────────────────────────────────────────────────────────────────────
+
+class LabelTrainPanel(QWidget):
+    """The single workhorse panel: active-learning labeller + fine-tune trainer."""
+
+    # A training run has just started (MycoMorph warns if its pipeline is
+    # running too: both use the GPU).
+    trainingStarted = pyqtSignal()
+
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        super().__init__(parent)
+        self._h5_path: Optional[Path] = None
+        self._labels_dir: Optional[Path] = None
+        self._reader: Optional[HDF5CropsReader] = None
+        self._store: Optional[LabelsStore] = None
+        self._context_provider: Optional[FovContextProvider] = None
+
+        self._pool: list[tuple[CropRecord, float]] = []
+        # Model that scored the current pool (None = unscored / random order).
+        # Saved labels record this, not whatever the picker shows at save time.
+        self._pool_model: Optional[Path] = None
+        self._page_index = 0
+        self._page_labels: dict[int, str] = {}  # absolute pool index → label string
+        # Last label persisted to disk per pool index, so we can tell what is
+        # genuinely unsaved (and avoid re-writing rows that already match).
+        self._saved_labels: dict[int, str] = {}
+        self._thumbs: list[_CellThumb] = []
+        self._focused_pos = 0
+        self._cols = 8
+        self._review_mode = False  # showing model predictions to accept/flip
+        self._test_mode = False     # labelling into the frozen hold-out test set
+        self._session_id: str = make_session_id()
+        self._session_started_at = datetime.now(timezone.utc).isoformat()
+        self._session_seen_uids: set[str] = set()
+        self._session_label_count = 0
+        # How this session's pool was drawn (mode, filter, seed, …). One session
+        # ↔ one draw spec, so a labels.csv row's session_id says how it was sampled.
+        self._session_sampling: Optional[dict] = None
+        self._cell_filter = CellFilter()  # "Only show cells from…"
+        self._pool_desc = ""  # e.g. "random order · gene = dnaN", for the status line
+        self._last_model_dir: Optional[Path] = None
+        self._model_name = ""  # set from the Source page; names the trained run
+
+        self._al_worker: Optional[_ActiveLearningWorker] = None
+        self._train_worker: Optional[_TrainWorker] = None
+
+        self._build_ui()
+        self._refresh_dataset_stats()
+
+    # ── public ─────────────────────────────────────────────────────────
+
+    def set_model_name(self, name: str) -> None:
+        """Name used for the trained-run directory (``<slug>_<time>``)."""
+        self._model_name = (name or "").strip()
+
+    def set_source(self, h5_path: Optional[Path], labels_dir: Optional[Path]) -> None:
+        # Auto-save any unsaved labels to the OLD store before swapping, and
+        # stop the in-flight pool scorer so it can't emit into a stale dataset.
+        if self._store is not None and self._pool and self.has_unsaved_labels():
+            self._save_batch(silent_if_empty=True)
+        self._record_session_if_any()
+        self._stop_worker(self._al_worker)
+        self._al_worker = None
+
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+        # Filter values belong to the old file's metadata.
+        self._cell_filter = CellFilter()
+        self._update_filter_button()
+        if h5_path is None:
+            self._h5_path = None
+            self._labels_dir = None
+            self._store = None
+            self._context_provider = None
+            self._info_label.setText("(no source — pick an HDF5)")
+            self._refresh_dataset_stats()
+            return
+
+        self._h5_path = Path(h5_path)
+        self._labels_dir = Path(labels_dir) if labels_dir else default_labels_dir_for(self._h5_path)
+        try:
+            self._reader = HDF5CropsReader(self._h5_path)
+        except Exception as e:
+            self._info_label.setText(f"Could not open {self._h5_path.name}: {e}")
+            return
+        self._store = LabelsStore(self._labels_dir)
+        try:
+            self._store.ensure_initialised(
+                source_h5=self._h5_path,
+                total_cells=len(self._reader),
+                h5_schema_version=self._reader.schema_version,
+                cell_uids=self._reader.cell_uids,
+            )
+        except ValueError as e:
+            self._info_label.setText(str(e))
+            self._reader.close()
+            self._reader = None
+            self._store = None
+            return
+
+        # Optional: locate the pipeline originals beside the HDF5 so the cell
+        # inspector can show each cell in its full field-of-view context.
+        self._context_provider = FovContextProvider(self._h5_path)
+
+        self._info_label.setText(
+            f"Loaded {len(self._reader):,} cells from {self._h5_path.name} · "
+            f"labels in {self._labels_dir.name}/"
+        )
+        self._info_label.setToolTip(f"{self._h5_path}\nlabels: {self._labels_dir}")
+        self._status.setText(
+            "Pick a model (or none for random order), then click 'Load pool'.")
+        # Fresh labelling session for this dataset.
+        self._pool = []
+        self._pool_model = None
+        self._page_index = 0
+        self._page_labels.clear()
+        self._saved_labels.clear()
+        self._session_seen_uids.clear()
+        self._new_session()
+        self._review_mode = False
+        self._populate_grid_from_page()
+        self._save_action.setEnabled(False)
+        self._save_next_btn.setEnabled(False)
+        self._prev_btn.setEnabled(False)
+        self._next_btn.setEnabled(False)
+        self._refresh_dataset_stats()
+
+    def has_unsaved_labels(self) -> bool:
+        """True if any good/bad mark differs from what's been written to disk."""
+        self._capture_current_page()
+        return any(
+            lbl in ("good", "bad") and self._saved_labels.get(idx) != lbl
+            for idx, lbl in self._page_labels.items()
+        )
+
+    def save_pending(self) -> int:
+        """Persist any unsaved labels (used by the main window on close)."""
+        if self._store is None:
+            return 0
+        return self._save_batch(silent_if_empty=True)
+
+    # ── UI build ──────────────────────────────────────────────────────
+
+    def _build_ui(self) -> None:
+        # The two sections are exposed as standalone cards so the main window
+        # can place them on separate sidebar pages (Label cells / Fine-tune).
+        # This panel object stays alive as the controller that owns those
+        # widgets and the HDF5 reader / labels store; it is never shown as a
+        # whole, so it carries no layout of its own.
+        self.label_section = self._build_label_section()
+        self.train_section = self._build_train_section()
+
+    def _build_label_section(self) -> QWidget:
+        box = QGroupBox("Label cells")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(12, 18, 12, 12)
+        v.setSpacing(6)
+
+        bar_host, bar = _flow_row()
+
+        self._model_combo = QComboBox()
+        self._model_combo.setMaximumWidth(480)
+        self._model_combo.setSizeAdjustPolicy(
+            QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon
+        )
+        # Wide enough for "trained: <name>_<timestamp>"; the tooltip shows the
+        # full text whenever it's still elided on a narrow window.
+        self._model_combo.setMinimumContentsLength(36)
+        self._model_combo.currentTextChanged.connect(self._model_combo.setToolTip)
+        self._populate_model_combo()
+        self._model_combo.activated.connect(self._on_model_combo_activated)
+        self._model_combo.currentIndexChanged.connect(lambda _i: self._sync_model_controls())
+
+        self._pool_size = QSpinBox(); self._pool_size.setRange(48, 5000); self._pool_size.setValue(1000)
+        self._pool_size.setToolTip(
+            "Pool: how many cells to fetch at once. You label them page by page; "
+            "a bigger pool means fewer waits later but a longer first load."
+        )
+        self._page_size = QSpinBox(); self._page_size.setRange(8, 256); self._page_size.setValue(48)
+        self._page_size.setToolTip(
+            "Page: how many cells are shown on screen at a time."
+        )
+        self._diversify = QCheckBox("Diversify")
+        self._diversify.setChecked(True)
+        self._diversify_tip = (
+            "Spread the cells the model is least sure about across different "
+            "fields of view, so one crowded image can't fill a page with "
+            "near-duplicates."
+        )
+        self._diversify.setToolTip(self._diversify_tip)
+        self._uncertain_only = QCheckBox("Uncertain only")
+        self._uncertain_only.setToolTip(
+            "Only show cells the model can't decide on: its confidence is below "
+            "the cutoff in the box next to this. Spends your time where the model "
+            "is weakest. Needs a model."
+        )
+        self._conf_thresh = QDoubleSpinBox()
+        self._conf_thresh.setRange(0.5, 1.0); self._conf_thresh.setSingleStep(0.05)
+        self._conf_thresh.setValue(0.85); self._conf_thresh.setDecimals(2)
+        self._conf_thresh.setPrefix("conf< ")
+        self._conf_thresh.setEnabled(False)  # only relevant with 'Uncertain only'
+        self._conf_thresh.setToolTip(
+            "Confidence cutoff for 'Uncertain only': cells the model is less sure "
+            "about than this are shown (0.5 = a coin flip, 1.0 = certain)."
+        )
+        self._uncertain_only.toggled.connect(self._conf_thresh.setEnabled)
+
+        self._load_btn = QPushButton("Load pool")
+        self._load_btn.setObjectName("primary")
+        self._load_btn.setToolTip(
+            "Score every unlabelled cell with the chosen model and load the "
+            "most-uncertain into memory. Subsequent pages turn instantly."
+        )
+        self._load_btn.clicked.connect(lambda: self._load_pool(review=False))
+
+        self._review_btn = QPushButton("Review predictions")
+        self._review_btn.setObjectName("ghost")
+        self._review_btn.setToolTip(
+            "Load cells with the model's prediction pre-applied (including "
+            "already-labelled ones), so you only flip the wrong ones with g/b, "
+            "then Save. Requires a model."
+        )
+        self._review_btn.clicked.connect(lambda: self._load_pool(review=True))
+
+        # Hold-out test set controls.
+        self._test_mode_chk = QCheckBox("Hold-out TEST set")
+        self._test_mode_chk.setToolTip(
+            "Label into a frozen hold-out test set instead of the training set. "
+            "These cells are never trained on; they're the fixed yardstick used "
+            "to compare models across labelling rounds. Build it once."
+        )
+        self._test_mode_chk.toggled.connect(self._on_test_mode_toggled)
+
+        self._prioritise_good = QCheckBox("Prioritise good")
+        self._prioritise_good.setToolTip(
+            "While building the hold-out test set, show the cells the model thinks "
+            "are most likely 'good' first, so the rarer class fills up faster. You "
+            "still decide every label. Needs a model.\n"
+            "Off = a random sample, which is more representative. Prioritising "
+            "ties the set to that model, so mix in a random pass too."
+        )
+        self._prioritise_good.setEnabled(False)
+
+        # Row 1 — get cells.
+        bar.addWidget(_labeled("Model:", self._model_combo))
+        bar.addWidget(_labeled("Pool:", self._pool_size))
+        bar.addWidget(_labeled("Page:", self._page_size))
+        bar.addWidget(self._diversify)
+        bar.addWidget(self._uncertain_only)
+        bar.addWidget(self._conf_thresh)
+        bar.addWidget(self._test_mode_chk)
+        bar.addWidget(self._prioritise_good)
+        bar.addWidget(self._load_btn)
+        bar.addWidget(self._review_btn)
+        v.addWidget(bar_host)
+        self._sync_model_controls()
+
+        # Row 2 — which cells may be drawn (gene / condition / well filter).
+        filter_host, filter_row = _flow_row()
+        self._filter_btn = QPushButton("All cells ▾")
+        self._filter_btn.setToolTip(
+            "Restrict labelling to cells of chosen genes, conditions or wells. "
+            "Random and uncertainty-ranked pools are both drawn only from the "
+            "matching cells; the filter is recorded with the labelling session."
+        )
+        self._filter_btn.clicked.connect(self._edit_cell_filter)
+        self._filter_clear_btn = QPushButton("Show all cells")
+        self._filter_clear_btn.setObjectName("ghost")
+        self._filter_clear_btn.clicked.connect(lambda: self._set_cell_filter(CellFilter()))
+        self._filter_clear_btn.setVisible(False)
+        self._filter_summary = QLabel("")
+        self._filter_summary.setObjectName("caption")
+        filter_row.addWidget(_labeled("Only show cells from:", self._filter_btn))
+        filter_row.addWidget(self._filter_clear_btn)
+        filter_row.addWidget(self._filter_summary)
+        v.addWidget(filter_host)
+
+        # Prominent banner shown only while labelling the hold-out test set.
+        self._test_banner = QLabel(
+            "● Building HELD-OUT TEST SET — these labels are frozen and never "
+            "trained on. Turn off “Hold-out TEST set” to go back to training labels."
+        )
+        self._test_banner.setWordWrap(True)
+        self._test_banner.setVisible(False)
+        v.addWidget(self._test_banner)
+
+        # Bottom action bar (added to the layout below the grid, at the end of
+        # this method — where you land after labelling a page). Pagination + the
+        # primary save stay visible; rare actions live in a "More" menu.
+        actions_host, actions = _flow_row()
+        self._prev_btn = QPushButton("← Prev"); self._prev_btn.setEnabled(False)
+        self._prev_btn.clicked.connect(self._prev_page)
+        self._next_btn = QPushButton("Next →"); self._next_btn.setEnabled(False)
+        self._next_btn.clicked.connect(self._next_page)
+        self._save_next_btn = QPushButton("Save && next page")
+        self._save_next_btn.setObjectName("primary")
+        self._save_next_btn.clicked.connect(self._save_then_next_page)
+        self._save_next_btn.setEnabled(False)
+
+        more_menu = QMenu(self)
+        self._save_action = QAction("Save labels (no advance)", self)
+        self._save_action.setEnabled(False)
+        self._save_action.triggered.connect(lambda: self._save_batch())
+        more_menu.addAction(self._save_action)
+        reset_action = QAction("Reset session", self)
+        reset_action.triggered.connect(self._reset_session)
+        more_menu.addAction(reset_action)
+        more_menu.addSeparator()
+        self._consistency_action = QAction("Consistency check…", self)
+        self._consistency_action.setToolTip(
+            "Re-label a blind sample of your own cells to measure self-agreement "
+            "— the practical ceiling on model accuracy."
+        )
+        self._consistency_action.triggered.connect(self._open_consistency_check)
+        more_menu.addAction(self._consistency_action)
+        more_menu.addSeparator()
+        open_action = QAction("Open labels folder", self)
+        open_action.triggered.connect(self._open_labels_folder)
+        more_menu.addAction(open_action)
+        export_action = QAction("Export labels…", self)
+        export_action.triggered.connect(self._export_labels)
+        more_menu.addAction(export_action)
+        self._more_btn = QPushButton("More ▾")
+        self._more_btn.setMenu(more_menu)
+
+        self._balance_label = QLabel("")
+        self._balance_label.setObjectName("caption")
+
+        actions.addWidget(self._prev_btn)
+        actions.addWidget(self._next_btn)
+        actions.addWidget(self._save_next_btn)
+        actions.addWidget(self._more_btn)
+        actions.addWidget(self._balance_label)
+        self._actions_host = actions_host  # added below the grid at end of method
+
+        self._info_label = QLabel("(no source — pick an HDF5)")
+        self._info_label.setObjectName("muted")
+        self._info_label.setWordWrap(True)
+        v.addWidget(self._info_label)
+
+        self._status = QLabel("Pick an HDF5 on the Source page first.")
+        self._status.setObjectName("muted")
+        self._status.setWordWrap(True)
+        v.addWidget(self._status)
+
+        self._progress = QProgressBar()
+        self._progress.setRange(0, 1000); self._progress.setValue(0)
+        v.addWidget(self._progress)
+
+        hint = QLabel(
+            "Click a thumbnail to cycle unlabeled → good → bad. On the focused "
+            "cell, press g (good) / b (bad) — both jump to the next cell — or u "
+            "(unlabeled); arrow keys move between cells. Double-click to enlarge. "
+            "Outer border = your label · cyan outline = segmented cell. "
+            "What counts as good or bad: <a href='rubric'>labelling rubric</a>."
+        )
+        hint.setObjectName("muted")
+        hint.setWordWrap(True)
+        hint.setTextFormat(Qt.TextFormat.RichText)
+        hint.linkActivated.connect(lambda _href: self._open_rubric())
+        v.addWidget(hint)
+
+        # Grid
+        self._grid_host = QWidget()
+        self._grid = QGridLayout(self._grid_host)
+        self._grid.setSpacing(6)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(self._grid_host)
+        v.addWidget(scroll, stretch=1)
+
+        # Pagination + save below the cells — where you land after labelling.
+        v.addWidget(self._actions_host)
+
+        return box
+
+    def _build_train_section(self) -> QWidget:
+        box = QGroupBox("Fine-tune classifier")
+        v = QVBoxLayout(box)
+        v.setContentsMargins(12, 18, 12, 12)
+        v.setSpacing(6)
+
+        self._stats_label = QLabel("")
+        self._stats_label.setObjectName("muted")
+        self._stats_label.setWordWrap(True)
+        v.addWidget(self._stats_label)
+
+        bar_host, bar = _flow_row()
+        self._epochs = QSpinBox(); self._epochs.setRange(1, 500); self._epochs.setValue(40)
+        self._epochs.setToolTip(
+            "The most passes training makes over your labels. It stops earlier "
+            "when validation accuracy stops improving (see Patience)."
+        )
+        self._lr = QDoubleSpinBox()
+        self._lr.setRange(1e-6, 1.0); self._lr.setDecimals(6)
+        self._lr.setValue(1e-4); self._lr.setSingleStep(5e-5)
+        self._lr.setToolTip(
+            "Learning rate: how big a step each training update takes. Small "
+            "(0.0001) suits fine-tuning an existing model; larger (0.001) suits "
+            "training from scratch. Too large and training becomes unstable."
+        )
+        self._fine_tune = QCheckBox("Fine-tune from selected base model")
+        self._fine_tune.setChecked(True)
+        self._freeze = QCheckBox("Freeze backbone")
+        self._freeze.setToolTip(
+            "Keep the starting model's image-feature layers fixed and retrain only "
+            "its final decision layer. Faster and less prone to overfitting when "
+            "fine-tuning on a small label set."
+        )
+        self._use_holdout = QCheckBox("Evaluate on hold-out test set")
+        self._use_holdout.setChecked(True)
+        self._use_holdout.setToolTip(
+            "On: report metrics on the frozen hold-out test set — comparable "
+            "across labelling rounds. Off: split the training labels internally "
+            "for train/val/test (the old behaviour). Either way, test-tagged "
+            "cells are never trained on. Disabled until a hold-out set exists."
+        )
+        self._train_btn = QPushButton("Start training")
+        self._train_btn.setObjectName("primary")
+        self._train_btn.clicked.connect(self._start_training)
+
+        self._adv_toggle = QPushButton("Advanced ▸")
+        self._adv_toggle.setObjectName("ghost")
+        self._adv_toggle.setCheckable(True)
+        self._adv_toggle.setToolTip("Show device, batch size, split fractions, patience, seed.")
+        self._adv_toggle.toggled.connect(self._toggle_advanced)
+
+        self._open_model_btn = QPushButton("Open model folder")
+        self._open_model_btn.setObjectName("ghost")
+        self._open_model_btn.clicked.connect(self._open_model_folder)
+        self._open_model_btn.setEnabled(False)
+
+        self._export_btn = QPushButton("Export for MycoMorph…")
+        self._export_btn.setToolTip(EXPORT_TOOLTIP)
+        self._export_btn.clicked.connect(self._export_for_mycomorph)
+        self._export_btn.setEnabled(False)
+
+        bar.addWidget(_labeled("Epochs:", self._epochs))
+        bar.addWidget(_labeled("LR:", self._lr))
+        bar.addWidget(self._fine_tune)
+        bar.addWidget(self._freeze)
+        bar.addWidget(self._use_holdout)
+        bar.addWidget(self._train_btn)
+        bar.addWidget(self._adv_toggle)
+        bar.addWidget(self._open_model_btn)
+        bar.addWidget(self._export_btn)
+        v.addWidget(bar_host)
+
+        # Advanced row — hidden until the user opens the disclosure.
+        adv_host, adv = _flow_row()
+        self._adv_host = adv_host
+        self._device_combo = QComboBox()
+        self._device_combo.addItem("Auto", userData=None)
+        self._device_combo.addItem("CPU", userData="cpu")
+        self._device_combo.addItem("MPS", userData="mps")
+        self._device_combo.addItem("CUDA", userData="cuda")
+        self._batch = QSpinBox(); self._batch.setRange(1, 512); self._batch.setValue(32)
+        self._patience = QSpinBox(); self._patience.setRange(1, 200); self._patience.setValue(15)
+        self._patience.setToolTip(
+            "Stop training early if validation accuracy hasn't improved for this "
+            "many epochs in a row. The best epoch's weights are kept."
+        )
+        self._val_frac = QDoubleSpinBox(); self._val_frac.setRange(0.05, 0.5)
+        self._val_frac.setSingleStep(0.05); self._val_frac.setValue(0.2)
+        self._test_frac = QDoubleSpinBox(); self._test_frac.setRange(0.0, 0.5)
+        self._test_frac.setSingleStep(0.05); self._test_frac.setValue(0.15)
+        self._test_frac.setToolTip(
+            "Held-out test fraction for unbiased final metrics. 0 = no test set "
+            "(auto-disabled on tiny datasets)."
+        )
+        self._seed = QSpinBox(); self._seed.setRange(0, 2**31 - 1); self._seed.setValue(42)
+        self._feat_phase_only = QCheckBox("Feature model: phase only")
+        self._feat_phase_only.setToolTip(
+            "Train the comparison feature model without reporter/fluorescence "
+            "intensities, so it sees only phase-derived information like the CNN "
+            "(phase + mask + area). Off = all measured features."
+        )
+        adv.addWidget(_labeled("Device:", self._device_combo))
+        adv.addWidget(_labeled("Batch:", self._batch))
+        adv.addWidget(_labeled("Patience:", self._patience))
+        adv.addWidget(_labeled("Val:", self._val_frac))
+        adv.addWidget(_labeled("Test:", self._test_frac))
+        adv.addWidget(_labeled("Seed:", self._seed))
+        adv.addWidget(self._feat_phase_only)
+        adv_host.setVisible(False)
+        v.addWidget(adv_host)
+
+        self._train_progress = QProgressBar()
+        self._train_progress.setRange(0, 1000); self._train_progress.setValue(0)
+        v.addWidget(self._train_progress)
+
+        self._train_status = QLabel("")
+        self._train_status.setObjectName("muted")
+        self._train_status.setWordWrap(True)
+        v.addWidget(self._train_status)
+
+        self._inspector = ModelInspector(
+            empty_title="No trained model selected",
+            empty_hint="Train a model to see its curves + metrics here.",
+        )
+        v.addWidget(self._inspector)
+
+        return box
+
+    def _toggle_advanced(self, on: bool) -> None:
+        self._adv_host.setVisible(on)
+        self._adv_toggle.setText("Advanced ▾" if on else "Advanced ▸")
+
+    # ── model picker ──────────────────────────────────────────────────
+
+    def _populate_model_combo(self, select_path: Optional[str] = None) -> None:
+        prev = select_path if select_path is not None else self._model_combo.currentData()
+        self._model_combo.blockSignals(True)
+        self._model_combo.clear()
+        self._model_combo.addItem("none (random order)", userData=None)
+        for name, path in list_preset_models().items():
+            self._model_combo.addItem(f"preset: {name}", userData=str(path))
+        for m in list_trained_models():
+            self._model_combo.addItem(f"trained: {m.label()}", userData=str(m.weights))
+        self._model_combo.addItem("Browse .pth…", userData="__browse__")
+        # Restore a sensible selection.
+        if prev and prev != "__browse__":
+            idx = self._model_combo.findData(prev)
+            if idx >= 0:
+                self._model_combo.setCurrentIndex(idx)
+        self._model_combo.blockSignals(False)
+        # Signals were blocked, so refresh the full-name tooltip ourselves.
+        self._model_combo.setToolTip(self._model_combo.currentText())
+        self._sync_model_controls()
+
+    def _sync_model_controls(self) -> None:
+        """Diversify spreads the *model-ranked* cells across fields of view;
+        with no model the order is already random, so it can't apply."""
+        if not hasattr(self, "_diversify"):
+            return  # called while the picker is built, before the checkbox
+        has_model = self._current_model_path() is not None
+        self._diversify.setEnabled(has_model)
+        self._diversify.setToolTip(
+            self._diversify_tip if has_model else
+            "Needs a model: with 'none' the cells already come in random order, "
+            "so there's nothing to spread out.")
+
+    def refresh_models(self) -> None:
+        """Public: re-enumerate trained models in the picker (e.g. after a
+        model is deleted from the Models tab)."""
+        self._populate_model_combo()
+
+    def select_model(self, path) -> None:
+        """Public: make ``path`` (a ``.pth``) the active model in the picker —
+        used by the Models tab's 'Use for labelling'."""
+        path = str(path)
+        self._populate_model_combo()
+        idx = self._model_combo.findData(path)
+        if idx < 0:  # not a known preset/trained entry — add as a custom one
+            self._model_combo.insertItem(1, f"custom: {Path(path).name}", userData=path)
+            idx = 1
+        self._model_combo.setCurrentIndex(idx)
+        self._model_combo.setToolTip(self._model_combo.currentText())
+
+    def _on_model_combo_activated(self, idx: int) -> None:
+        if self._model_combo.itemData(idx) != "__browse__":
+            return
+        path, _ = QFileDialog.getOpenFileName(
+            self.label_section, "Pick a classifier .pth", "",
+            "PyTorch models (*.pth)",
+        )
+        if path:
+            self._model_combo.insertItem(idx, f"custom: {Path(path).name}", userData=path)
+            self._model_combo.setCurrentIndex(idx)
+        else:
+            self._model_combo.setCurrentIndex(0)
+
+    def _current_model_path(self) -> Optional[Path]:
+        data = self._model_combo.currentData()
+        if not data or data == "__browse__":
+            return None
+        return Path(data)
+
+    # ── cell filter ("Only show cells from…") ─────────────────────────
+
+    def _edit_cell_filter(self) -> None:
+        if self._reader is None or self._store is None:
+            QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
+            return
+        from .cell_filter_dialog import CellFilterDialog
+        dialog = CellFilterDialog(self._reader, self._store.labeled_uids(),
+                                  self._cell_filter, parent=self.label_section)
+        if dialog.exec():
+            self._set_cell_filter(dialog.cell_filter())
+
+    def _set_cell_filter(self, cell_filter: CellFilter) -> None:
+        if cell_filter == self._cell_filter:
+            return
+        self._cell_filter = cell_filter
+        self._update_filter_button()
+        self._refresh_filter_summary()
+        if self._pool:
+            self._status.setText(
+                "Filter changed — click 'Load pool' to draw cells from it "
+                "(the current page is from the previous pool)."
+            )
+
+    def _update_filter_button(self) -> None:
+        f = self._cell_filter
+        text = "All cells" if f.is_empty() else f.describe()
+        if len(text) > 60:
+            text = text[:57] + "…"
+        self._filter_btn.setText(text + " ▾")
+        self._filter_clear_btn.setVisible(not f.is_empty())
+
+    def _refresh_filter_summary(self) -> None:
+        """'N cells match · M unlabelled' for the current filter."""
+        self._filter_btn.setEnabled(self._reader is not None)
+        if self._reader is None or self._store is None:
+            self._filter_summary.setText("")
+            return
+        mask = self._cell_filter.mask(self._reader)
+        labelled = self._store.labeled_uids()
+        n_match = int(mask.sum())
+        n_left = sum(1 for uid in self._reader.cell_uids[mask] if uid not in labelled)
+        p = tokens.active()
+        if n_match == 0:
+            self._filter_summary.setText("No cells match this filter.")
+            self._filter_summary.setStyleSheet(f"color: {p.warning};")
+            return
+        what = ("cells" if self._cell_filter.is_empty()
+                else f"of {len(self._reader):,} cells match")
+        self._filter_summary.setText(f"{n_match:,} {what} · {n_left:,} unlabelled")
+        self._filter_summary.setStyleSheet(f"color: {p.text_subtle};")
+
+    # ── events: label flow ────────────────────────────────────────────
+
+    def _on_test_mode_toggled(self, checked: bool) -> None:
+        self._test_mode = checked
+        self._prioritise_good.setEnabled(checked)
+        self._test_banner.setVisible(checked)
+        self._review_btn.setEnabled(not checked)  # review is a training tool
+        if checked:
+            p = tokens.active()
+            self._test_banner.setStyleSheet(
+                f"color: {p.warning}; border: 1px solid {p.warning}; "
+                f"border-radius: 4px; padding: 4px 8px; font-weight: 600;"
+            )
+        self._refresh_dataset_stats()
+
+    def _load_pool(self, review: bool = False) -> None:
+        if self._reader is None or self._h5_path is None or self._store is None:
+            QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
+            return
+        model_path = self._current_model_path()
+        uncertain_only = self._uncertain_only.isChecked()
+        if not self._test_mode and (review or uncertain_only) and model_path is None:
+            QMessageBox.warning(
+                self.label_section, "No model",
+                "Pick a model first — Review and 'uncertain only' need a model "
+                "to score cells.")
+            return
+
+        # Pick the ranking strategy. Test-set building samples randomly (or, with
+        # a model + 'Prioritise good', surfaces likely-'good' cells first);
+        # otherwise it's normal uncertainty-based active learning.
+        if self._test_mode:
+            review = False
+            if self._prioritise_good.isChecked() and model_path is not None:
+                select = "good"
+            else:
+                select = "random"
+                if self._prioritise_good.isChecked():
+                    self._status.setText("No model selected — sampling the test set "
+                                         "randomly instead of prioritising 'good'.")
+        else:
+            select = "uncertain"
+
+        # Don't blow away an unsaved page when switching modes.
+        if self._pool and self.has_unsaved_labels():
+            self._save_batch(silent_if_empty=True)
+        self._stop_worker(self._al_worker)
+        self._review_mode = review
+
+        # Review audits the model on cells not yet seen this session — including
+        # already-labelled training cells, so earlier mistakes can be corrected.
+        # But it must NEVER surface hold-out test cells, or saving would move
+        # them into the training split and silently shrink the frozen hold-out.
+        # Normal labelling (and test-set building) already skips every labelled
+        # cell, so train and test can't overlap there.
+        if review:
+            seen_uids = (set(self._session_seen_uids)
+                         | self._store.uids_by_split(SPLIT_TEST))
+        else:
+            seen_uids = self._store.labeled_uids() | self._session_seen_uids
+
+        self._load_btn.setEnabled(False)
+        self._review_btn.setEnabled(False)
+        self._save_action.setEnabled(False)
+        self._save_next_btn.setEnabled(False)
+        self._progress.setValue(0)
+        what = ("test-set cells" if self._test_mode
+                else "predictions to review" if review else "cells")
+        where = ("" if self._cell_filter.is_empty()
+                 else f" where {self._cell_filter.describe()}")
+        self._status.setText(
+            f"Loading up to {self._pool_size.value()} {what}{where} "
+            f"(skipping {len(seen_uids)} seen)…"
+        )
+
+        self._al_worker = _ActiveLearningWorker(
+            h5_path=self._h5_path,
+            model_path=model_path,
+            n_target=self._pool_size.value(),
+            seen_uids=seen_uids,
+            diversify=self._diversify.isChecked() and model_path is not None,
+            review=review,
+            uncertain_only=uncertain_only,
+            confidence_threshold=self._conf_thresh.value(),
+            select=select,
+            cell_filter=self._cell_filter,
+            seed=SAMPLING_SEED,
+        )
+        self._al_worker.progress.connect(self._on_al_progress)
+        self._al_worker.finished.connect(self._on_al_finished)
+        self._al_worker.start()
+
+    def _on_al_progress(self, frac: float, msg: str) -> None:
+        if self.sender() is not self._al_worker:
+            return
+        self._progress.setValue(int(max(0.0, min(1.0, frac)) * 1000))
+        self._status.setText(msg)
+
+    def _on_al_finished(self, records, error: str) -> None:
+        worker = self._al_worker
+        if self.sender() is not worker:
+            return  # a superseded worker — ignore its late result
+        self._load_btn.setEnabled(True)
+        self._review_btn.setEnabled(True)
+        if error:
+            self._status.setText(f"Failed: {error}")
+            return
+
+        self._pool = list(records)
+        self._pool_model = worker.scored_with
+        self._page_index = 0
+        self._page_labels.clear()
+        self._saved_labels.clear()  # pool indices now map to different cells
+
+        for rec, _score in self._pool:
+            self._session_seen_uids.add(rec.cell_uid)
+
+        # In review mode, pre-apply the model's prediction to every cell so the
+        # user only has to flip the wrong ones (g/b), then Save.
+        if self._review_mode:
+            for i, (_rec, score) in enumerate(self._pool):
+                self._page_labels[i] = "good" if score >= 0.5 else "bad"
+
+        if not self._pool:
+            self._populate_grid_from_page()
+            self._save_action.setEnabled(False)
+            self._save_next_btn.setEnabled(False)
+            reason = worker.result.message if worker.result is not None else ""
+            self._status.setText(
+                reason or "No more unseen cells. Use 'Reset session' to revisit "
+                          "skipped cells."
+            )
+            return
+
+        result = worker.result
+        sampling = sampling_record(
+            result,
+            cell_filter=worker.cell_filter,
+            seed=worker.seed,
+            n_target=worker.n_target,
+            model_path=worker.model_path,
+            split=SPLIT_TEST if self._test_mode else SPLIT_TRAIN,
+            review=worker.review,
+            diversify=bool(worker.diversify and not worker.review
+                           and result.mode == "uncertain"),
+            uncertain_only=bool(worker.uncertain_only and result.mode == "uncertain"),
+            confidence_threshold=(worker.confidence_threshold
+                                  if worker.uncertain_only and result.mode == "uncertain"
+                                  else None),
+            excluded=("hold-out test cells and cells already shown this session"
+                      if worker.review else
+                      "cells already labelled (any split) and cells already "
+                      "shown this session"),
+            source_h5=self._h5_path.name if self._h5_path else "",
+            source="ModelPrep GUI",
+        )
+        self._begin_session_for(sampling)
+        order = {"random": "random order", "uncertain": "least certain first",
+                 "good": "most likely good first"}[result.mode]
+        self._pool_desc = order + (
+            "" if worker.cell_filter.is_empty()
+            else f" · {result.n_matching:,} cells where {worker.cell_filter.describe()}")
+
+        self._populate_grid_from_page()
+        self._save_action.setEnabled(True)
+        self._save_next_btn.setEnabled(True)
+        self._update_page_status()
+        if self._review_mode:
+            self._status.setText(
+                self._status.text()
+                + "  ·  Reviewing predictions: flip wrong ones with g/b, then Save."
+            )
+
+    def _populate_grid_from_page(self) -> None:
+        for i in reversed(range(self._grid.count())):
+            item = self._grid.itemAt(i)
+            if item and item.widget():
+                item.widget().setParent(None)
+        self._thumbs.clear()
+
+        page_size = self._page_size.value()
+        start = self._page_index * page_size
+        end = min(start + page_size, len(self._pool))
+
+        cols = self._cols
+        for i, (rec, score) in enumerate(self._pool[start:end]):
+            pool_idx = start + i
+            thumb = _CellThumb(rec, score)
+            cached = self._page_labels.get(pool_idx)
+            if cached:
+                thumb.set_label(cached)
+            thumb.expandRequested.connect(
+                lambda idx=pool_idx: self._open_detail(idx)
+            )
+            thumb.classifyKey.connect(
+                lambda lbl, pos=i: self._grid_classify(pos, lbl)
+            )
+            thumb.navKey.connect(
+                lambda dx, dy, pos=i: self._grid_nav(pos, dx, dy)
+            )
+            self._thumbs.append(thumb)
+            self._grid.addWidget(thumb, i // cols, i % cols)
+
+        self._prev_btn.setEnabled(self._page_index > 0)
+        self._next_btn.setEnabled(end < len(self._pool))
+        # Put keyboard focus on the first cell so g/b/u work immediately.
+        if self._thumbs:
+            self._focused_pos = 0
+            self._thumbs[0].setFocus()
+        self._refresh_balance()
+
+    def _capture_current_page(self) -> None:
+        page_size = self._page_size.value()
+        start = self._page_index * page_size
+        for i, t in enumerate(self._thumbs):
+            self._page_labels[start + i] = t.label
+
+    # ── keyboard-driven grid labelling ─────────────────────────────────
+
+    def _focus_thumb(self, pos: int) -> None:
+        if 0 <= pos < len(self._thumbs):
+            self._focused_pos = pos
+            self._thumbs[pos].setFocus()
+
+    def _grid_classify(self, pos: int, label: str) -> None:
+        if not (0 <= pos < len(self._thumbs)):
+            return
+        self._thumbs[pos].set_label(label)
+        page_size = self._page_size.value()
+        self._page_labels[self._page_index * page_size + pos] = label
+        self._refresh_balance()
+        # Good/bad advance to the next cell (matching the inspector's rhythm);
+        # 'unlabeled' is a correction, so it holds.
+        if label in ("good", "bad") and pos + 1 < len(self._thumbs):
+            self._focus_thumb(pos + 1)
+
+    def _grid_nav(self, pos: int, dx: int, dy: int) -> None:
+        if not self._thumbs:
+            return
+        cols = self._cols
+        row, col = pos // cols, pos % cols
+        target = (row + dy) * cols + (col + dx)
+        if 0 <= target < len(self._thumbs):
+            self._focus_thumb(target)
+
+    # ── large inspector ───────────────────────────────────────────────
+
+    def _pool_label(self, pool_idx: int) -> str:
+        return self._page_labels.get(pool_idx, "unlabeled")
+
+    def _set_pool_label(self, pool_idx: int, label: str) -> None:
+        self._page_labels[pool_idx] = label
+        # Keep the grid in sync if this cell is on the visible page.
+        start = self._page_index * self._page_size.value()
+        thumb_pos = pool_idx - start
+        if 0 <= thumb_pos < len(self._thumbs):
+            self._thumbs[thumb_pos].set_label(label)
+        self._refresh_balance()
+
+    def _open_detail(self, pool_idx: int) -> None:
+        if self._reader is None or not (0 <= pool_idx < len(self._pool)):
+            return
+        # Persist current thumbnails so the dialog reads authoritative labels.
+        self._capture_current_page()
+        dialog = CellDetailView(
+            pool=self._pool,
+            start_index=pool_idx,
+            phase_idx=self._reader.phase_channel_idx,
+            mask_idx=self._reader.mask_channel_idx,
+            get_label=self._pool_label,
+            set_label=self._set_pool_label,
+            parent=self,
+            context_provider=self._context_provider,
+        )
+        dialog.exec()
+
+    def _save_then_next_page(self) -> None:
+        self._capture_current_page()
+        self._save_batch(silent_if_empty=True)
+        self._page_index += 1
+        page_size = self._page_size.value()
+        if self._page_index * page_size >= len(self._pool):
+            self._populate_grid_from_page()
+            self._save_action.setEnabled(False)
+            self._save_next_btn.setEnabled(False)
+            self._next_btn.setEnabled(False)
+            self._status.setText(
+                f"Pool exhausted ({len(self._pool)} cells cycled). "
+                "Click 'Load pool' for more."
+            )
+            return
+        self._populate_grid_from_page()
+        self._update_page_status()
+
+    def _prev_page(self) -> None:
+        if self._page_index <= 0:
+            return
+        self._capture_current_page()
+        self._page_index -= 1
+        self._populate_grid_from_page()
+        self._update_page_status()
+
+    def _next_page(self) -> None:
+        page_size = self._page_size.value()
+        if (self._page_index + 1) * page_size >= len(self._pool):
+            return
+        self._capture_current_page()
+        self._page_index += 1
+        self._populate_grid_from_page()
+        self._update_page_status()
+
+    def _reset_session(self) -> None:
+        n_seen = len(self._session_seen_uids)
+        n_cached = len(self._page_labels)
+        self._session_seen_uids.clear()
+        self._page_labels.clear()
+        self._status.setText(
+            f"Cleared {n_seen} session-shown cells and {n_cached} cached labels. "
+            "Saved labels on disk are still excluded."
+        )
+
+    def _update_page_status(self) -> None:
+        page_size = self._page_size.value()
+        start = self._page_index * page_size
+        end = min(start + page_size, len(self._pool))
+        n_pages = max(1, (len(self._pool) + page_size - 1) // page_size)
+        desc = f" ({self._pool_desc})" if self._pool_desc else ""
+        self._status.setText(
+            f"Pool: {len(self._pool)} cells{desc} · page {self._page_index + 1}/{n_pages} "
+            f"(cells {start + 1}–{end})."
+        )
+
+    # ── save ──────────────────────────────────────────────────────────
+
+    def _save_batch(self, silent_if_empty: bool = False) -> int:
+        if self._store is None or self._reader is None:
+            return 0
+        self._capture_current_page()
+        to_save = [
+            (idx, lbl) for idx, lbl in self._page_labels.items()
+            if lbl in ("good", "bad") and 0 <= idx < len(self._pool)
+            and self._saved_labels.get(idx) != lbl
+        ]
+        if not to_save:
+            if not silent_if_empty:
+                QMessageBox.information(self.label_section, "Nothing to save",
+                                        "Label some cells first.")
+            return 0
+
+        model_path = self._pool_model
+        model_at_label = str(model_path) if model_path else "none"
+        # Safety net: outside Test-set mode, never downgrade a cell that's
+        # currently in the hold-out to the training split (so a stray edit can't
+        # cannibalise the frozen test set). Test mode tags everything test.
+        protected_test = set() if self._test_mode else self._store.uids_by_split(SPLIT_TEST)
+        rows: list[LabelRow] = []
+        for pool_idx, lbl_name in to_save:
+            rec, score = self._pool[pool_idx]
+            split = (SPLIT_TEST if (self._test_mode or rec.cell_uid in protected_test)
+                     else SPLIT_TRAIN)
+            # With no model the "score" is a UI-ordering placeholder, not a real
+            # P(good); persist NaN so it isn't mistaken for a 0.5 confidence.
+            conf = score if model_path is not None else float("nan")
+            rows.append(LabelRow(
+                cell_uid=rec.cell_uid,
+                label_idx=LABEL_TO_IDX[lbl_name],
+                label_name=lbl_name,
+                area_px=rec.area_px,
+                labeled_at=datetime.now(timezone.utc).isoformat(),
+                session_id=self._session_id,
+                source_h5=self._h5_path.name if self._h5_path else "",
+                model_at_label=model_at_label,
+                confidence_good_at_label=conf,
+                split=split,
+            ))
+        n_saved = self._store.append_batch(rows)
+        self._session_label_count += n_saved
+        # Record the session (and how its pool was drawn) after every save, so
+        # the provenance survives a crash.
+        self._record_session()
+        # Remember what we persisted so these cells aren't re-written and don't
+        # read as "unsaved" while their thumbnails stay coloured on screen.
+        for idx, lbl in to_save:
+            self._saved_labels[idx] = lbl
+        self._status.setText(f"Saved {n_saved} labels to {self._store.csv_path.name}.")
+        self._refresh_dataset_stats()
+        return n_saved
+
+    # ── folder actions ─────────────────────────────────────────────────
+
+    def _open_consistency_check(self) -> None:
+        if self._h5_path is None or self._labels_dir is None or self._store is None:
+            QMessageBox.warning(self.label_section, "No source", "Pick an HDF5 first.")
+            return
+        counts = self._store.class_counts()
+        if counts.get("good", 0) + counts.get("bad", 0) < 10:
+            QMessageBox.information(self.label_section, "Not enough labels",
+                                   "Label more cells before running a consistency check.")
+            return
+        # Lazy import avoids a circular import (the dialog reuses _CellThumb).
+        from .consistency_dialog import ConsistencyCheckDialog
+        ConsistencyCheckDialog(self._h5_path, self._labels_dir, parent=self.label_section).exec()
+
+    def _open_labels_folder(self) -> None:
+        if self._labels_dir and Path(self._labels_dir).exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._labels_dir)))
+        else:
+            QMessageBox.information(self.label_section, "No labels yet",
+                                    "Pick a source and save some labels first.")
+
+    def _export_for_mycomorph(self) -> None:
+        if self._last_model_dir is not None:
+            export_run_for_mycomorph(self.train_section, self._last_model_dir)
+
+    def _open_rubric(self) -> None:
+        from .._resources import rubric_location
+
+        loc = rubric_location()
+        url = QUrl(loc) if loc.startswith("http") else QUrl.fromLocalFile(loc)
+        QDesktopServices.openUrl(url)
+
+    def _open_model_folder(self) -> None:
+        if self._last_model_dir and self._last_model_dir.exists():
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._last_model_dir)))
+
+    def _export_labels(self) -> None:
+        if self._store is None or not self._store.csv_path.exists():
+            QMessageBox.information(self.label_section, "Nothing to export",
+                                    "Save some labels first.")
+            return
+        dest, _ = QFileDialog.getSaveFileName(
+            self.label_section, "Export labels.csv",
+            str(Path.home() / "labels.csv"), "CSV files (*.csv)",
+        )
+        if not dest:
+            return
+        try:
+            shutil.copyfile(self._store.csv_path, dest)
+            self._status.setText(f"Exported labels to {Path(dest).name}")
+        except Exception as e:  # noqa: BLE001
+            QMessageBox.warning(self.label_section, "Export failed", str(e))
+
+    # ── balance feedback ───────────────────────────────────────────────
+
+    def _refresh_balance(self) -> None:
+        if self._store is None:
+            self._balance_label.setText("")
+            return
+        active = SPLIT_TEST if self._test_mode else SPLIT_TRAIN
+        counts = self._store.class_counts(active)
+        g, b = counts.get("good", 0), counts.get("bad", 0)
+        self._capture_current_page()
+        pend_g = sum(1 for idx, v in self._page_labels.items()
+                     if v == "good" and self._saved_labels.get(idx) != "good")
+        pend_b = sum(1 for idx, v in self._page_labels.items()
+                     if v == "bad" and self._saved_labels.get(idx) != "bad")
+        name = "Test set" if self._test_mode else "Saved"
+        txt = f"{name}: good {g} · bad {b} (total {g + b})"
+        if pend_g or pend_b:
+            txt += f"  ·  +page good {pend_g} / bad {pend_b}"
+        if self._test_mode:
+            half = TEST_SET_TARGET // 2
+            need_g, need_b = max(0, half - g), max(0, half - b)
+            if need_g or need_b:
+                txt += f"  ·  target ~{half}/{half} — still need good {need_g}, bad {need_b}"
+                if need_g > need_b:
+                    txt += "  → tip: pick a model + 'Prioritise good'"
+            else:
+                txt += f"  ·  ✓ reached ~{half}/{half}"
+            color = tokens.active().text_subtle
+        else:
+            total = g + b
+            minority = min(g, b)
+            warn = total >= 10 and minority / total < 0.2
+            color = tokens.active().warning if warn else tokens.active().text_subtle
+            if warn:
+                txt += "  ⚠ class imbalance — label more of the rarer class"
+        self._balance_label.setStyleSheet(f"color: {color};")
+        self._balance_label.setText(txt)
+
+    # ── training ──────────────────────────────────────────────────────
+
+    def _refresh_dataset_stats(self) -> None:
+        self._refresh_filter_summary()
+        if self._store is None:
+            self._stats_label.setText("(no source — pick an HDF5)")
+            self._train_btn.setEnabled(False)
+            self._use_holdout.setEnabled(False)
+            self._use_holdout.setText("Evaluate on hold-out test set")
+            self._refresh_balance()
+            return
+        sc = self._store.split_counts()
+        tr, te = sc[SPLIT_TRAIN], sc[SPLIT_TEST]
+        tr_total = tr["good"] + tr["bad"]
+        te_total = te["good"] + te["bad"]
+        test_part = (f"  ·  hold-out test: {te_total} (good={te['good']} bad={te['bad']})"
+                     if te_total else "")
+        if te_total and not (te["good"] and te["bad"]):
+            test_part += "  ⚠ hold-out has only one class — label both good and bad into it"
+        self._stats_label.setText(
+            f"train: {tr_total} (good={tr['good']} bad={tr['bad']}){test_part}")
+        self._stats_label.setToolTip(str(self._store.csv_path))
+        self._train_btn.setEnabled(tr_total >= 20)
+        # The hold-out toggle only means something once a test set exists.
+        self._use_holdout.setEnabled(te_total > 0)
+        self._use_holdout.setText(
+            f"Evaluate on hold-out test set ({te_total})" if te_total
+            else "Evaluate on hold-out test set (none yet)"
+        )
+        self._refresh_balance()
+
+    def _start_training(self) -> None:
+        if self._h5_path is None or self._labels_dir is None:
+            QMessageBox.warning(self.train_section, "No source", "Pick an HDF5 first.")
+            return
+        self._stop_worker(self._train_worker)
+        out_dir = new_run_dir(self._model_name)
+
+        pretrained = self._current_model_path() if self._fine_tune.isChecked() else None
+        device = self._device_combo.currentData()
+
+        self._train_btn.setEnabled(False)
+        self._train_progress.setValue(0)
+        self._train_status.setToolTip(str(out_dir))
+        self._train_status.setText(
+            f"Training {out_dir.name} (epochs={self._epochs.value()}, "
+            f"lr={self._lr.value()}, device={device or 'auto'}, "
+            f"fine-tune={'yes' if pretrained else 'no'}, "
+            f"freeze={'yes' if self._freeze.isChecked() else 'no'})…"
+        )
+
+        self._train_worker = _TrainWorker(
+            h5_path=self._h5_path,
+            labels_dir=self._labels_dir,
+            output_dir=out_dir,
+            epochs=self._epochs.value(),
+            lr=self._lr.value(),
+            batch_size=self._batch.value(),
+            patience=self._patience.value(),
+            val_fraction=self._val_frac.value(),
+            test_fraction=self._test_frac.value(),
+            seed=self._seed.value(),
+            device=device,
+            freeze_backbone=self._freeze.isChecked(),
+            pretrained=pretrained,
+            model_name=self._model_name,
+            use_holdout=self._use_holdout.isChecked() and self._use_holdout.isEnabled(),
+            feature_phase_only=self._feat_phase_only.isChecked(),
+        )
+        self._train_worker.progress.connect(self._on_train_progress)
+        self._train_worker.finished.connect(self._on_train_finished)
+        self._train_worker.start()
+        self.trainingStarted.emit()
+
+    def _on_train_progress(self, frac: float, msg: str) -> None:
+        if self.sender() is not self._train_worker:
+            return
+        self._train_progress.setValue(int(max(0.0, min(1.0, frac)) * 1000))
+        self._train_status.setText(msg)
+
+    def _on_train_finished(self, summary: dict, error: str) -> None:
+        if self.sender() is not self._train_worker:
+            return
+        self._train_btn.setEnabled(True)
+        self._train_progress.setValue(1000)
+        if error:
+            self._train_status.setText(f"Training failed: {error}")
+            return
+
+        model_path = summary.get("model_path", "(unknown)")
+        split = summary.get("eval_split", "val")
+        eval_acc = summary.get("eval_acc")
+        bal_acc = summary.get("balanced_acc")
+        baseline = summary.get("majority_baseline")
+        best_acc = summary.get("best_val_acc", 0.0)
+        auc = summary.get("roc_auc")
+        ap = summary.get("average_precision")
+        thr = summary.get("decision_threshold", 0.5)
+        conf = summary.get("confusion")
+        n_train = summary.get("n_train", 0)
+        n_val = summary.get("n_val", 0)
+        n_test = summary.get("n_test", 0)
+        n_holdout = summary.get("n_holdout", 0)
+
+        # On a frozen hold-out, lead with that number (the honest, comparable
+        # one); otherwise lead with the validation accuracy as before.
+        label = {"holdout": "hold-out", "test": "test", "val": "val"}.get(split, split)
+        parts = []
+        if eval_acc is not None and eval_acc == eval_acc:
+            parts.append(f"{label} acc {eval_acc:.3f}")
+        if bal_acc is not None and bal_acc == bal_acc:
+            parts.append(f"balanced {bal_acc:.3f}")
+        if baseline is not None and baseline == baseline:
+            parts.append(f"baseline {baseline:.3f}")
+        if auc is not None and auc == auc:
+            parts.append(f"AUC {auc:.3f}")
+        if ap is not None and ap == ap:
+            parts.append(f"AP {ap:.3f}")
+        parts.append(f"best val {best_acc:.3f}")
+        parts.append(f"thr {thr:.2f}")
+        if conf:
+            parts.append(f"conf tn={conf['tn']} fp={conf['fp']} fn={conf['fn']} tp={conf['tp']}")
+        sizes = f"(train {n_train} / val {n_val}"
+        sizes += f" / hold-out {n_holdout})" if n_holdout else (f" / test {n_test})" if n_test else ")")
+        parts.append(sizes)
+        msg = "Done · " + " · ".join(parts)
+
+        from ...core.train_classifier import single_class_warning
+
+        warning = ""
+        single = single_class_warning(summary.get("eval_class_counts") or {}, label)
+        if single:
+            warning = f"  ⚠ {single}"
+        elif split == "val":
+            warning = ("  ⚠ no held-out test set — metrics are validation, i.e. "
+                       "optimistic. Build a hold-out test set (toggle above) for a "
+                       "comparable number across rounds.")
+        elif (auc is not None and auc == auc and auc <= 0.6) or best_acc <= 0.55:
+            warning = ("  ⚠ near chance — the model didn't learn anything "
+                       "generalisable. Label many more cells, then retrain.")
+        elif n_train + n_val + n_test + n_holdout < 100:
+            warning = "  ⚠ small dataset — results are noisy. Label more and retrain."
+
+        # Second line: the feature-based model trained alongside on the same set.
+        fm = summary.get("feature_model")
+        if fm:
+            fparts = [f"balanced {fm['balanced_acc']:.3f}", f"AUC {fm['roc_auc']:.3f}",
+                      f"AP {fm['average_precision']:.3f}"]
+            cnn_auc = auc if (auc is not None and auc == auc) else None
+            delta = (f"  (vs CNN AUC {cnn_auc:.3f})" if cnn_auc is not None else "")
+            groups = ["morphology"] + [g for g, on in (
+                ("context", fm.get("with_context")), ("focus", fm.get("with_focus")),
+                ("fragment", fm.get("with_fragment"))) if on]
+            used = " + ".join(groups) + (", phase only" if fm.get("phase_only") else "")
+            feature_line = f"\nFeature model ({used}) · " + " · ".join(fparts) + delta
+        elif summary.get("feature_skip"):
+            feature_line = f"\nFeature model skipped — {summary['feature_skip']}."
+        else:
+            feature_line = ""
+        self._train_status.setToolTip(str(model_path))
+        self._train_status.setText(
+            msg + warning + f"  →  {Path(model_path).parent.name}" + feature_line)
+
+        # Surface the curves + metrics inline.
+        try:
+            self._last_model_dir = Path(model_path).parent
+            self._inspector.set_model(Path(model_path))
+            self._open_model_btn.setEnabled(True)
+            self._export_btn.setEnabled((self._last_model_dir / "best_model.pth").exists())
+        except Exception:  # noqa: BLE001
+            pass
+
+        # Make the just-trained model available + selected for the next
+        # active-learning round (re-rank the pool with the improved model).
+        self._populate_model_combo(select_path=str(model_path))
+
+    # ── lifecycle ─────────────────────────────────────────────────────
+
+    def _stop_worker(self, worker: Optional[QThread]) -> None:
+        """Cancel + wait for a worker so it can't emit into stale state."""
+        if worker is None or not worker.isRunning():
+            return
+        if hasattr(worker, "cancel"):
+            worker.cancel()
+        worker.wait(5000)
+
+    def _new_session(self) -> None:
+        self._session_id = make_session_id()
+        self._session_started_at = datetime.now(timezone.utc).isoformat()
+        self._session_label_count = 0
+        self._session_sampling = None
+        self._pool_desc = ""
+
+    def _begin_session_for(self, sampling: dict) -> None:
+        """Keep one draw spec per session: a pool drawn differently from the
+        current session's (another filter, mode, model, …) starts a new session
+        once the current one has saved labels. Reloading with the same spec
+        continues the session."""
+        if sampling == self._session_sampling:
+            return
+        if self._session_label_count > 0:
+            self._record_session_if_any()
+            self._new_session()
+        self._session_sampling = sampling
+
+    def _record_session(self) -> None:
+        """Write or update this session's manifest entry (no-op until a label
+        has been saved)."""
+        if self._store is None or self._session_label_count == 0:
+            return
+        try:
+            self._store.record_session(
+                self._session_id,
+                self._session_started_at,
+                datetime.now(timezone.utc).isoformat(),
+                self._session_label_count,
+                sampling=self._session_sampling,
+            )
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _record_session_if_any(self) -> None:
+        self._record_session()
+        self._session_label_count = 0
+
+    def shutdown(self) -> None:
+        """Stop workers, record the session, release the HDF5 reader. Called by
+        the main window on close (this controller panel is never shown, so its
+        own ``closeEvent`` would not fire)."""
+        self._stop_worker(self._al_worker)
+        self._stop_worker(self._train_worker)
+        self._record_session_if_any()
+        if self._reader is not None:
+            self._reader.close()
+            self._reader = None
+
+    def closeEvent(self, event) -> None:
+        self.shutdown()
+        super().closeEvent(event)

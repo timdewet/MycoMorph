@@ -54,31 +54,56 @@ def segment(ctx: typer.Context) -> None:  # pragma: no cover
     _delegate(m, list(ctx.args))
 
 
-@app.command(
-    "review", help="Active-learning review of classifier predictions.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def review(ctx: typer.Context) -> None:  # pragma: no cover
-    from . import review_classifications as m
-    _delegate(m, list(ctx.args))
+# ── Moved to ModelPrep ────────────────────────────────────────────────────────
+#
+# Labelling, review and training moved to ModelPrep (`modelprep-cli`, and the
+# `modelprep` GUI), which works from the all_crops.h5 the Features stage
+# writes. The old commands stay as pointers so existing scripts fail with
+# directions instead of "No such command". Every argument, --help included,
+# just prints the pointer; the exit code is 2, as for an unknown command.
+
+_H5 = "<output>/04_features/all_crops.h5"
+_MOVED_TO_MODELPREP = {
+    "label": f"modelprep-cli label --h5 {_H5}",
+    "review": f"modelprep-cli review --h5 {_H5} --model <preset or .pth>",
+    "train": f"modelprep-cli train --h5 {_H5} --name <model name>",
+}
 
 
-@app.command(
-    "label", help="Interactive labeling of segmented cells.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def label(ctx: typer.Context) -> None:  # pragma: no cover
-    from . import label_cells as m
-    _delegate(m, list(ctx.args))
+def _moved_to_modelprep(command: str) -> None:
+    typer.echo(
+        f"`mycomorph-cli {command}` has moved to ModelPrep, MycoMorph's "
+        "cell-quality labeller and trainer.\n"
+        f"  Command line:  {_MOVED_TO_MODELPREP[command]}\n"
+        "  GUI:           modelprep, or MycoMorph's Classify page > Labeller / trainer\n"
+        "ModelPrep reads the all_crops.h5 that the Features stage writes with "
+        "\"Save HDF5 crops\" on. It does not read the segmented TIFF folders "
+        "or labeled_data/ folders this command used.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
-@app.command(
-    "train", help="Train a cell-quality classifier.",
-    context_settings=_DELEGATE_CONTEXT,
-)
-def train(ctx: typer.Context) -> None:  # pragma: no cover
-    from . import train_classifier as m
-    _delegate(m, list(ctx.args))
+# Accept any arguments, and no --help of their own, so whatever an old
+# script passes still reaches the pointer.
+_MOVED_CONTEXT = {
+    "allow_extra_args": True,
+    "ignore_unknown_options": True,
+    "help_option_names": [],
+}
+
+
+def _add_moved_command(command: str) -> None:
+    @app.command(
+        command, help=f"Moved to ModelPrep: use `modelprep-cli {command}`.",
+        context_settings=_MOVED_CONTEXT,
+    )
+    def moved() -> None:
+        _moved_to_modelprep(command)
+
+
+for _command in _MOVED_TO_MODELPREP:
+    _add_moved_command(_command)
 
 
 # ── Feature library subcommands ───────────────────────────────────────────────

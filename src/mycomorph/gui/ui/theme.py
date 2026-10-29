@@ -61,11 +61,11 @@ def _write_assets(p) -> dict:
     cache_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, str] = {}
     paths["check"] = str(cache_dir / "check.svg")
-    Path(paths["check"]).write_text(_CHECK_SVG_LIGHT)
+    Path(paths["check"]).write_text(_CHECK_SVG_LIGHT, encoding="utf-8")
     paths["chevron-down"] = str(cache_dir / "chev-down.svg")
-    Path(paths["chevron-down"]).write_text(_arrow_svg(p.text_muted, "down"))
+    Path(paths["chevron-down"]).write_text(_arrow_svg(p.text_muted, "down"), encoding="utf-8")
     paths["chevron-up"] = str(cache_dir / "chev-up.svg")
-    Path(paths["chevron-up"]).write_text(_arrow_svg(p.text_muted, "up"))
+    Path(paths["chevron-up"]).write_text(_arrow_svg(p.text_muted, "up"), encoding="utf-8")
     return {k: Path(v).as_posix() for k, v in paths.items()}
 
 

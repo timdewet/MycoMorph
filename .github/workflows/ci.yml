@@ -12,7 +12,8 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
-        python-version: ["3.10", "3.11"]
+        # 3.12 installs the pinned release stack the desktop bundles use.
+        python-version: ["3.10", "3.11", "3.12"]
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -34,7 +35,11 @@ jobs:
       - name: Install package
         run: |
           python -m pip install --upgrade pip
-          pip install -e ".[test]"
+          if [ "${{ matrix.python-version }}" = "3.12" ]; then
+            pip install -c constraints/release-py312.txt -e ".[test]"
+          else
+            pip install -e ".[test]"
+          fi
 
       - name: Static checks
         run: |
@@ -47,11 +52,13 @@ jobs:
       - name: Test
         env:
           QT_QPA_PLATFORM: offscreen
+          # ModelPrep's GUI tests are opt-in (they need an offscreen Qt).
+          MODELPREP_GUI_TESTS: "1"
         run: pytest -q
 
       - name: Import smoke
         run: |
-          python -c "import mycomorph; import mycomorph.core; import mycomorph.gui; print(mycomorph.__version__)"
+          python -c "import mycomorph; import mycomorph.core; import mycomorph.gui; import mycomorph.modelprep; print(mycomorph.__version__)"
 
       - name: Torch and Cellpose import smoke (macOS)
         if: runner.os == 'macOS'
@@ -83,3 +90,50 @@ jobs:
           $env:MYCOMORPH_SMOKE_TEST = "1"
           $process = Start-Process -FilePath "dist/MycoMorph/MycoMorph.exe" -PassThru -Wait
           exit $process.ExitCode
+
+      - name: Smoke-launch ModelPrep from the bundle
+        shell: pwsh
+        run: |
+          $env:QT_QPA_PLATFORM = "offscreen"
+          $env:MYCOMORPH_SMOKE_TEST = "1"
+          $process = Start-Process -FilePath "dist/MycoMorph/MycoMorph.exe" -ArgumentList "--modelprep" -PassThru -Wait
+          exit $process.ExitCode
+
+      - name: Check the licence notice sits next to the executable
+        shell: pwsh
+        run: |
+          foreach ($f in "BUNDLE_LICENSE.txt", "LICENSE") {
+            if (-not (Test-Path "dist/MycoMorph/$f")) { Write-Error "dist/MycoMorph/$f is missing"; exit 1 }
+          }
+
+  macos-bundle:
+    if: github.event_name == 'pull_request'
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install pinned release stack
+        run: |
+          python -m pip install --upgrade pip
+          pip install -c constraints/release-py312.txt . pyinstaller==6.16.0
+
+      - name: Build macOS app
+        run: pyinstaller --clean --noconfirm packaging/mycomorph.spec
+
+      - name: Smoke-launch app and ModelPrep
+        env:
+          QT_QPA_PLATFORM: offscreen
+          MYCOMORPH_SMOKE_TEST: "1"
+        run: |
+          set -o pipefail
+          app=dist/MycoMorph.app/Contents/MacOS/MycoMorph
+          "$app" 2>&1 | tee mycomorph.log
+          grep -q "smoke test: opened MycoMorph" mycomorph.log
+          "$app" --modelprep 2>&1 | tee modelprep.log
+          grep -q "smoke test: opened ModelPrep" modelprep.log
+          test -f dist/MycoMorph.app/Contents/Resources/BUNDLE_LICENSE.txt
