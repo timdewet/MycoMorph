@@ -1,0 +1,29 @@
+MycoMorph desktop bundle: licence notice
+========================================
+
+MycoMorph's source code, including ModelPrep (its cell-quality labeller and
+trainer, mycomorph.modelprep), is released under the MIT licence. See LICENSE
+in this bundle, or https://github.com/timdewet/MycoMorph.
+
+This bundle also contains third-party software. It includes PyQt6 and
+PyQt6-WebEngine (Riverbank Computing Ltd.), which are licensed under the GNU
+General Public License version 3 (GPL v3), and the Qt 6 libraries (The Qt
+Company Ltd.), which are licensed under the GNU Lesser General Public License
+version 3 (LGPL v3). Because the bundle includes PyQt6, the bundle as a whole
+is distributed under the terms of the GPL v3.
+
+The licence texts are in this bundle: in the _internal folder next to the
+MycoMorph executable (Windows, Linux), or in MycoMorph.app/Contents/Resources
+(macOS).
+
+    licenses/PyQt6/LICENSE    GNU GPL v3
+    licenses/Qt6/LICENSE      GNU LGPL v3
+
+The source code of MycoMorph for this release is at
+https://github.com/timdewet/MycoMorph, under the release tag that matches
+this version. The other components are unmodified releases from PyPI, each
+under its own licence (for example PyTorch, Cellpose, NumPy and SciPy under
+BSD-style licences); their source code is available from those projects.
+
+This software comes with NO WARRANTY, to the extent permitted by law. See
+sections 15 and 16 of the GNU GPL v3.

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "mycomorph"
 version = "0.4.0"
-description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification)"
+description = "MycoMorph: bacterial microscopy pre-processing pipeline with PyQt6 GUI (focus picking, FOV split, Cellpose-SAM segmentation, cell-quality classification), and ModelPrep, the labeller and trainer for its cell-quality classifier"
 requires-python = ">=3.10"
 dependencies = [
     "numpy>=1.24",
@@ -30,10 +30,10 @@ dependencies = [
     "umap-learn>=0.5",
     "plotly>=5.20",
     "PyQt6-WebEngine>=6.5",
+    "psutil>=5.9",  # nav-sidebar system stats; a declared ModelPrep dependency
 ]
 
 [project.optional-dependencies]
-napari = ["napari"]
 profiling = [
     # Pin upper bound: versions after 0.0.9 require a C++ toolchain to
     # build from source on Windows (scikit-build-core + CMake). 0.0.9 is
@@ -59,12 +59,16 @@ test = [
 mycomorph = "mycomorph.gui.app:main"
 mycomorph-cli = "mycomorph.core.cli:app"
 mycomorph-focus = "mycomorph.core.focus.cli:app"
+# ModelPrep (the cell-quality labeller / trainer) keeps its own commands.
+modelprep = "mycomorph.modelprep.gui.app:main"
+modelprep-cli = "mycomorph.modelprep.core.cli:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
-"mycomorph.core" = ["models/*.pth"]
+"mycomorph.core" = ["models/*.pth", "models/*.json"]
+"mycomorph.modelprep.gui" = ["assets/logo/*.svg", "assets/logo/*.ico", "assets/logo/*.icns"]
 
 [tool.ruff]
 target-version = "py310"

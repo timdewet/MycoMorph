@@ -728,41 +728,6 @@ def test_process_fov_crops_match():
         assert m["area_px"] == ref_area
 
 
-# ── Labelling tool ────────────────────────────────────────────────────────────
-
-def test_label_cells_extract_all_cells_matches(tmp_path):
-    import tifffile
-
-    from mycomorph.core.hyperstack import get_labeled_mask_from_fov
-    from mycomorph.core.label_cells import extract_all_cells
-
-    fovs = []
-    for seed in (12, 13):
-        binary = (_synthetic_mask(seed, np.int32) > 0).astype(np.uint16) * 255
-        fovs.append(np.concatenate([_synthetic_image(seed), binary[None]]))
-    data = np.stack(fovs)
-    path = tmp_path / "A01.tif"
-    tifffile.imwrite(str(path), data, imagej=True, metadata={
-        "axes": "ZCYX", "channels": 3, "slices": 2, "hyperstack": True, "mode": "composite",
-    })
-
-    cells = extract_all_cells([path], phase_channel=0, mask_channel=2)
-
-    expected = []
-    for fov_idx, fov in enumerate(data):
-        labeled, n = get_labeled_mask_from_fov(fov, 2)
-        img = np.delete(fov, 2, axis=0)
-        for lbl in range(1, n + 1):
-            crop, _ = _ref_extract_cell_crop(img, labeled, lbl)
-            if crop is not None:
-                expected.append((f"A01_fov{fov_idx:03d}_cell{lbl:04d}", crop,
-                                 int(np.sum(labeled == lbl))))
-    assert [c["cell_id"] for c in cells] == [e[0] for e in expected]
-    for cell, (_, crop, area) in zip(cells, expected):
-        np.testing.assert_array_equal(cell["crop"], crop)
-        assert cell["area_px"] == area
-
-
 # ── Bacteroidal foci detector ─────────────────────────────────────────────────
 
 @pytest.mark.parametrize("refine", [True, False])

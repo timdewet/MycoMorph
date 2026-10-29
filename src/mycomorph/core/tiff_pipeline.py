@@ -28,7 +28,6 @@ mask appended as the last channel — identical to cellpose_pipeline.py output.
 
 Sample mode (--sample):
     Picks 1 random FOV per input TIFF for training data diversity.
-    Output is compatible with label_cells.py for interactive labelling.
 """
 
 import argparse
