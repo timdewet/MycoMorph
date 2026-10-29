@@ -377,10 +377,10 @@ Releases are driven by [release-please](https://github.com/googleapis/release-pl
 | --- | --- | --- |
 | `feat: …` | new user-facing feature | minor |
 | `fix: …` | bug fix | patch |
-| `feat!: …` or `BREAKING CHANGE:` in the footer | breaking API/UX change | major |
+| `feat!: …` or `BREAKING CHANGE:` in the footer | breaking API/UX change | major (minor while below 1.0) |
 | `chore: …`, `docs: …`, `refactor: …`, `test: …`, `style: …`, `ci: …` | maintenance | none |
 
-A PR with no `feat:` or `fix:` commits doesn't trigger a release, so refactors and README changes ship with the next real release. While the version is below 1.0, a breaking change (`feat!:` or `BREAKING CHANGE:`) still bumps it to 1.0.0, because [release-please-config.json](release-please-config.json) doesn't set `bump-minor-pre-major`.
+A PR with no `feat:` or `fix:` commits doesn't trigger a release, so refactors and README changes ship with the next real release. While the version is below 1.0, a breaking change (`feat!:` or `BREAKING CHANGE:`) bumps the minor version and is listed under breaking changes in the changelog, because [release-please-config.json](release-please-config.json) sets `bump-minor-pre-major`. Moving to 1.0.0 is a deliberate step: add `Release-As: 1.0.0` to a commit's footer.
 
 **Manual rebuild:** if a build fails for a transient reason, re-run the failed job from the GitHub Actions UI. The release already exists; the re-run only rebuilds and re-uploads that platform's zip.
 
