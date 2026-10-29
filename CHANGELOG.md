@@ -28,7 +28,6 @@
 
 ### Performance Improvements
 
-* read each cell's bounding box instead of scanning the whole mask ([5a63dab](https://github.com/timdewet/MycoMorph/commit/5a63dab6e4f05d852083f2b23b66e809adead903))
 * read each cell's bounding box instead of scanning the whole mask ([26e40c9](https://github.com/timdewet/MycoMorph/commit/26e40c92fe7173efa58e349c9b37cab0ee17c103))
 
 
@@ -38,7 +37,6 @@
 * fix the macOS first-launch and ModelPrep launch instructions ([7cf26a9](https://github.com/timdewet/MycoMorph/commit/7cf26a9e18b68f4a7ee1d4733ccf00176898d7ff))
 * index ModelPrep's docs and map its pre-move paths ([7b0507e](https://github.com/timdewet/MycoMorph/commit/7b0507e2687036d321fd21fdd5986104960e99a7))
 * point GPU users to the from-source install ([b2b59fe](https://github.com/timdewet/MycoMorph/commit/b2b59feb2a2d53f2d328e27f499f0509933edfa8))
-* rewrite README to cover the current pipeline ([ae994f0](https://github.com/timdewet/MycoMorph/commit/ae994f0295acd4b3e3e3089981f476e60d798f2e))
 * rewrite README to cover the current pipeline ([9fc45b6](https://github.com/timdewet/MycoMorph/commit/9fc45b60aede58f88d6deeaae4c31578c31d46a5))
 
 ## [0.4.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.3.0...mycomorph-v0.4.0) (2026-10-15)
