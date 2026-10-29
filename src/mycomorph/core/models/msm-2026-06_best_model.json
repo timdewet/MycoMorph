@@ -1,0 +1,28 @@
+{
+  "name": "msm-2026-06",
+  "file": "msm-2026-06_best_model.pth",
+  "sha256": "7cc56e8998116c869fd55fd99d9b4ae5e62b3b80b181cc406ac10b45b2c53184",
+  "in_channels": 3,
+  "num_classes": 2,
+  "class_names": [
+    "good",
+    "bad"
+  ],
+  "crop_size": 64,
+  "channels": "[phase, mask, log-area]",
+  "label_criteria": "Bad = out of focus, clumped, debris, or cut off at the image edge. Dividing cells are good.",
+  "trainer": "ModelPrep (June 2026), since integrated into MycoMorph as mycomorph.modelprep",
+  "organism": "Mycobacterium smegmatis",
+  "summary": "M. smegmatis cell-quality classifier (June 2026). Labels each segmented cell good or bad.",
+  "training_data": "60 randomly sampled fields from condition-optimisation experiments for a DNA-damage screen: ATc induction with and without mitomycin C (MMC), an MMC concentration series, and ATc concentration, cell density and exposure tests. CRISPRi knockdowns of lexA, dnaE2, imuA, imuB and recA, plus non-targeting controls, with the DnaN-mCherry and ImuB-eGFP reporters. 46% of labelled cells come from MMC-treated fields, so the model has seen many filamentous cells.",
+  "imaging": "Phase contrast, 0.072 um per pixel (no binning), single plane. Segmented with Cellpose-SAM (cpsam weights, automatic diameter) using a Cellpose 4 release whose exact version was not recorded, after edge and debris rules.",
+  "labels": "6,028 cells labelled in ModelPrep by T. de Wet, mostly chosen by active learning. Split: 3,942 training, 986 validation, 1,100 held out. The held-out cells were labelled first and kept out of every training round.",
+  "training": "Fine-tuned over 10 active-learning rounds in ModelPrep (13-14 June 2026), starting from a model trained from scratch on the first 500 labels; only M. smegmatis labels were used. Same input and settings as the M. tuberculosis preset; best epoch 39 of 40 in the final round.",
+  "performance": "80.5% agreement with hand labels on the 1,100 held-out cells, 92% of which the model found hard, so this understates performance on typical fields. The annotator agreed with their own earlier labels on 90% of 200 re-labelled cells (kappa 0.80). Validation on independent sessions: MycoMorph paper, Figure S2b.",
+  "intended_use": "M. smegmatis phase-contrast images like these, at 0.072 um per pixel without binning, including filamenting cells after DNA damage. Retrain with ModelPrep for other organisms or imaging setups.",
+  "decision_threshold": 0.51444411277771,
+  "decision_threshold_note": "Tuned on validation; opt-in. MycoMorph uses 0.5 by default.",
+  "training_run": "msm_mmc_v1_2026-06-14_15-01-07",
+  "trained": "2026-06-14",
+  "training_record": "assets/models/msm-2026-06/"
+}

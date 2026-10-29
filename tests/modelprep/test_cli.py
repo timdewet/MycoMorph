@@ -62,7 +62,7 @@ def test_train_no_holdout_and_finetune_defaults(synthetic_h5, tmp_path):
     ld = _labels(synthetic_h5, tmp_path)
     out = tmp_path / "ft"
     _invoke("train", "--h5", synthetic_h5, "--labels-dir", ld, "--output", out,
-            "--pretrained", "mtb", "--epochs", 1, "--device", "cpu", "--no-holdout")
+            "--pretrained", "mtb-2026-06", "--epochs", 1, "--device", "cpu", "--no-holdout")
     cfg = json.loads((out / "training_config.json").read_text())
     assert cfg["eval_split"] != "holdout" and cfg["n_holdout"] == 0
     assert cfg["lr"] == pytest.approx(1e-4)              # GUI fine-tune default

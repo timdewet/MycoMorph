@@ -61,7 +61,7 @@ Usage (TIFF):
         ├── Replica_1__Plate_1__experiment_001.tif
 
 Classification presets:
-    python cellpose_pipeline.py -i ... -o ... --classify-preset mtb
+    python cellpose_pipeline.py -i ... -o ... --classify-preset mtb-2026-06
     python cellpose_pipeline.py -i ... -o ... --classify /path/to/model.pth
 """
 
