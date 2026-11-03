@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.6.1](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.6.0...mycomorph-v0.6.1) (2026-11-03)
+
+
+### Bug Fixes
+
+* stop auto crosstalk wiping colocalised channels and the foci-stage grind ([69485f7](https://github.com/timdewet/MycoMorph/commit/69485f7ce66284b34a8b0951d5b3f65922f4fadb))
+* stop auto crosstalk wiping colocalised channels and the foci-stage grind ([a20c88b](https://github.com/timdewet/MycoMorph/commit/a20c88b8019767c55ef2facee2a0cd549ecb0c87))
+
+
+### Documentation
+
+* say when the crosstalk auto-k estimate can't be trusted ([7b0458b](https://github.com/timdewet/MycoMorph/commit/7b0458bcd16b4b1e96a8f8850ba0b153732f83cc))
+
 ## [0.6.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.5.0...mycomorph-v0.6.0) (2026-10-29)
 
 
