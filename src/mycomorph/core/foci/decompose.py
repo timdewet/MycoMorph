@@ -40,7 +40,12 @@ from typing import Optional
 import numpy as np
 
 from ._types import DetectorOpts, Focus
-from .detectors._common import _gaussian_2d, label_at, local_snr
+from .detectors._common import (
+    _gaussian_2d,
+    _gaussian_2d_jac,
+    label_at,
+    local_snr,
+)
 
 # Absolute R² floor for the accepted two-Gaussian model. Genuine merged
 # pairs fit ≥ ~0.9; noise blobs rarely exceed ~0.3 even with 8 params.
@@ -55,6 +60,38 @@ def _two_gaussian_2d(coords, a1, x1, y1, a2, x2, y2, sigma, offset):
         + a1 * np.exp(-(((x - x1) ** 2 + (y - y1) ** 2) / s2))
         + a2 * np.exp(-(((x - x2) ** 2 + (y - y2) ** 2) / s2))
     )
+
+
+def _two_gaussian_2d_jac(coords, a1, x1, y1, a2, x2, y2, sigma, offset):
+    """Analytic Jacobian of ``_two_gaussian_2d``, shape (m, 8).
+
+    The bounded trf fit otherwise builds its Jacobian by 2-point finite
+    differences — 8 extra model evaluations per iteration, and junk
+    patches routinely run hundreds of iterations before hitting the
+    evaluation cap.
+    """
+    x, y = coords
+    ss = sigma * sigma
+    dx1 = x - x1
+    dy1 = y - y1
+    dx2 = x - x2
+    dy2 = y - y2
+    d2_1 = dx1 * dx1 + dy1 * dy1
+    d2_2 = dx2 * dx2 + dy2 * dy2
+    e1 = np.exp(-d2_1 / (2.0 * ss))
+    e2 = np.exp(-d2_2 / (2.0 * ss))
+    a1e = a1 * e1
+    a2e = a2 * e2
+    return np.stack([
+        e1,                                      # ∂/∂a1
+        a1e * dx1 / ss,                          # ∂/∂x1
+        a1e * dy1 / ss,                          # ∂/∂y1
+        e2,                                      # ∂/∂a2
+        a2e * dx2 / ss,                          # ∂/∂x2
+        a2e * dy2 / ss,                          # ∂/∂y2
+        (a1e * d2_1 + a2e * d2_2) / (ss * sigma),  # ∂/∂sigma
+        np.ones_like(e1),                        # ∂/∂offset
+    ], axis=-1)
 
 
 def _point_segment_dist(
@@ -164,6 +201,10 @@ def _try_split(
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", OptimizeWarning)
+        # Junk patches drive the post-fit covariance step to overflow
+        # (float32 residuals squared) — harmless, pcov is unused here,
+        # but tens of thousands of them would flood the worker log.
+        warnings.simplefilter("ignore", RuntimeWarning)
 
         # Single-Gaussian baseline (gives R²_1 and the residual seed).
         p0_single = (
@@ -174,11 +215,20 @@ def _try_split(
         )
         try:
             popt1, _ = curve_fit(
-                _gaussian_2d, coords, patch.ravel(), p0=p0_single, maxfev=300,
+                _gaussian_2d, coords, patch.ravel(), p0=p0_single,
+                jac=_gaussian_2d_jac, maxfev=300, ftol=1e-4, xtol=1e-4,
             )
         except Exception:  # noqa: BLE001
             return None
         amp1_s, x_s, y_s, sig_s, off_s = (float(v) for v in popt1)
+        # σ collapsing far below the PSF means the "focus" is a noise
+        # spike or hot pixel, not optical signal — a genuine merged pair
+        # pulls the single fit the other way (σ inflates to span both
+        # peaks). Bail before paying for the two-Gaussian fit, which on
+        # such patches grinds to the evaluation cap and then fails the
+        # acceptance criteria anyway.
+        if abs(sig_s) < 0.5 * float(opts.min_sigma):
+            return None
         model1 = _gaussian_2d(coords, *popt1).reshape(patch.shape)
         r2_single = _r_squared(patch, model1)
 
@@ -202,9 +252,15 @@ def _try_split(
              2.0 * float(opts.max_sigma), np.inf],
         )
         try:
+            # Loose tolerances on purpose: acceptance only needs R² to
+            # ~0.01 (ΔR² threshold is 0.05), while the default 1e-8
+            # ftol/xtol made junk patches inch along a collapsed trust
+            # region for the entire evaluation budget. Genuine doublets
+            # converge in well under 100 evaluations.
             popt2, _ = curve_fit(
                 _two_gaussian_2d, coords, patch.ravel(),
-                p0=p0_double, bounds=bounds, maxfev=600,
+                p0=p0_double, bounds=bounds, jac=_two_gaussian_2d_jac,
+                maxfev=200, ftol=1e-4, xtol=1e-4,
             )
         except Exception:  # noqa: BLE001
             return None

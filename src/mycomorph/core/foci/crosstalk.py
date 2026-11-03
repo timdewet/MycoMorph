@@ -17,6 +17,16 @@ background-subtracted amplitude of BOTH channels at those sites, and
 takes a robust (Theil–Sen) slope of target-vs-source amplitude. Genuine
 biological colocalisation at a minority of sites shows up as outliers
 above the crosstalk line and does not move the median-based slope.
+
+Identifiability limit: when the two reporters colocalise at *most*
+source peaks (e.g. DnaN-mCherry with ImuB-eGFP under DNA damage), the
+median slope IS the colocalisation slope and auto estimation cannot
+tell it apart from bleed — correlation quality doesn't help, because
+biology correlates at least as well as optics. Real filter-set bleed
+is small (~5–10%), so a fitted slope above ``max_plausible_k`` is
+treated as biology and auto estimation refuses (``k = 0``,
+``mode = "implausible-slope"``); measure a fixed ``k`` from
+single-fluorophore control wells instead.
 """
 
 from __future__ import annotations
@@ -39,7 +49,11 @@ class CrosstalkEstimate:
     k: float
     n_sites: int = 0
     spearman_rho: float = float("nan")
-    mode: str = "auto"          # "auto" | "fixed" | "insufficient-sites"
+    # "auto" | "fixed" | "insufficient-sites" | "implausible-slope"
+    mode: str = "auto"
+    # Raw Theil–Sen slope before any plausibility decision — kept even
+    # when the estimate is refused, so the sidecar shows what auto saw.
+    fitted_slope: float = float("nan")
     # Per-FOV site counts, for the sidecar JSON / debugging.
     sites_per_fov: list[int] = field(default_factory=list)
 
@@ -51,6 +65,9 @@ class CrosstalkEstimate:
                 None if np.isnan(self.spearman_rho) else float(self.spearman_rho)
             ),
             "mode": self.mode,
+            "fitted_slope": (
+                None if np.isnan(self.fitted_slope) else float(self.fitted_slope)
+            ),
             "sites_per_fov": [int(n) for n in self.sites_per_fov],
         }
 
@@ -122,6 +139,7 @@ def estimate_crosstalk_k(
     min_distance: int = 5,
     max_sites_per_fov: int = 300,
     min_sites: int = 20,
+    max_plausible_k: float = 0.25,
 ) -> CrosstalkEstimate:
     """Estimate the source→target bleed coefficient for one well.
 
@@ -134,6 +152,14 @@ def estimate_crosstalk_k(
     Returns ``k = 0`` with ``mode = "insufficient-sites"`` when fewer
     than ``min_sites`` usable peaks exist (e.g. a source channel with no
     foci) — subtraction with k=0 is then a safe no-op.
+
+    Returns ``k = 0`` with ``mode = "implausible-slope"`` when the
+    fitted slope exceeds ``max_plausible_k``: filter-set bleed runs a
+    few percent, so a large slope means the reporters colocalise and
+    the estimate would subtract genuine signal (observed in production:
+    DnaN-mCherry/ImuB-eGFP fitted slope ≥ 1.0 with ρ = 0.63, which
+    wiped the EGFP channel and downstream detection exploded on the
+    clipped residue). The refused slope is kept in ``fitted_slope``.
     """
     from scipy.stats import spearmanr, theilslopes
 
@@ -188,19 +214,40 @@ def estimate_crosstalk_k(
 
     slope = float(theilslopes(a_tgt, a_src)[0])
     rho = float(spearmanr(a_src, a_tgt)[0])
-    # Negative slopes mean "no measurable bleed" (noise); clamp into a
-    # physically sensible range rather than adding signal back.
-    k = float(np.clip(slope, 0.0, 1.0))
+    if slope > float(max_plausible_k):
+        return CrosstalkEstimate(
+            k=0.0, n_sites=len(a_src), spearman_rho=rho,
+            mode="implausible-slope", fitted_slope=slope,
+            sites_per_fov=sites_per_fov,
+        )
+    # Negative slopes mean "no measurable bleed" (noise); never add
+    # signal back.
+    k = float(max(slope, 0.0))
     return CrosstalkEstimate(
         k=k, n_sites=len(a_src), spearman_rho=rho, mode="auto",
-        sites_per_fov=sites_per_fov,
+        fitted_slope=slope, sites_per_fov=sites_per_fov,
     )
 
 
 def subtract_crosstalk(
     target: np.ndarray, source: np.ndarray, k: float,
 ) -> np.ndarray:
-    """``max(target - k*source, 0)`` as float32, shapes must match."""
+    """``max(target - k*max(source - median(source), 0), 0)`` as float32.
+
+    ``k`` scales the source's *signal above its per-frame median*, not
+    the raw frame: bleed is proportional to source photons, while the
+    raw frame also carries the camera offset (and diffuse floor), which
+    the target channel owns outright. Subtracting ``k * raw`` used to
+    take ``k × offset`` out of the whole target frame — harmless at
+    k ≈ 0.075 under top-hat, but at large k it drove the background
+    negative and the clip to zero turned entire FOVs into sparse noise
+    speckle. Scaling only above-median signal means no ``k`` can zero a
+    region the source is dark in. This also matches the amplitude space
+    ``estimate_crosstalk_k`` fits in (peak minus local background).
+
+    ``source`` may be one frame (Y, X) or a stack (N, Y, X); the median
+    is taken per frame. Shapes must match.
+    """
     tgt = np.asarray(target, dtype=np.float32)
     src = np.asarray(source, dtype=np.float32)
     if tgt.shape != src.shape:
@@ -209,4 +256,6 @@ def subtract_crosstalk(
         )
     if not k:
         return tgt.copy()
-    return np.clip(tgt - np.float32(k) * src, 0.0, None)
+    src_bg = np.median(src, axis=(-2, -1), keepdims=True).astype(np.float32)
+    ghost = np.clip(src - src_bg, 0.0, None)
+    return np.clip(tgt - np.float32(k) * ghost, 0.0, None)

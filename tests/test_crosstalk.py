@@ -52,6 +52,41 @@ def test_estimator_recovers_bleed_coefficient():
     assert est.k == pytest.approx(0.08, abs=0.02)
 
 
+def test_estimator_refuses_colocalisation_slope():
+    """Colocalising reporters (target tracks source at ~90% of its
+    amplitude) are indistinguishable from bleed by slope quality alone —
+    the estimator must refuse rather than wipe the target channel.
+    Production case: DnaN-mCherry/ImuB-eGFP fitted slope ≥ 1.0 with
+    ρ = 0.63; subtraction at that k zeroed 83% of a FOV and foci
+    detection ground for hours on the clipped residue."""
+    red, green = _synthetic_pair(k_true=0.9)
+    est = estimate_crosstalk_k(red, green)
+    assert est.mode == "implausible-slope"
+    assert est.k == 0.0
+    assert est.fitted_slope == pytest.approx(0.9, abs=0.1)
+    # k = 0 → subtraction is a no-op; the channel survives.
+    corrected = subtract_crosstalk(green, red, est.k)
+    np.testing.assert_allclose(corrected, green)
+
+
+def test_subtraction_never_zeroes_source_dark_regions():
+    """Even a runaway k must not annihilate the target where the source
+    has no signal: k scales the source's above-median signal, so the
+    target's own background/offset survives."""
+    rng = np.random.default_rng(5)
+    green = (60.0 + rng.normal(0, 3, (128, 128))).astype(np.float32)
+    red = np.full((128, 128), 100.0, dtype=np.float32)
+    _add_spot(red, 64, 64, 2000)
+
+    corrected = subtract_crosstalk(green, red, k=1.0)
+    # Away from the red spot the green background is untouched.
+    far = corrected[:40, :40]
+    assert float((far == 0).mean()) < 0.01
+    assert float(np.median(far)) == pytest.approx(60.0, abs=2.0)
+    # At the red spot, k=1 removes up to the spot's amplitude.
+    assert corrected[64, 64] == 0.0
+
+
 def test_estimator_insufficient_sites_is_safe_noop():
     rng = np.random.default_rng(1)
     flat = rng.normal(100, 3, (2, 128, 128)).astype(np.float32)
@@ -158,7 +193,11 @@ def test_fluor_norm_stage_applies_fixed_k_and_writes_sidecars(tmp_path: Path):
 
     from mycomorph.core.hyperstack import load_hyperstack
     got, _ = load_hyperstack(out)
-    expected_green = np.clip(data[:, 2] - 0.1 * data[:, 1], 0, None)
+    # k scales the source's above-median signal, not the raw frame —
+    # the camera offset belongs to the target and must survive.
+    red_bg = np.median(data[:, 1], axis=(-2, -1), keepdims=True)
+    ghost = np.clip(data[:, 1] - red_bg, 0, None)
+    expected_green = np.clip(data[:, 2] - 0.1 * ghost, 0, None)
     np.testing.assert_allclose(got[:, 2], expected_green, atol=1e-3)
     # Red and mask channels pass through unchanged.
     np.testing.assert_allclose(got[:, 1], data[:, 1], atol=1e-3)
@@ -211,7 +250,9 @@ def test_fluor_norm_stage_reuse_honours_crosstalk_options(tmp_path: Path):
     assert not any("Reused" in m for m in messages)
     from mycomorph.core.hyperstack import load_hyperstack
     got, _ = load_hyperstack(outputs[0])
-    expected_green = np.clip(data[:, 2] - 0.2 * data[:, 1], 0, None)
+    red_bg = np.median(data[:, 1], axis=(-2, -1), keepdims=True)
+    ghost = np.clip(data[:, 1] - red_bg, 0, None)
+    expected_green = np.clip(data[:, 2] - 0.2 * ghost, 0, None)
     np.testing.assert_allclose(got[:, 2], expected_green, atol=1e-3)
 
 

@@ -911,9 +911,14 @@ class FluorescentNormalisationPanel(QWidget):
         self.crosstalk_k_auto.setToolTip(
             "Fit k per well from bright source-channel peaks: robust "
             "(Theil–Sen) slope of target vs source local amplitude. "
-            "Genuinely colocalised foci are outliers and don't bias "
-            "the median slope. The fitted k is logged and written to "
-            "a __crosstalk.json sidecar next to each output TIFF."
+            "A minority of genuinely colocalised foci don't bias the "
+            "median slope, but when the reporters colocalise at most "
+            "peaks (e.g. under DNA damage) the slope measures biology, "
+            "not bleed: slopes above 0.25 are refused and nothing is "
+            "subtracted. For such wells, measure k on uninduced or "
+            "single-label wells and set it here. The fitted k is "
+            "logged and written to a __crosstalk.json sidecar next to "
+            "each output TIFF."
         )
         xt_k_row = QHBoxLayout()
         xt_k_row.setContentsMargins(0, 0, 0, 0)

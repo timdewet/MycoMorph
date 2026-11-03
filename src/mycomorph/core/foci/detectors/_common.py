@@ -114,6 +114,29 @@ def _gaussian_2d(coords, amp, x0, y0, sigma, offset):
     return offset + amp * np.exp(-(((x - x0) ** 2 + (y - y0) ** 2) / (2.0 * sigma * sigma)))
 
 
+def _gaussian_2d_jac(coords, amp, x0, y0, sigma, offset):
+    """Analytic Jacobian of ``_gaussian_2d``, shape (m, 5).
+
+    Finite-difference Jacobians cost n+1 model evaluations per
+    optimiser iteration; with tens of thousands of per-candidate fits
+    per FOV that overhead dominates detection time.
+    """
+    x, y = coords
+    dx = x - x0
+    dy = y - y0
+    s2 = sigma * sigma
+    d2 = dx * dx + dy * dy
+    e = np.exp(-d2 / (2.0 * s2))
+    ae = amp * e
+    return np.stack([
+        e,                        # ∂/∂amp
+        ae * dx / s2,             # ∂/∂x0
+        ae * dy / s2,             # ∂/∂y0
+        ae * d2 / (s2 * sigma),   # ∂/∂sigma
+        np.ones_like(e),          # ∂/∂offset
+    ], axis=-1)
+
+
 def refine_gaussian_peak(
     image: np.ndarray,
     y_peak: float,
@@ -149,12 +172,21 @@ def refine_gaussian_peak(
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", OptimizeWarning)
+            # Degenerate patches overflow the (unused) covariance step;
+            # don't let them flood the worker log.
+            warnings.simplefilter("ignore", RuntimeWarning)
+            # Analytic Jacobian + loose tolerances: the caller only
+            # needs the peak to ~0.1 px and sigma to ~10%, and a fit
+            # that hasn't converged by then is noise anyway.
             popt, _ = curve_fit(
                 _gaussian_2d,
                 (xx.ravel(), yy.ravel()),
                 patch.ravel(),
                 p0=p0,
+                jac=_gaussian_2d_jac,
                 maxfev=200,
+                ftol=1e-4,
+                xtol=1e-4,
             )
     except Exception:  # noqa: BLE001
         return float(y_peak), float(x_peak), float(init_sigma), float(patch.max())
