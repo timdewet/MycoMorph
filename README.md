@@ -156,7 +156,7 @@ Files are named `<condition>__<reporter>__<mutant_or_drug>__R<replica>`. A typic
 │   ├── qc_plots/
 │   └── embeddings/                   # cnn_embeddings.parquet, best_model.pth, final_model.pth
 ├── 04b_fluorescent_normalisation/    # float32 TIFFs, __crosstalk.json
-├── 04c_foci_detection/               # <stem>.parquet, one row per focus
+├── 04c_foci_detection/               # <stem>.parquet, one row per focus; cell_id matches 04_features within each FOV
 ├── 04d_foci_filtered/                # written by "Save filter…"
 ├── 05_foci_filters/                  # threshold JSONs for each filtered set
 └── 05_foci_labels/                   # written by "Label foci…"
