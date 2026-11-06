@@ -23,8 +23,9 @@ across exposure times and channels.
 
 Algorithm:
 
-1. Percentile-normalise, then lightly Gaussian-smooth (σ = ``min_sigma/2``)
-   to suppress single-pixel salt noise.
+1. Percentile-normalise (1st → 0, 99.9th → 1, with the top left
+   unclipped), then lightly Gaussian-smooth (σ = ``min_sigma/2``) to
+   suppress single-pixel salt noise.
 2. ``h = max(hmax_h_mad * robust_sigma_mad(smoothed), threshold)`` — the
    ``opts.threshold`` floor keeps a degenerate (near-flat) channel from
    collapsing h to ~0 and detecting every noise ripple.
@@ -72,7 +73,11 @@ class HMaxDetector:
         from skimage.morphology import h_maxima
 
         opts = opts or DetectorOpts()
-        norm = normalise_image(image)
+        # Leave the top unclipped: in a frame with no bright foci the
+        # 99.9th percentile sits on dim in-cell signal, so capping at 1
+        # flattens every focus above it while h (in MAD units) can exceed
+        # 1 — nothing could pass and the frame went blind.
+        norm = normalise_image(image, clip_top=False)
         if norm.size == 0 or float(norm.max()) <= 0.0:
             return []
 

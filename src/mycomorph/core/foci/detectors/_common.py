@@ -21,12 +21,21 @@ import numpy as np
 from .._types import Focus
 
 
-def normalise_image(image: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.9) -> np.ndarray:
+def normalise_image(
+    image: np.ndarray,
+    p_lo: float = 1.0,
+    p_hi: float = 99.9,
+    *,
+    clip_top: bool = True,
+) -> np.ndarray:
     """Robust percentile rescale to [0, 1] in float32.
 
     Uses the same recipe as most foci detectors expect — the integer
     image scale (uint16 in MycoMorph) gets mapped so the ``threshold``
     parameter is interpretable as "fraction of dynamic range".
+
+    ``clip_top=False`` keeps values above the ``p_hi`` percentile (they
+    map above 1) instead of capping them at 1; the floor at 0 stays.
     """
     img = np.asarray(image, dtype=np.float32)
     if img.size == 0:
@@ -35,7 +44,7 @@ def normalise_image(image: np.ndarray, p_lo: float = 1.0, p_hi: float = 99.9) ->
     if hi <= lo:
         return np.zeros_like(img)
     out = (img - lo) / (hi - lo)
-    return np.clip(out, 0.0, 1.0)
+    return np.clip(out, 0.0, 1.0 if clip_top else None)
 
 
 def greedy_nms_indices(

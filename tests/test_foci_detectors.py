@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
 from mycomorph.core.foci import DetectorOpts, Focus
 from mycomorph.core.foci.decompose import split_merged_foci
@@ -106,6 +107,82 @@ def test_hmax_bounded_on_clipped_speckle_field():
     assert len(foci) < 0.05 * n_speck, (
         f"speckle field exploded: {len(foci)} detections from "
         f"{n_speck} noise spikes"
+    )
+
+
+DIM_SPOTS = [
+    (26.0, 28.0, 40.0, 1.4),
+    (86.0, 76.0, 40.0, 1.4),
+    (146.0, 124.0, 40.0, 1.4),
+    (206.0, 172.0, 40.0, 1.4),
+]
+
+
+def _dim_cells_frame() -> np.ndarray:
+    """An uninduced-like frame: dim diffuse cells, a few modest foci and
+    nothing bright anywhere else. Only ~70 pixels lie above the 99.9th
+    percentile, so it sits on the foci's shoulders."""
+    img = _render_spots((256, 256), DIM_SPOTS, noise_sigma=3.0, seed=0)
+    for i in range(4):
+        for j in range(5):
+            y0, x0 = 20 + 60 * i, 10 + 48 * j
+            img[y0:y0 + 12, x0:x0 + 36] += 5.0
+    return img
+
+
+def test_hmax_rescale_matches_validated_prototype():
+    """Figure S4 validated hmax with exactly this rescale — keep it bit
+    for bit. The other detectors keep the top capped at 1."""
+    from mycomorph.core.foci.detectors._common import normalise_image
+
+    img = _dim_cells_frame()
+    proto = np.asarray(img, dtype=np.float32)
+    lo, hi = np.percentile(proto, [1.0, 99.9])
+    expected = np.clip((proto - lo) / (hi - lo), 0.0, None)
+
+    got = normalise_image(img, clip_top=False)
+    assert got.dtype == expected.dtype
+    np.testing.assert_array_equal(got, expected)
+    assert got.max() > 1.0
+    assert normalise_image(img).max() == 1.0
+    assert not normalise_image(np.full((8, 8), 7.0), clip_top=False).any()
+
+
+def test_hmax_finds_foci_in_frame_without_bright_foci(monkeypatch):
+    """Capping the rescale at 1 flattened every focus above the 99.9th
+    percentile while h = 10 MAD rose above 1, so frames with no bright
+    foci (uninduced EGFP) came back empty."""
+    import mycomorph.core.foci.detectors.hmax as hmax_mod
+    from mycomorph.core.foci.detectors._common import normalise_image
+
+    img = _dim_cells_frame()
+    opts = DetectorOpts(hmax_h_mad=10.0)
+    foci = REGISTRY["hmax"]().detect(img, None, opts)
+    dists = _distances_to_truth(foci, DIM_SPOTS)
+    assert max(dists) < 1.2, f"missed a spot: distances {dists}"
+    assert len(foci) <= len(DIM_SPOTS) + 2
+
+    # The old, top-capped rescale is blind on the same frame.
+    monkeypatch.setattr(
+        hmax_mod, "normalise_image", lambda im, **_kw: normalise_image(im),
+    )
+    assert REGISTRY["hmax"]().detect(img, None, opts) == []
+
+
+@pytest.mark.parametrize("scene", ["dim_cells", "bright_spots"])
+@pytest.mark.parametrize("a, b", [(2.5, 300.0), (0.2, -15.0)])
+def test_hmax_detections_unchanged_by_affine_intensity(scene, a, b):
+    img = _dim_cells_frame() if scene == "dim_cells" else _render_spots((120, 120), SPOTS)
+    opts = DetectorOpts(hmax_h_mad=10.0)
+    ref = REGISTRY["hmax"]().detect(img, None, opts)
+    got = REGISTRY["hmax"]().detect(a * img + b, None, opts)
+
+    assert ref and len(got) == len(ref)
+    np.testing.assert_allclose(
+        [(f.y, f.x) for f in got], [(f.y, f.x) for f in ref], atol=1e-3,
+    )
+    np.testing.assert_allclose(
+        [f.snr for f in got], [f.snr for f in ref], rtol=1e-3,
     )
 
 
