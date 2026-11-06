@@ -99,6 +99,12 @@ class LabeledSlider(QWidget):
         if not helper:
             self._helper.hide()
         v.addWidget(self._helper)
+        # Never let a parent layout squeeze the widget below its size hint: in
+        # the Segment panel's form row the spin box and slider collapsed to a
+        # sliver and the helper text overlapped the next row (Figure F1 GUI
+        # capture, 6 November 2026). The wrapped helper label has a tiny
+        # minimum height, so the layout's own minimum is not enough.
+        self._pin_height()
 
     def _steps(self) -> int:
         return max(1, int(round((self._max - self._min) / self._step)))
@@ -136,6 +142,10 @@ class LabeledSlider(QWidget):
     def set_helper(self, text: str) -> None:
         self._helper.setText(text)
         self._helper.setVisible(bool(text))
+        self._pin_height()
+
+    def _pin_height(self) -> None:
+        self.setMinimumHeight(self.sizeHint().height())
 
     def setToolTip(self, text: str) -> None:  # noqa: N802
         super().setToolTip(text)
