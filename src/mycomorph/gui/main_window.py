@@ -30,6 +30,7 @@ from PyQt6.QtWidgets import (
 import mycomorph
 
 from .panels.analysis_panel import AnalysisPanel
+from .features import embeddings_enabled
 from .panels.embeddings_panel import EmbeddingsPanel
 from .panels.features_panel import FeaturesPanel
 from .panels.input_panel import InputMode, InputPanel
@@ -218,6 +219,8 @@ class MainWindow(QMainWindow):
         self.run_panel.runFailedAll.connect(self._on_run_all_failed)
 
         self._build_chrome()
+        if not embeddings_enabled():
+            self._hide_embeddings()
         self._apply_card_shadows()
         self._wire_live_preview()
         self._on_input_mode_changed(self.input_panel.mode)
@@ -229,6 +232,15 @@ class MainWindow(QMainWindow):
         self._update_checker = UpdateChecker(self)
         self._update_checker.updateAvailable.connect(self._on_update_available)
         QTimer.singleShot(2000, self._update_checker.check)
+
+    def _hide_embeddings(self) -> None:
+        """Hide the CNN embeddings page (see ``gui/features.py``). The
+        panel still exists, so saved settings round-trip untouched; the
+        Run panel and Input panel hide their own parts of the stage."""
+        self._sidebar.set_visible("embeddings", False)
+        i = self._sidebar.index_of("embeddings")
+        if 0 <= i < self._stack.count():
+            self._stack.widget(i).setEnabled(False)
 
     # ------------------------------------------------------------------ live preview
 

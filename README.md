@@ -2,7 +2,7 @@
 
 Bacterial microscopy pipeline and morphological-profiling workbench with a PyQt6 desktop GUI.
 
-MycoMorph takes raw Zeiss CZI plates or TIFF images from focus picking, through Cellpose-SAM segmentation and cell-quality filtering, to per-cell morphology features, fluorescent foci detection, and CNN embeddings. It also compares morphological profiles across experiments. It was built around *M. tuberculosis* imaging: the bundled cell-quality classifier was trained on Mtb cells. The other stages are not species-specific.
+MycoMorph takes raw Zeiss CZI plates or TIFF images from focus picking, through Cellpose-SAM segmentation and cell-quality filtering, to per-cell morphology features and fluorescent foci detection. The Analysis page compares morphological profiles across experiments. It was built around *M. tuberculosis* imaging: the bundled cell-quality classifier was trained on Mtb cells. The other stages are not species-specific.
 
 Everything runs from one desktop app. It includes **ModelPrep**, the labeller and trainer for the cell-quality classifier: you label cells from a run's crops, train a classifier, and use it on the Classify page. The same functionality is also available as Python packages (`mycomorph.core`, `mycomorph.modelprep`) and command-line tools.
 
@@ -103,14 +103,12 @@ Launch with `mycomorph` (or `python -m mycomorph`). ModelPrep has its own window
    - **Single plate**: one or more multi-position CZIs with Zeiss well metadata. Extra CZIs must have the same channels as the first.
    - **Single file**: one CZI or TIFF, labelled with inline fields.
    - **Multiple files**: a table of CZIs and TIFFs. You can add a folder recursively, remap paths that came from another machine, and save or load the table as CSV. Rows with identical labels are pooled into one sample.
-   - **Train embeddings**: skips image processing and trains a CNN on crops already in the morphology library.
 
    TIFF input can be OME-TIFF, ImageJ hyperstacks, or multi-series files. The phase channel is guessed from the channel names, and you can override it.
 2. **Plate layout** (Single plate mode only). Select wells by clicking or dragging, fill in *Condition*, *Reporter*, *Mutant / drug*, and *Replica*, then **Apply to selection**. Only wells with a Condition are processed. You can import, export, and validate the layout as CSV. A `plate_layout.csv` already in the output folder loads automatically.
 3. **Image Processing**. These pages hold the options for Focus, Segment & Classify, Features, Fluorescent Normalisation, and Foci Detection. Each has a **live preview**: pick a sample and field of view to see the current settings applied. Segmentation runs inside a draggable ROI, and cell outlines are coloured by fate: kept, edge, debris, or rejected. On the foci pages you can drag histogram thresholds to filter detected foci without re-running detection.
-4. **Embeddings**. Options for the CNN embedding stage.
-5. **Run**. Tick the stages to run and press **Run pipeline**. Progress and the log appear here. **Reuse existing outputs** is on by default (see [Re-runs and provenance](#re-runs-and-provenance)).
-6. **Analysis**. Explore the results (see [Analysis](#analysis-and-the-morphology-library)).
+4. **Run**. Tick the stages to run and press **Run pipeline**. Progress and the log appear here. **Reuse existing outputs** is on by default (see [Re-runs and provenance](#re-runs-and-provenance)).
+5. **Analysis**. Explore the results (see [Analysis](#analysis-and-the-morphology-library)).
 
 For single-plane images, untick **Focus** and keep **Split**. Z-stacks need Focus.
 
@@ -125,7 +123,6 @@ For single-plane images, untick **Focus** and keep **Split**. Z-stacks need Focu
 | Features | off | Measures each cell's morphology (MicrobeJ-style shape descriptors plus sub-pixel midline measurements) and intensity, and makes QC plots. It also saves cell crops to HDF5 (on by default), and can optionally register the run in the [morphology library](#analysis-and-the-morphology-library). |
 | Fluorescent Normalisation | off | Prepares fluorescence channels for foci detection with one of: none, top-hat, Gaussian low-pass, Richardson–Lucy, BM3D, BM3D + deconvolution, or BaSiC. Can also subtract spectral crosstalk. Foci Detection reads its output, so run it first; the `none` method passes images through unchanged. |
 | Foci Detection | off | Finds fluorescent foci in each cell using one of seven detectors: DoG, LoG, trackpy, h-maxima, wavelet (default), radial symmetry, or bacteroidal. Options include an SNR floor, sub-pixel refinement, and splitting merged foci. **Save filter…** and **Label foci…** keep threshold choices and manual labels alongside the run. |
-| Embeddings | off | Trains or fine-tunes a CNN (ResNet-18 or a lightweight network, optionally with supervised-contrastive loss) on the Features crops and writes a per-cell embedding. Requires Features with HDF5 crops. |
 
 ### Re-runs and provenance
 
@@ -153,8 +150,7 @@ Files are named `<condition>__<reporter>__<mutant_or_drug>__R<replica>`. A typic
 │   ├── <stem>__crops.h5
 │   ├── all_features.parquet / .csv   # all samples combined
 │   ├── all_crops.h5
-│   ├── qc_plots/
-│   └── embeddings/                   # cnn_embeddings.parquet, best_model.pth, final_model.pth
+│   └── qc_plots/
 ├── 04b_fluorescent_normalisation/    # float32 TIFFs, __crosstalk.json
 ├── 04c_foci_detection/               # <stem>.parquet, one row per focus
 ├── 04d_foci_filtered/                # written by "Save filter…"
@@ -163,8 +159,6 @@ Files are named `<condition>__<reporter>__<mutant_or_drug>__R<replica>`. A typic
 ```
 
 Each output file from Segment onwards also has its own `.provenance.json` sidecar (not shown above).
-
-In **Train embeddings** mode, results go to `<output folder>/library_embeddings/` instead.
 
 ## Models
 
@@ -240,10 +234,10 @@ Trained runs are saved in `~/.modelprep/models/`: a CNN run in `<name>_<date>/` 
 The **morphology library** collects per-cell features and crops from many runs so that experiments can be compared. It lives at `~/.mycomorph/morphology_library/`, and you can change the folder in the app. Older `~/.mycoprep/` or `feature_library` locations are moved there automatically.
 
 - To add a run, tick library registration on the Features page, or use `mycomorph-cli library add`.
-- The library stores a copy of each run's features, but only a *path* to its `all_crops.h5`. Moving a run folder breaks embedding training from it. `scripts/relink_library.py` repairs the paths.
-- **Morphology Library Browser** (opened from the Features, Embeddings, and Analysis pages) lists the registered runs. You can filter, import, edit, and remove them there.
+- The library stores a copy of each run's features, but only a *path* to its `all_crops.h5`. Moving a run folder breaks anything that reads its crops. `scripts/relink_library.py` repairs the paths.
+- **Morphology Library Browser** (opened from the Features and Analysis pages) lists the registered runs. You can filter, import, edit, and remove them there.
 
-The **Analysis** page plots a UMAP of per-condition profiles. Profiles are built from either features or CNN embeddings, and summarised either as means or by optimal-transport distance. On this page you can:
+The **Analysis** page plots a UMAP of per-condition profiles. Profiles are built from the per-cell features and summarised either as means or by optimal-transport distance. On this page you can:
 
 - colour points by cluster, run, condition, reporter, replica, pathway, or any feature;
 - choose a pooled or per-run baseline;
@@ -271,8 +265,7 @@ Each command takes `--help`. `mycomorph-cli label`, `review`, and `train` have m
 `scripts/` holds maintenance tools for the morphology library, each run as `python scripts/<name>.py --help`:
 
 - `relink_library.py`: rewrite crop paths after moving the library to another machine.
-- `drop_model.py`: delete a trained embedding model so it is retrained.
-- `inspect_embeddings.py`: report how much of each run and condition each architecture's embeddings cover.
+- `drop_model.py` and `inspect_embeddings.py`: maintain the CNN embedding models (see [Hidden: CNN embeddings](#hidden-cnn-embeddings)).
 
 ## Configuration
 
@@ -280,11 +273,16 @@ Each command takes `--help`. `mycomorph-cli label`, `review`, and `train` have m
 | --- | --- |
 | `MYCOMORPH_FOCI_WORKERS` | Number of worker processes for batch foci detection |
 | `MYCOMORPH_CROP_CACHE_BYTES` | RAM cache for crops during embedding training (default 12 GB) |
+| `MYCOMORPH_EMBEDDINGS` | Set to `1` to show the hidden CNN embeddings stage, page and views (see [Hidden: CNN embeddings](#hidden-cnn-embeddings)) |
 | `MYCOMORPH_OT_JOBS` | Parallel jobs for optimal-transport precompute |
 | `MYCOMORPH_SMOKE_TEST` | Set to `1` to make the GUI (or ModelPrep, with `--modelprep`) quit shortly after opening and print which window opened (used by CI) |
 | `MODELPREP_GUI_TESTS` | Set to `1` to run ModelPrep's GUI tests, which need an offscreen Qt (CI sets it) |
 
 ## Development
+
+### Hidden: CNN embeddings
+
+MycoMorph can also train a CNN (an autoencoder or a supervised-contrastive ResNet-18) on the Features crops and write a per-cell embedding, and the Analysis page can compare conditions on those embeddings. This is not part of the current release: the Embeddings page and stage, the **Train embeddings** input mode and the CNN views on the Analysis page are hidden unless the environment variable `MYCOMORPH_EMBEDDINGS=1` is set (`src/mycomorph/gui/features.py`). The code stays in `core/autoencoder/` and `gui/panels/embeddings_panel.py`, and `mycomorph-cli library` still accepts its embedding options.
 
 ```
 src/mycomorph/
@@ -293,7 +291,7 @@ src/mycomorph/
 │   ├── focus/            # focus picking + mycomorph-focus CLI
 │   ├── extract/          # per-cell features, crops, QC plots, OT analysis, morphology library
 │   ├── foci/             # normalisation, crosstalk, foci detectors
-│   ├── autoencoder/      # CNN embedding models and training
+│   ├── autoencoder/      # CNN embedding models and training (hidden in the app, see above)
 │   ├── models/           # bundled classifier weights (package data)
 │   └── provenance.py     # output signatures and software versions
 ├── gui/

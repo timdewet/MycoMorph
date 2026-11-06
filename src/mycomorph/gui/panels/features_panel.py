@@ -1,8 +1,8 @@
 """Per-cell feature extraction (Phase A) panel.
 
 Phase A surface: a compact form with two grouped sections — per-cell features
-(regionprops + per-channel intensity) and single-cell HDF5 crops for embedding
-work. Phase B will add midline-derived features (length_um, demograph, polar
+(regionprops + per-channel intensity) and single-cell HDF5 crops (ModelPrep's
+input). Phase B will add midline-derived features (length_um, demograph, polar
 bias) once MOMIA is vendored; the panel is built to make those additions
 straightforward.
 """
@@ -169,13 +169,13 @@ class FeaturesPanel(QWidget):
         root.addWidget(feat_box)
 
         # ── Single-cell HDF5 crops ────────────────────────────────
-        crops_box = QGroupBox("Single-cell crops (HDF5, for embedding work)")
+        crops_box = QGroupBox("Single-cell crops (HDF5)")
         crops_form = QFormLayout(crops_box)
         crops_form.setContentsMargins(tokens.S4, tokens.S5, tokens.S4, tokens.S4)
         crops_form.setHorizontalSpacing(tokens.S4)
         crops_form.setVerticalSpacing(tokens.S3)
 
-        self.save_crops = QCheckBox("Save HDF5 crops (drops into MorphologicalProfiling_Mtb pipeline)")
+        self.save_crops = QCheckBox("Save HDF5 crops (ModelPrep labels and trains the quality classifier from them)")
         self.save_crops.setChecked(True)
         crops_form.addRow("", self.save_crops)
 
@@ -185,7 +185,7 @@ class FeaturesPanel(QWidget):
         self.crop_size.setValue(96)
         crops_form.addRow("Crop size (px):", _with_helper(
             self.crop_size,
-            "Output crop side length. Existing SupCon training pipeline uses 128.",
+            "Output crop side length. The bundled quality classifiers were trained on 64 px (Mtb) and 128 px (M. smegmatis) crops.",
         ))
 
         self.crop_pad = QSpinBox()

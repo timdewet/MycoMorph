@@ -41,6 +41,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..features import embeddings_enabled
 from ..ui import tokens
 
 SPECIES_OPTIONS = ["M. tuberculosis", "M. smegmatis"]
@@ -526,16 +527,18 @@ class AnalysisPanel(QWidget):
         self._view_mode = QComboBox()
         self._view_mode.addItem("Feature profiles (mean)", userData="features")
         self._view_mode.addItem("Feature profiles (OT)", userData="features_ot")
-        self._view_mode.addItem("CNN embeddings (mean)", userData="embeddings")
-        self._view_mode.addItem("CNN embeddings (OT)", userData="embeddings_ot")
+        if embeddings_enabled():   # hidden in this release (gui/features.py)
+            self._view_mode.addItem("CNN embeddings (mean)", userData="embeddings")
+            self._view_mode.addItem("CNN embeddings (OT)", userData="embeddings_ot")
         self._view_mode.setToolTip(
             "Mean views: UMAP of per-condition mean profiles (cosine sim).\n"
             "OT views: UMAP of pairwise Sinkhorn (Optimal Transport) "
             "distances between full per-condition cell distributions — "
             "captures distribution shape, not just the mean. Reveals "
             "heterogeneous knockdowns the mean view hides.\n\n"
-            "Feature views read S-score morphological features.\n"
-            "CNN embedding views read 512-d learned encoder features."
+            "Feature views read S-score morphological features."
+            + ("\nCNN embedding views read 512-d learned encoder features."
+               if embeddings_enabled() else "")
         )
         self._view_mode.currentIndexChanged.connect(
             lambda _i: self._on_view_mode_changed()
@@ -755,6 +758,7 @@ class AnalysisPanel(QWidget):
             "q-values."
         )
         self._perm_btn.clicked.connect(self._export_permutation_test)
+        self._perm_btn.setVisible(embeddings_enabled())   # CNN embeddings only
         colour_row.addWidget(self._perm_btn)
 
         colour_row.addStretch(1)
