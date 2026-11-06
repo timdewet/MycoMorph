@@ -807,8 +807,9 @@ class FluorescentNormalisationPanel(QWidget):
         self.method = QComboBox()
         for key in NORMALISER_REGISTRY:
             self.method.addItem(key)
-        # Default to top-hat — fast and effective for most fluor channels.
-        idx = self.method.findText("tophat")
+        # Same default as FluorescentNormalisationOpts: pass-through, the
+        # setting validated with the default hmax detector.
+        idx = self.method.findText(FluorescentNormalisationOpts().method)
         if idx >= 0:
             self.method.setCurrentIndex(idx)
         form.addRow("Method:", _with_helper(
@@ -1187,11 +1188,12 @@ class FociDetectionPanel(QWidget):
         self.detectors = _DetectorKeySelect()
         det_layout.addWidget(self.detectors)
         cap = QLabel(
-            "Pick one detector. `wavelet` is a strong default for dim signal; "
-            "`dog` / `log` are faster baselines; `hmax` mirrors Fiji's Find "
-            "Maxima prominence; `radial_symmetry` gives the best sub-pixel "
-            "centres on dim round foci. Normalisation has already been "
-            "applied upstream by the Fluorescent Normalisation stage."
+            "Pick one detector. `hmax` (the default) mirrors Fiji's Find "
+            "Maxima prominence and scored best against hand-clicked foci; "
+            "`wavelet` suits dim signal; `dog` / `log` are faster baselines; "
+            "`radial_symmetry` gives the best sub-pixel centres on dim round "
+            "foci. Normalisation has already been applied upstream by the "
+            "Fluorescent Normalisation stage."
         )
         cap.setObjectName("caption")
         cap.setStyleSheet(
@@ -1487,7 +1489,7 @@ class FociDetectionPanel(QWidget):
         # Seed with the same default as FociDetectionOpts — done BEFORE
         # wiring the dirty-tracking signals below so the initial
         # selection doesn't light up Apply on launch.
-        self.detectors.set_selected_key("wavelet")
+        self.detectors.set_selected_key(FociDetectionOpts().detector_keys[0])
         self._refresh_detector_params()
 
         # Detector-options changes are NOT auto-applied — re-detection is
@@ -1861,9 +1863,9 @@ class FociDetectionPanel(QWidget):
         try:
             # Accept both ``detector_key`` (new) and ``detector_keys``
             # (legacy QSettings from before the single-select switch).
-            # Fall back to ``wavelet`` if the saved key is no longer in
-            # the visible list (e.g. saved during the bundled-normaliser
-            # era when ``decon_bm3d_wavelet`` was the default).
+            # Fall back to the default detector if the saved key is no
+            # longer in the visible list (e.g. saved during the bundled-
+            # normaliser era when ``decon_bm3d_wavelet`` was the default).
             saved_key: str | None = None
             if "detector_key" in s:
                 saved_key = s.get("detector_key") or None
@@ -1871,7 +1873,7 @@ class FociDetectionPanel(QWidget):
                 keys = list(s["detector_keys"] or [])
                 saved_key = keys[0] if keys else None
             if saved_key is not None and saved_key not in self.detectors._key_rows:
-                saved_key = "wavelet"
+                saved_key = FociDetectionOpts().detector_keys[0]
             if saved_key is not None or "detector_key" in s or "detector_keys" in s:
                 self.detectors.set_selected_key(saved_key)
             if "min_sigma" in s:

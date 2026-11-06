@@ -17,8 +17,9 @@ class FluorescentNormalisationOpts:
     """Configuration for the Fluorescent Normalisation pipeline stage."""
 
     # Key in NORMALISER_REGISTRY: "none", "tophat", "gaussian_lp",
-    # "richardson_lucy", "bm3d", "decon_bm3d", "basic".
-    method: str = "tophat"
+    # "richardson_lucy", "bm3d", "decon_bm3d", "basic". "none" (pass
+    # through) is the setting validated with the default hmax detector.
+    method: str = "none"
 
     # NormaliserOpts knobs the panel will eventually expose. The stage
     # builds a NormaliserOpts from these at run time.
@@ -46,11 +47,11 @@ class FociDetectionOpts:
     """Configuration for the Foci Detection pipeline stage."""
 
     # REGISTRY key for the detector. The GUI restricts this to one key
-    # at a time (``wavelet`` by default — a strong baseline for dim
-    # signal after the Fluorescent Normalisation stage). The shape stays
-    # ``list[str]`` for forward compatibility with multi-detector runs
-    # driven from CLI / scripts.
-    detector_keys: list[str] = field(default_factory=lambda: ["wavelet"])
+    # at a time (``hmax`` by default — the setting validated against
+    # hand-clicked foci in Figure S4, with the ``DetectorOpts`` defaults
+    # and no normaliser). The shape stays ``list[str]`` for forward
+    # compatibility with multi-detector runs driven from CLI / scripts.
+    detector_keys: list[str] = field(default_factory=lambda: ["hmax"])
 
     # Shared detector parameters; individual detectors ignore fields that
     # don't apply to them.

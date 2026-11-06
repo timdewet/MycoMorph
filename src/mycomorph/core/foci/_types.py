@@ -37,13 +37,17 @@ class DetectorOpts:
     Sigma ranges are in **pixels**. For DnaN-mCherry / ImuB-GFP on a
     typical widefield Mtb image (~0.07 µm/px after binning, diffraction-
     limited focus ≈ 250 nm), expect sigma_psf ≈ 1.3–1.8 px.
+
+    The defaults are the setting validated against hand-clicked foci in
+    Figure S4: the ``hmax`` detector at h = 10 MAD, SNR ≥ 3.5 and
+    merged-foci splitting, on un-normalised images.
     """
     min_sigma: float = 1.0
     max_sigma: float = 3.5
     num_sigma: int = 6          # LoG only
     threshold: float = 0.02     # relative intensity threshold (0..1 of normalised image)
     overlap: float = 0.5        # skimage blob overlap-merge fraction
-    snr_min: float = 3.0        # discard foci whose peak/local-bg-std falls below this
+    snr_min: float = 3.5        # discard foci whose peak/local-bg-std falls below this
     refine: bool = True         # 2D Gaussian sub-pixel refinement
     refine_window: int = 4      # half-window around peak for Gaussian fit
     # Top-hat preprocessing
@@ -55,13 +59,13 @@ class DetectorOpts:
     wavelet_scales: tuple[int, ...] = (1, 2)    # foci-size scales to keep
     wavelet_threshold_mad: float = 3.0          # per-plane MAD threshold
     # h-maxima (morphological prominence, à la ImageJ "Find Maxima")
-    hmax_h_mad: float = 3.0             # prominence h in robust-noise (MAD σ) units
+    hmax_h_mad: float = 10.0            # prominence h in robust-noise (MAD σ) units
     # Radial symmetry (Parthasarathy 2012) candidate threshold
     rs_threshold_mad: float = 3.0       # candidate peak height above bg, MAD σ units
     # Post-detection two-Gaussian refit that splits merged focus pairs
     # (see mycomorph.core.foci.decompose). Applied by the pipeline stage /
     # live preview, not by the detectors themselves.
-    split_merged: bool = False
+    split_merged: bool = True
     split_min_improvement: float = 0.05  # required ΔR² of 2-Gaussian over 1-Gaussian fit
 
 

@@ -110,6 +110,27 @@ def test_hmax_bounded_on_clipped_speckle_field():
     )
 
 
+def test_defaults_are_the_validated_setting():
+    """Figure S4's best single setting against hand-clicked foci: no
+    normaliser, hmax at h = 10 MAD, SNR ≥ 3.5, merged-foci splitting."""
+    from mycomorph.gui.pipeline.context import (
+        FluorescentNormalisationOpts, FociDetectionOpts,
+    )
+
+    assert FluorescentNormalisationOpts().method == "none"
+    assert FluorescentNormalisationOpts().crosstalk_enabled is False
+    stage = FociDetectionOpts()
+    assert stage.detector_keys == ["hmax"]
+    assert stage.detector_opts == DetectorOpts()
+    d = DetectorOpts()
+    assert (d.hmax_h_mad, d.snr_min, d.split_merged, d.split_min_improvement) == (
+        10.0, 3.5, True, 0.05,
+    )
+    assert (d.min_sigma, d.max_sigma, d.refine, d.refine_window, d.threshold) == (
+        1.0, 3.5, True, 4, 0.02,
+    )
+
+
 DIM_SPOTS = [
     (26.0, 28.0, 40.0, 1.4),
     (86.0, 76.0, 40.0, 1.4),
