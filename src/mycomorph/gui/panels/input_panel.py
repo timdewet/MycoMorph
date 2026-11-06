@@ -43,6 +43,7 @@ from PyQt6.QtWidgets import (
 
 from mycomorph.core.focus import io_source
 
+from ..features import embeddings_enabled
 from ..pipeline.bulk_layout import COLUMNS as BULK_COLS
 from ..pipeline.bulk_layout import BulkLayout
 
@@ -219,6 +220,11 @@ class InputPanel(QWidget):
             b.setCursor(Qt.CursorShape.PointingHandCursor)
             self._mode_group.addButton(b)
             mode_row.addWidget(b)
+        if not embeddings_enabled():
+            # Hidden in this release (gui/features.py); Single plate takes the
+            # right-hand rounded corner of the segmented control.
+            self._radio_train_embeddings.setVisible(False)
+            self._radio_single_plate.setObjectName("segRight")
         self._radio_single_file.setChecked(True)
         mode_row.addStretch(1)
         self._reset_btn = QPushButton("Reset")
@@ -1101,6 +1107,8 @@ class InputPanel(QWidget):
                 target = InputMode(mode_str)
             except ValueError:
                 target = self._mode
+            if target is InputMode.TRAIN_EMBEDDINGS and not embeddings_enabled():
+                target = InputMode.BULK
             radio = {
                 InputMode.SINGLE_FILE:      self._radio_single_file,
                 InputMode.SINGLE_PLATE:     self._radio_single_plate,
