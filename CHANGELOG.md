@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.7.0](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.6.1...mycomorph-v0.7.0) (2026-11-23)
+
+
+### ⚠ BREAKING CHANGES
+
+* runs that rely on the defaults give different 04b and 04c outputs (no top-hat normalisation, hmax instead of wavelet, a higher SNR floor, merged foci split). Saved GUI panel settings are kept.
+
+### Features
+
+* hide the CNN embeddings stage from the app ([7b9608b](https://github.com/timdewet/MycoMorph/commit/7b9608bda0aa0e1a3f31262bb49e026f3d2fec83))
+* hide the CNN embeddings stage from the app ([ec7b30c](https://github.com/timdewet/MycoMorph/commit/ec7b30ca5a2ba55217b79f9721be7b84c8a9a1fd))
+* make the Figure S4 foci setting the default ([1eb31c2](https://github.com/timdewet/MycoMorph/commit/1eb31c22e28c846d6425f947d5a938cb2b1ac0b9))
+
+
+### Bug Fixes
+
+* **classify:** read decision_threshold from sibling preset JSON sidecars ([677a928](https://github.com/timdewet/MycoMorph/commit/677a9286e006ae30f615e5fcd7ff0320e09b5121))
+* give foci the Features cell ids and keep touching cells apart ([59abfdd](https://github.com/timdewet/MycoMorph/commit/59abfdd5dafd099a8665eb671ea642cbfa460188))
+* **gui:** stop LabeledSlider collapsing in the Segment panel ([d6323bd](https://github.com/timdewet/MycoMorph/commit/d6323bdd3dafdba064887678b45be60488e2308d))
+* **gui:** stop LabeledSlider collapsing in the Segment panel ([a0e1e7f](https://github.com/timdewet/MycoMorph/commit/a0e1e7f6407ebb2487a396ef4b7e6435b8b904ab))
+* **gui:** style slider grooves, prevent helper clipping, widen sidebar ([5431634](https://github.com/timdewet/MycoMorph/commit/5431634fa5c26b4ad8e837f355561696f058aa19))
+* stop hmax going blind in frames with no bright foci ([2f46e66](https://github.com/timdewet/MycoMorph/commit/2f46e661e1bfd7bd5742f0d37d7f55873d9759d1))
+
 ## [0.6.1](https://github.com/timdewet/MycoMorph/compare/mycomorph-v0.6.0...mycomorph-v0.6.1) (2026-11-03)
 
 
