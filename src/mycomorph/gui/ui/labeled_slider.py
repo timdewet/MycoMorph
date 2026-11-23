@@ -144,8 +144,27 @@ class LabeledSlider(QWidget):
         self._helper.setVisible(bool(text))
         self._pin_height()
 
-    def _pin_height(self) -> None:
-        self.setMinimumHeight(self.sizeHint().height())
+    def _pin_height(self, width: Optional[int] = None) -> None:
+        w = width if width and width > 0 else self.width()
+        v = self.layout()
+        spacing = v.spacing() if v is not None else tokens.S1
+        head_h = max(self._label.sizeHint().height(), self._spin.sizeHint().height())
+        slider_h = max(self._slider.sizeHint().height(), 20)
+        total = head_h + spacing + slider_h
+        if self._helper.isVisible():
+            helper_h = (
+                self._helper.heightForWidth(w)
+                if w > 40 and self._helper.hasHeightForWidth()
+                else self._helper.sizeHint().height()
+            )
+            total += spacing + max(helper_h, self._helper.sizeHint().height()) + 6
+        target = max(total, self.sizeHint().height())
+        if target != self.minimumHeight():
+            self.setMinimumHeight(target)
+
+    def resizeEvent(self, event) -> None:  # noqa: N802
+        super().resizeEvent(event)
+        self._pin_height(event.size().width())
 
     def setToolTip(self, text: str) -> None:  # noqa: N802
         super().setToolTip(text)

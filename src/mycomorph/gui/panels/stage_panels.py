@@ -507,11 +507,11 @@ class ClassifyPanel(QWidget):
         form.addRow(_conf_holder)
         _thr_holder = QWidget()
         _thr_l = _QVB(_thr_holder)
-        _thr_l.setContentsMargins(0, 0, 0, 0)
+        _thr_l.setContentsMargins(0, tokens.S1, 0, 0)
         _thr_l.setSpacing(2)
         _thr_l.addWidget(self.use_model_threshold)
         _thr_l.addWidget(self._model_threshold_note)
-        form.addRow("", _thr_holder)
+        form.addRow(_thr_holder)
         root.addWidget(opt_box)
 
         # Pop-out buttons grouped in a card: model details and the

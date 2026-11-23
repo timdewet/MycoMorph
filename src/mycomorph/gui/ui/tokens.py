@@ -46,7 +46,7 @@ FW_BOLD = 700
 
 
 # ── Sidebar / chrome geometry ───────────────────────────────────────────────
-SIDEBAR_WIDTH = 224
+SIDEBAR_WIDTH = 252
 HEADER_HEIGHT = 72
 
 
