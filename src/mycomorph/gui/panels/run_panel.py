@@ -23,6 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
+from ..features import embeddings_enabled
 from ..ui import icons, tokens
 from ..ui.stepper import StepState, Stepper
 from ..widgets.log_view import LogView
@@ -152,6 +153,11 @@ class RunPanel(QWidget):
         self._features_save_crops_enabled: bool = True
 
         self._build_ui()
+        if not embeddings_enabled():
+            # Hidden in this release (gui/features.py): never ticked, never shown.
+            self.checks["Embeddings"].setChecked(False)
+            self.checks["Embeddings"].setVisible(False)
+            self.stepper.set_visible("Embeddings", False)
         self._enforce_features_dep()
         self._refresh_run_enable()
 
@@ -416,6 +422,8 @@ class RunPanel(QWidget):
             return
         enables = s.get("stage_enables") or {}
         for name, cb in self.checks.items():
+            if name == "Embeddings" and not embeddings_enabled():
+                continue   # stays off while the stage is hidden
             if name in enables:
                 cb.setChecked(bool(enables[name]))
         if "reuse_existing" in s:
@@ -500,14 +508,17 @@ class RunPanel(QWidget):
         else:
             prior = getattr(self, "_pre_train_enables", None)
             for name, cb in self.checks.items():
-                cb.setVisible(True)
+                # The hidden Embeddings stage (gui/features.py) stays hidden
+                # and off whatever mode the Input panel leaves.
+                shown = name != "Embeddings" or embeddings_enabled()
+                cb.setVisible(shown)
                 cb.setEnabled(True)
                 if prior is not None and name in prior:
-                    cb.setChecked(prior[name])
+                    cb.setChecked(prior[name] and shown)
         # Stepper steps mirror the checkbox visibility — when only Embeddings
         # is selectable, only its progress strip is meaningful.
         for name in self.checks.keys():
-            self.stepper.set_visible(name, name == "Embeddings" if train_only else True)
+            self.stepper.set_visible(name, self.checks[name].isVisibleTo(self))
         # Re-enforce the Features → Embeddings dependency now that we've
         # restored (or wiped) the checkbox states.
         self._enforce_features_dep()
