@@ -527,22 +527,28 @@ def _valid_decision_threshold(value):
 def read_decision_threshold(model_path):
     """Return the tuned P(bad) cutoff stored beside ``model_path``, or None.
 
-    Looks for ``decision_threshold`` in ``training_config.json`` in the same
-    folder as the ``.pth`` (as ModelPrep writes it). Returns None when the file
-    or key is missing, unreadable, or not a value strictly between 0 and 1.
+    Checks ``<model_stem>.json`` next to the ``.pth`` first (bundled presets
+    and exported models), then ``training_config.json`` in the same folder
+    (ModelPrep training runs). Returns None when no readable JSON carries a
+    ``decision_threshold`` strictly between 0 and 1.
     """
     import json
 
     if model_path is None:
         return None
-    cfg_path = Path(model_path).parent / "training_config.json"
-    try:
-        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    if not isinstance(cfg, dict):
-        return None
-    return _valid_decision_threshold(cfg.get("decision_threshold"))
+    p = Path(model_path)
+    candidates = [p.with_suffix(".json"), p.parent / "training_config.json"]
+    for cfg_path in candidates:
+        try:
+            cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(cfg, dict):
+            continue
+        t = _valid_decision_threshold(cfg.get("decision_threshold"))
+        if t is not None:
+            return t
+    return None
 
 
 def effective_p_bad_cutoff(confidence_threshold, decision_threshold=None):

@@ -659,9 +659,9 @@ class ClassifyPanel(QWidget):
             self.use_model_threshold.setText(
                 f"Use the model's tuned threshold: keep a cell if P(bad) < {t:.3f}"
             )
-            note = ("Tuned in ModelPrep when this model was trained (stored in "
-                    "training_config.json next to the .pth). When ticked, it "
-                    "replaces the confidence threshold above.")
+            note = ("Tuned in ModelPrep when this model was trained (stored "
+                    "beside the .pth). When ticked, it replaces the confidence "
+                    "threshold above.")
         else:
             # Untick rather than leave a greyed-out tick that looks active;
             # the opt-in is per model.
