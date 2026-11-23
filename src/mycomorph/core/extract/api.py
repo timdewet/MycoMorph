@@ -20,6 +20,7 @@ from typing import Callable, Optional
 import numpy as np
 import pandas as pd
 
+from ..hyperstack import label_mask_channel
 from ..mask_index import label_index
 from . import crops as crops_mod
 from . import per_cell
@@ -176,13 +177,10 @@ def _label_mask(raw_mask: np.ndarray) -> np.ndarray:
 
     Mirrors the logic in ``classify_filter_tiff`` so the Features stage doesn't
     care whether its input came from Segment (binary) or Classify (relabelled).
+    Foci Detection labels cells with the same function, so its ``cell_id``
+    joins onto the features table.
     """
-    from skimage.measure import label as sk_label
-
-    unique_positive = np.unique(raw_mask[raw_mask > 0])
-    if len(unique_positive) <= 1:
-        return sk_label(raw_mask > 0, connectivity=1).astype(np.int32)
-    return raw_mask.astype(np.int32)
+    return label_mask_channel(raw_mask)
 
 
 # ──────────────────────────────────────────────────────────────────────────────

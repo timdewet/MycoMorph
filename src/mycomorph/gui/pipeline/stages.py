@@ -1188,7 +1188,11 @@ class FociDetectionStage:
                         # rev 2: hmax prominence floor + impulse gate,
                         # degenerate-σ split gate, retuned refit — old
                         # parquets are not comparable.
-                        "algorithm_rev": 2,
+                        # rev 3: cells keep their Classify labels (the
+                        # Features cell_id) instead of being renumbered
+                        # as connected components, which also merged
+                        # touching cells — old cell_ids don't join.
+                        "algorithm_rev": 3,
                         "detector_keys": detector_keys,
                         "detector_opts": det_opts,
                         "apply_to_channels": opts.apply_to_channels,

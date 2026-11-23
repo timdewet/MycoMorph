@@ -366,7 +366,7 @@ class NavSidebar(QFrame):
             disk = psutil.disk_usage("/")
             lines.append(f"Disk free: {disk.free / 1e9:.1f} GB")
         except ImportError:
-            lines.append("(install psutil for stats)")
+            pass
         except Exception:  # noqa: BLE001
             pass
 
@@ -381,3 +381,4 @@ class NavSidebar(QFrame):
             pass
 
         self._sysinfo_label.setText("\n".join(lines))
+        self._sysinfo_label.setVisible(bool(lines))

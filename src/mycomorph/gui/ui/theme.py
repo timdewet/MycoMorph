@@ -411,6 +411,38 @@ QProgressBar::chunk {{
     border-radius: 3px;
 }}
 
+/* ── Sliders ──────────────────────────────────────────────────────── */
+QSlider:horizontal {{
+    min-height: 20px;
+}}
+QSlider::groove:horizontal {{
+    height: 4px;
+    background: {p.border_strong};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal {{
+    background: {p.primary};
+    border-radius: 2px;
+}}
+QSlider::sub-page:horizontal:disabled {{
+    background: {p.border_strong};
+}}
+QSlider::handle:horizontal {{
+    background: {p.surface};
+    border: 2px solid {p.primary};
+    width: 12px;
+    height: 12px;
+    margin: -6px 0;
+    border-radius: 8px;
+}}
+QSlider::handle:horizontal:hover {{
+    border-color: {p.primary_hover};
+}}
+QSlider::handle:horizontal:disabled {{
+    background: {p.surface_alt};
+    border-color: {p.border_strong};
+}}
+
 /* ── Tabs (used by some embedded widgets) ─────────────────────────── */
 QTabWidget::pane {{
     border: 1px solid {p.border};

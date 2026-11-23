@@ -53,9 +53,28 @@ def load_hyperstack(tiff_path):
     return data, metadata
 
 
-def get_labeled_mask_from_fov(fov_data, mask_channel):
-    """Re-label a binary mask channel with connected components."""
+def label_mask_channel(raw_mask):
+    """Turn a stored mask channel into integer cell labels.
+
+    Segment writes a *binary* (0/255) mask for MicrobeJ compatibility, so
+    its cells are connected components. Classify writes its own labels,
+    which are kept as they are: they have gaps where cells were rejected,
+    and cells that touch stay separate. Features and Foci Detection both
+    label cells with this, so their ``cell_id`` columns join directly.
+    """
     from skimage.measure import label as sk_label
-    binary = fov_data[mask_channel] > 0
-    labeled = sk_label(binary, connectivity=1)
+
+    unique_positive = np.unique(raw_mask[raw_mask > 0])
+    if len(unique_positive) <= 1:
+        return sk_label(raw_mask > 0, connectivity=1).astype(np.int32)
+    return raw_mask.astype(np.int32)
+
+
+def get_labeled_mask_from_fov(fov_data, mask_channel):
+    """Label one FOV's mask channel with :func:`label_mask_channel`.
+
+    Returns ``(labeled, max_label)``. ``max_label`` is the highest label,
+    not a cell count: Classify labels have gaps.
+    """
+    labeled = label_mask_channel(fov_data[mask_channel])
     return labeled, int(labeled.max())

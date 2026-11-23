@@ -44,6 +44,20 @@ def test_reads_decision_threshold_from_sidecar(tmp_path):
     assert read_decision_threshold(pth) == pytest.approx(0.42)
 
 
+def test_reads_decision_threshold_from_sibling_json_and_bundled_presets(tmp_path):
+    pth = tmp_path / "custom_model.pth"
+    pth.write_bytes(b"not a real model")
+    (tmp_path / "custom_model.json").write_text(
+        json.dumps({"decision_threshold": 0.57}), encoding="utf-8",
+    )
+    assert read_decision_threshold(pth) == pytest.approx(0.57)
+
+    for preset in ("mtb-2026-06", "msm-2026-06"):
+        preset_pth = api.resolve_classifier_preset(preset)
+        t = read_decision_threshold(preset_pth)
+        assert t is not None and 0.0 < t < 1.0
+
+
 @pytest.mark.parametrize(
     "config",
     [

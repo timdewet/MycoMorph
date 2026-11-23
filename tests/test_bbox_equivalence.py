@@ -742,7 +742,8 @@ def test_bacteroidal_matches(refine, with_mask):
         image += rng.uniform(80, 400) * np.exp(-((yy - cy) ** 2 + (xx - cx) ** 2) / 3.0)
     image = image.astype(np.float32)
     labeled = mask if with_mask else None
-    opts = DetectorOpts(refine=refine)
+    # Fixed floor, not the default: this scene needs detections to compare.
+    opts = DetectorOpts(refine=refine, snr_min=3.0)
     new = BacteroidalDetector().detect(image, labeled, opts)
     ref = _ref_bacteroidal_detect(image, labeled, opts)
     assert new == ref

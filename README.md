@@ -121,8 +121,8 @@ For single-plane images, untick **Focus** and keep **Split**. Z-stacks need Focu
 | Segment | on | Runs Cellpose-SAM on the phase channel and appends a `BinaryMask` channel to each image. Options: diameter, minimum size, flow and cell-probability thresholds, GPU. Pixel size is read from the metadata. |
 | Classify | on | A rule-based edge and debris filter, plus an optional CNN cell-quality classifier. Cells it rejects are removed from the mask. |
 | Features | off | Measures each cell's morphology (MicrobeJ-style shape descriptors plus sub-pixel midline measurements) and intensity, and makes QC plots. It also saves cell crops to HDF5 (on by default), and can optionally register the run in the [morphology library](#analysis-and-the-morphology-library). |
-| Fluorescent Normalisation | off | Prepares fluorescence channels for foci detection with one of: none, top-hat, Gaussian low-pass, Richardson–Lucy, BM3D, BM3D + deconvolution, or BaSiC. Can also subtract spectral crosstalk. Foci Detection reads its output, so run it first; the `none` method passes images through unchanged. |
-| Foci Detection | off | Finds fluorescent foci in each cell using one of seven detectors: DoG, LoG, trackpy, h-maxima, wavelet (default), radial symmetry, or bacteroidal. Options include an SNR floor, sub-pixel refinement, and splitting merged foci. **Save filter…** and **Label foci…** keep threshold choices and manual labels alongside the run. |
+| Fluorescent Normalisation | off | Prepares fluorescence channels for foci detection with one of: none (default), top-hat, Gaussian low-pass, Richardson–Lucy, BM3D, BM3D + deconvolution, or BaSiC. Can also subtract spectral crosstalk. Foci Detection reads its output, so run it first; the `none` method passes images through unchanged. |
+| Foci Detection | off | Finds fluorescent foci in each cell using one of seven detectors: DoG, LoG, trackpy, h-maxima (default), wavelet, radial symmetry, or bacteroidal. Options include an SNR floor, sub-pixel refinement, and splitting merged foci. The defaults (h-maxima at prominence 10 × MAD, SNR ≥ 3.5, splitting on, no normaliser) scored best against hand-clicked foci. **Save filter…** and **Label foci…** keep threshold choices and manual labels alongside the run. |
 
 ### Re-runs and provenance
 
@@ -152,7 +152,7 @@ Files are named `<condition>__<reporter>__<mutant_or_drug>__R<replica>`. A typic
 │   ├── all_crops.h5
 │   └── qc_plots/
 ├── 04b_fluorescent_normalisation/    # float32 TIFFs, __crosstalk.json
-├── 04c_foci_detection/               # <stem>.parquet, one row per focus
+├── 04c_foci_detection/               # <stem>.parquet, one row per focus; cell_id matches 04_features within each FOV
 ├── 04d_foci_filtered/                # written by "Save filter…"
 ├── 05_foci_filters/                  # threshold JSONs for each filtered set
 └── 05_foci_labels/                   # written by "Label foci…"
