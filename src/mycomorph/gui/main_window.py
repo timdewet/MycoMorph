@@ -42,10 +42,10 @@ from .panels.stage_panels import (
     FocusPanel,
     SegmentClassifyPanel,
 )
-from .pipeline.context import BulkRunContext, RunContext
-from .pipeline.layout import PlateLayout
+from mycomorph.core.pipeline.context import BulkRunContext, RunContext
+from mycomorph.core.pipeline.layout import PlateLayout
 from .pipeline.runner import BulkPipelineRunner, PipelineRunner
-from .pipeline.stages import EmbeddingsStage
+from mycomorph.core.pipeline.stages import EmbeddingsStage
 from .ui import icons, tokens, theme
 from .ui.elevation import apply_shadow
 from .ui.nav_sidebar import NavEntry, NavSidebar, StageStatus

@@ -44,8 +44,8 @@ from PyQt6.QtWidgets import (
 from mycomorph.core.focus import io_source
 
 from ..features import embeddings_enabled
-from ..pipeline.bulk_layout import COLUMNS as BULK_COLS
-from ..pipeline.bulk_layout import BulkLayout
+from mycomorph.core.pipeline.bulk_layout import COLUMNS as BULK_COLS
+from mycomorph.core.pipeline.bulk_layout import BulkLayout
 
 
 _PHASE_LABEL_TOKENS = ("phase", "bright", "brightfield", "tl", "dic")

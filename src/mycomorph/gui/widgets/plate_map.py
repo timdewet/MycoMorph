@@ -32,7 +32,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..pipeline.layout import PlateLayout, normalize_well_id
+from mycomorph.core.pipeline.layout import PlateLayout, normalize_well_id
 from ..ui import theme, tokens
 
 
