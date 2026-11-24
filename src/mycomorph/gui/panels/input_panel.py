@@ -44,31 +44,12 @@ from PyQt6.QtWidgets import (
 from mycomorph.core.focus import io_source
 
 from ..features import embeddings_enabled
-from ..pipeline.bulk_layout import COLUMNS as BULK_COLS
-from ..pipeline.bulk_layout import BulkLayout
+from mycomorph.core.pipeline.bulk_layout import COLUMNS as BULK_COLS
+from mycomorph.core.pipeline.bulk_layout import BulkLayout
 
 
-_PHASE_LABEL_TOKENS = ("phase", "bright", "brightfield", "tl", "dic")
-
-
-def _guess_phase_channel_index(names: list[str]) -> int:
-    """Pick the channel most likely to be the transmitted-light source.
-
-    Looks for whole-word matches against the common labels users give
-    that channel ("Phase", "Bright", "Brightfield", "TL", "DIC"). If
-    nothing matches, falls back to 0 — the first channel — which is
-    where most acquisition setups put it by default.
-    """
-    import re
-
-    pattern = re.compile(
-        r"\b(?:" + "|".join(_PHASE_LABEL_TOKENS) + r")\b",
-        re.IGNORECASE,
-    )
-    for i, n in enumerate(names):
-        if n and pattern.search(n):
-            return i
-    return 0 if names else 0
+# The phase-channel guess is shared with ``mycomorph-cli run``.
+_guess_phase_channel_index = io_source.guess_phase_channel
 
 
 class InputMode(Enum):

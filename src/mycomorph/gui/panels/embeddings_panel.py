@@ -23,7 +23,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..pipeline.context import EmbeddingOpts
+from mycomorph.core.pipeline.context import EmbeddingOpts
 from ..ui import tokens
 
 

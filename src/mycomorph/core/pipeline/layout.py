@@ -222,7 +222,8 @@ class PlateLayout:
         df["well"] = df["well"].map(normalize_well_id)
         for col in COLUMNS:
             if col not in df.columns:
-                df[col] = [] if col == "scene_indices" else ""
+                # A hand-written CSV needs only "well" and the labels.
+                df[col] = [[] for _ in range(len(df))] if col == "scene_indices" else ""
         if "scene_indices" in df.columns and df["scene_indices"].dtype == object:
             df["scene_indices"] = df["scene_indices"].map(_parse_scene_list)
 

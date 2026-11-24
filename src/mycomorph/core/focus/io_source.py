@@ -57,6 +57,30 @@ def channel_names(path: Path) -> list[str]:
     return list(extract_channel_names(path) or [])
 
 
+# Labels people give the transmitted-light channel.
+PHASE_LABEL_TOKENS = ("phase", "bright", "brightfield", "tl", "dic")
+
+
+def guess_phase_channel(names: list[str]) -> int:
+    """Pick the channel most likely to be the transmitted-light source.
+
+    Looks for whole-word matches against the common labels users give
+    that channel ("Phase", "Bright", "Brightfield", "TL", "DIC"). If
+    nothing matches, falls back to 0 — the first channel — which is
+    where most acquisition setups put it by default.
+    """
+    import re
+
+    pattern = re.compile(
+        r"\b(?:" + "|".join(PHASE_LABEL_TOKENS) + r")\b",
+        re.IGNORECASE,
+    )
+    for i, n in enumerate(names):
+        if n and pattern.search(n):
+            return i
+    return 0
+
+
 def pixels_per_um(path: Path) -> float | None:
     """Pixel calibration from the file's metadata, or None if absent."""
     path = Path(path)

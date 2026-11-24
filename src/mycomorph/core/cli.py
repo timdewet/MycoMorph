@@ -1,12 +1,15 @@
-"""Unified Typer CLI exposing the four pre-processing stages.
+"""Unified Typer CLI: the whole pipeline (``run``), single stages, the library.
 
-The focus subcommand delegates to the existing FocusPicker CLI; the
-others call into argparse-based main() functions via sys.argv rewriting.
+``run`` drives the same pipeline code as the GUI from a config file. The
+focus subcommand delegates to the existing FocusPicker CLI; ``split`` and
+``segment`` call into argparse-based main() functions via sys.argv rewriting.
 """
 
 from __future__ import annotations
 
 import sys
+from pathlib import Path
+from typing import Optional
 
 import typer
 
@@ -35,6 +38,149 @@ def _delegate(module, argv: list[str]) -> None:
     finally:
         sys.argv = saved
 
+
+# ── The whole pipeline, from a config ─────────────────────────────────────────
+
+@app.command("run")
+def run(
+    config: Path = typer.Option(
+        ..., "--config", "-c", exists=True, dir_okay=False, readable=True,
+        help="JSON config describing the run, or the run_manifest.json of an "
+             "earlier run to repeat it.",
+    ),
+    reuse: bool = typer.Option(
+        True, "--reuse/--no-reuse",
+        help="Reuse outputs already in the output folder when their inputs and "
+             "options are unchanged (the GUI's 'Reuse existing outputs'). "
+             "--no-reuse recomputes every enabled stage.",
+    ),
+    output_dir: Optional[Path] = typer.Option(
+        None, "--output-dir", "-o", file_okay=False,
+        help="Write to this folder instead of the config's output_dir, e.g. to "
+             "repeat a manifest's run without touching the original.",
+    ),
+    dry_run: bool = typer.Option(
+        False, "--dry-run",
+        help="Check the config and print what would run, then exit.",
+    ),
+    quiet: bool = typer.Option(
+        False, "--quiet", "-q",
+        help="Print stage starts and ends only, not the progress inside each stage.",
+    ),
+) -> None:
+    """Run the pipeline from a config file, without the GUI.
+
+    Runs the same stages as the app's Run page (Split, Focus, Segment,
+    Classify, Features, Fluorescent Normalisation, Foci Detection) and writes
+    the same output folder, .provenance.json sidecars and run_manifest.json.
+
+    The config is JSON in the form run_manifest.json records a run:
+
+    \b
+      {
+        "mode": "plate",
+        "czi_paths": ["plate1.czi"],
+        "plate_layout_csv": "plate_layout.csv",
+        "output_dir": "results",
+        "stages": [
+          {"name": "Split"},
+          {"name": "Focus", "opts": {"mode": "edf"}},
+          {"name": "Segment", "opts": {"gpu": false}},
+          {"name": "Classify", "opts": {"model_path": "mtb-2026-06"}},
+          {"name": "Features"}
+        ]
+      }
+
+    "mode" is "plate" (the app's Single plate: plate CZIs plus a layout CSV)
+    or "bulk" (Single file / Multiple files), which takes "bulk_entries_csv",
+    a CSV with columns czi_path, condition, reporter, mutant_or_drug, replica
+    and notes, or the same rows inline as "entries".
+
+    Each stage listed in "stages" runs. Options left out of "opts" keep the
+    app's defaults; option names are those in a manifest's "opts". Listing
+    Split together with Focus is the app's default: Focus then writes the
+    per-well files itself, to 01_split_and_focused/. "phase_channel" and
+    "channel_labels" are optional and otherwise read from the first input
+    file. Relative paths are resolved against the config file's folder.
+
+    A manifest holds its run's full configuration, so passing one as --config
+    repeats that run. Ctrl-C stops the run at the next safe point and still
+    writes the manifest.
+
+    Exit status: 0 when the run completes, 1 when it fails or cannot start,
+    2 for an invalid config, 130 when stopped.
+    """
+    import signal
+
+    from mycomorph import __version__
+
+    from .pipeline.config import ConfigError, execute, load_run_plan
+
+    # Stage messages contain characters ("→") that a redirected Windows
+    # console encoding can't represent; substitute instead of crashing.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")  # type: ignore[union-attr]
+        except (AttributeError, ValueError):
+            pass
+
+    try:
+        plan = load_run_plan(config, output_dir=output_dir)
+    except ConfigError as e:
+        typer.echo(f"Config error: {e}", err=True)
+        raise typer.Exit(code=2) from None
+
+    ctx = plan.ctx
+    typer.echo(
+        f"MycoMorph {__version__}: {plan.mode} run, "
+        f"reuse {'on' if reuse else 'off'}"
+    )
+    typer.echo(f"Config: {config.resolve()}")
+    typer.echo(f"Output: {ctx.output_dir}")
+    labels = ", ".join(ctx.channel_labels) if ctx.channel_labels else "not set"
+    typer.echo(f"Channels: {labels} (phase channel {ctx.phase_channel})")
+    typer.echo(f"Enabled stages: {', '.join(plan.enabled_stages)}")
+    for note in plan.notes:
+        typer.echo(f"Note: {note}")
+
+    blocking, warnings = plan.preflight(reuse_existing=reuse)
+    for warning in warnings:
+        typer.echo(f"Warning: {warning}", err=True)
+    if blocking:
+        typer.echo("Cannot run:", err=True)
+        for issue in blocking:
+            typer.echo(f"  - {issue}", err=True)
+        raise typer.Exit(code=1)
+    if dry_run:
+        typer.echo("Dry run: config is valid; nothing was run.")
+        return
+
+    pipeline_run = plan.make_run(reuse_existing=reuse)
+
+    def _stop(_signum, _frame) -> None:
+        typer.echo(
+            "Stopping at the next safe point (Ctrl-C again to abort)...", err=True,
+        )
+        pipeline_run.request_stop()
+        signal.signal(signal.SIGINT, signal.default_int_handler)
+
+    try:
+        previous = signal.signal(signal.SIGINT, _stop)
+    except ValueError:  # not the main thread: leave Ctrl-C alone
+        previous = None
+    try:
+        outcome = execute(pipeline_run, log=typer.echo, progress=not quiet)
+    finally:
+        if previous is not None:
+            signal.signal(signal.SIGINT, previous)
+
+    if outcome.status == "stopped":
+        raise typer.Exit(code=130)
+    if not outcome.ok:
+        raise typer.Exit(code=1)
+
+
+# ── Single stages ─────────────────────────────────────────────────────────────
 
 @app.command(
     "split", help="Split a multi-position CZI plate into per-well TIFFs.",

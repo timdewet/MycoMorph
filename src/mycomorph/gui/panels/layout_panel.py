@@ -17,7 +17,7 @@ from PyQt6.QtWidgets import (
     QWidget,
 )
 
-from ..pipeline.layout import PlateLayout
+from mycomorph.core.pipeline.layout import PlateLayout
 from ..ui import icons, tokens
 from ..widgets.plate_map import PlateMapEditor
 

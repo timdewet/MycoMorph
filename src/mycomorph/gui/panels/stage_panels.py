@@ -42,7 +42,7 @@ from mycomorph.core.cell_quality_classifier import read_decision_threshold
 from mycomorph.core.foci import DetectorOpts
 from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
 
-from ..pipeline.context import (
+from mycomorph.core.pipeline.context import (
     FluorescentNormalisationOpts,
     FociDetectionOpts,
 )

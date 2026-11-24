@@ -330,6 +330,15 @@ def _wait_for_pool(app, panel):
     app.processEvents()
 
 
+def _select_a_preset(panel) -> None:
+    """Pick the first bundled preset in the model picker, whatever its name."""
+    from PyQt6.QtCore import Qt
+
+    idx = panel._model_combo.findText("preset: ", Qt.MatchFlag.MatchStartsWith)
+    assert idx >= 0, "no bundled preset in the model picker"
+    panel._model_combo.setCurrentIndex(idx)
+
+
 def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_path):
     """Random hold-out sampling doesn't score cells, so the saved labels must
     say model 'none' with NaN confidence, even with a model in the picker
@@ -350,7 +359,7 @@ def test_random_holdout_sample_records_no_model_confidence(synthetic_h5, tmp_pat
         panel = LabelTrainPanel()
         labels = tmp_path / "labels"
         panel.set_source(synthetic_h5, labels)
-        panel._model_combo.setCurrentIndex(panel._model_combo.findText("preset: mtb"))
+        _select_a_preset(panel)
         assert panel._current_model_path() is not None
         panel._test_mode_chk.setChecked(True)          # Prioritise good stays off
         panel._load_pool()
@@ -451,7 +460,7 @@ def test_label_page_wording_follows_state(synthetic_h5, tmp_path):
     panel._model_combo.setCurrentIndex(0)                       # none (random order)
     assert not panel._diversify.isEnabled()
     assert "Needs a model" in panel._diversify.toolTip()
-    panel._model_combo.setCurrentIndex(panel._model_combo.findText("preset: mtb"))
+    _select_a_preset(panel)
     assert panel._diversify.isEnabled()
     panel.shutdown()
 
