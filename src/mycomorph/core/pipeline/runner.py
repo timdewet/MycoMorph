@@ -1,4 +1,18 @@
-"""PipelineRunner — walks enabled stages on a QThread, emits progress signals."""
+"""Pipeline runs: walk the enabled stages, report progress, write the manifest.
+
+Nothing here imports Qt. The run logic lives in :class:`PlateRunLogic` and
+:class:`BulkRunLogic`, which report through signal-like attributes
+(``self.stageStarted.emit(name)`` and so on) that the concrete class supplies:
+
+- :class:`PlateRun` / :class:`BulkRun` (this module) use plain-Python
+  :class:`Signal` objects and run in the calling thread. ``mycomorph-cli run``
+  and scripts use these.
+- ``mycomorph.gui.pipeline.runner.PipelineRunner`` / ``BulkPipelineRunner``
+  declare the same names as Qt signals and run on a ``QThread``.
+
+Both therefore execute the same code and write the same outputs, provenance
+sidecars and ``run_manifest.json``.
+"""
 
 from __future__ import annotations
 
@@ -6,8 +20,7 @@ import json
 import time
 from dataclasses import asdict, is_dataclass
 from pathlib import Path
-
-from PyQt6.QtCore import QObject, QThread, pyqtSignal
+from typing import Callable
 
 from mycomorph.core.provenance import software_info
 
@@ -26,24 +39,67 @@ from .stages import (
     _iter_tiffs,
 )
 
+# Signals every run emits, in order: runStarted → stagesPlanned → stageStarted
+# → stageProgress* → stageFinished (repeated per stage) → runFinished /
+# runCancelled / runFailed. The Qt runners declare these as pyqtSignals with
+# the argument types noted here.
+SIGNAL_NAMES = (
+    "runStarted",       # ()
+    "stagesPlanned",    # (list)             names of stages that will actually run
+    "stageStarted",     # (str)              stage name
+    "stageProgress",    # (str, float, str)  stage name, fraction, message
+    "stageFinished",    # (str, int)         stage name, num_outputs
+    "stageCancelled",   # (str)              stage name
+    "runFinished",      # (Path)             manifest path
+    "runCancelled",     # (Path)             manifest path
+    "runFailed",        # (str)              error message
+)
 
-class PipelineRunner(QObject):
-    """Executes enabled stages sequentially on its own thread.
+# Context attribute holding each stage's options dataclass (Split has none).
+STAGE_OPTS_ATTR = {
+    "Focus": "focus_opts",
+    "Segment": "segment_opts",
+    "Classify": "classify_opts",
+    "Features": "features_opts",
+    "Fluorescent Normalisation": "fluorescent_normalisation_opts",
+    "Foci Detection": "foci_detection_opts",
+    "Embeddings": "embeddings_opts",
+}
 
-    Emits, in order: runStarted → stageStarted → stageProgress* → stageFinished
-    (repeated per stage) → runFinished / runFailed.
+
+class Signal:
+    """Stand-in for a Qt signal outside Qt: ``connect`` slots, ``emit`` calls them.
+
+    Slots run synchronously, in connection order, in the emitting thread.
     """
 
-    runStarted = pyqtSignal()
-    stagesPlanned = pyqtSignal(list)             # names of stages that will actually run
-    stageStarted = pyqtSignal(str)               # stage name
-    stageProgress = pyqtSignal(str, float, str)  # stage name, fraction, message
-    stageFinished = pyqtSignal(str, int)         # stage name, num_outputs
-    stageCancelled = pyqtSignal(str)              # stage name
-    runFinished = pyqtSignal(Path)               # manifest path
-    runCancelled = pyqtSignal(Path)              # manifest path
-    runFailed = pyqtSignal(str)                  # error message
-    workerStopped = pyqtSignal()
+    def __init__(self) -> None:
+        self._slots: list[Callable[..., object]] = []
+
+    def connect(self, slot: Callable[..., object]) -> None:
+        self._slots.append(slot)
+
+    def emit(self, *args: object) -> None:
+        for slot in list(self._slots):
+            slot(*args)
+
+
+class _PlainSignals:
+    """Gives a run the signal attributes the Qt runners declare as pyqtSignals."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        for name in SIGNAL_NAMES:
+            setattr(self, name, Signal())
+
+
+class PlateRunLogic:
+    """Single-plate run: executes the enabled stages one after another.
+
+    Emits, in order: runStarted → stageStarted → stageProgress* → stageFinished
+    (repeated per stage) → runFinished / runFailed. The concrete class
+    provides the signals (see the module docstring).
+    """
 
     def __init__(
         self,
@@ -54,7 +110,6 @@ class PipelineRunner(QObject):
         super().__init__()
         self._ctx = ctx
         self._stages = stages or ALL_STAGES
-        self._thread: QThread | None = None
         self._reuse_existing = reuse_existing
         self._stop_token = CancellationToken()
 
@@ -386,14 +441,12 @@ class PipelineRunner(QObject):
 
     # ---------------------------------------------------------------- lifecycle
 
-    def start(self) -> None:
-        self._thread = QThread()
-        self.moveToThread(self._thread)
-        self._thread.started.connect(self._run)
-        self._thread.finished.connect(self.workerStopped)
-        self._thread.start()
+    def execute(self) -> None:
+        """Run the pipeline in the calling thread.
 
-    def _run(self) -> None:
+        Never raises for a failed run: the outcome arrives as ``runFinished``,
+        ``runCancelled`` or ``runFailed``.
+        """
         try:
             self.runStarted.emit()
             self._migrate_legacy_dirs()
@@ -538,32 +591,18 @@ class PipelineRunner(QObject):
 
         except Exception as e:  # noqa: BLE001
             self.runFailed.emit(str(e))
-        finally:
-            if self._thread is not None:
-                self._thread.quit()
 
 
-class BulkPipelineRunner(QObject):
-    """Runs Focus once per CZI, then Segment + Classify once over the
-    accumulated TIFF directory. Mirrors PipelineRunner's signal surface
-    so the Run panel can stay agnostic about which mode is active.
+class BulkRunLogic:
+    """Single-file / multiple-files run: Focus (or Split) once per sample,
+    then Segment onwards once over the accumulated TIFF directory. Mirrors
+    :class:`PlateRunLogic`'s signal surface so callers can stay agnostic
+    about which mode is active.
     """
-
-    runStarted = pyqtSignal()
-    stagesPlanned = pyqtSignal(list)
-    stageStarted = pyqtSignal(str)
-    stageProgress = pyqtSignal(str, float, str)
-    stageFinished = pyqtSignal(str, int)
-    stageCancelled = pyqtSignal(str)
-    runFinished = pyqtSignal(Path)
-    runCancelled = pyqtSignal(Path)
-    runFailed = pyqtSignal(str)
-    workerStopped = pyqtSignal()
 
     def __init__(self, ctx: BulkRunContext, reuse_existing: bool = False) -> None:
         super().__init__()
         self._ctx = ctx
-        self._thread: QThread | None = None
         self._reuse_existing = reuse_existing
         self._stop_token = CancellationToken()
 
@@ -573,13 +612,6 @@ class BulkPipelineRunner(QObject):
 
     def request_stop(self) -> None:
         self._stop_token.cancel()
-
-    def start(self) -> None:
-        self._thread = QThread()
-        self.moveToThread(self._thread)
-        self._thread.started.connect(self._run)
-        self._thread.finished.connect(self.workerStopped)
-        self._thread.start()
 
     # --------------------------------------------------------------------------
 
@@ -644,7 +676,12 @@ class BulkPipelineRunner(QObject):
         else:
             self.stageFinished.emit(stage, len(outputs))
 
-    def _run(self) -> None:
+    def execute(self) -> None:
+        """Run the pipeline in the calling thread.
+
+        Never raises for a failed run: the outcome arrives as ``runFinished``,
+        ``runCancelled`` or ``runFailed``.
+        """
         from mycomorph.core.api import run_focus_sample, split_sample
 
         try:
@@ -793,9 +830,6 @@ class BulkPipelineRunner(QObject):
 
         except Exception as e:  # noqa: BLE001
             self.runFailed.emit(str(e))
-        finally:
-            if self._thread is not None:
-                self._thread.quit()
 
     def _finalise(self, manifest: dict, stopped: bool) -> None:
         manifest["finished_at"] = time.time()
@@ -830,42 +864,20 @@ class BulkPipelineRunner(QObject):
             self.runFinished.emit(self._ctx.manifest_path)
 
 
-def _stage_opts_bulk(ctx: BulkRunContext, name: str) -> dict:
-    opts_map: dict = {
-        "Focus": ctx.focus_opts,
-        "Segment": ctx.segment_opts,
-        "Classify": ctx.classify_opts,
-        "Features": getattr(ctx, "features_opts", None),
-        "Fluorescent Normalisation": getattr(
-            ctx, "fluorescent_normalisation_opts", None
-        ),
-        "Foci Detection": getattr(ctx, "foci_detection_opts", None),
-        "Embeddings": getattr(ctx, "embeddings_opts", None),
-    }
-    o = opts_map.get(name)
-    if o is None:
-        return {}
-    if is_dataclass(o):
-        return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(o).items()}
-    return {}
-
-
-def _stage_opts(ctx: RunContext, name: str) -> dict:
+def _stage_opts(ctx, name: str) -> dict:
     """Serialise the options dataclass for a given stage into the manifest."""
-    opts_map = {
-        "Focus": ctx.focus_opts,
-        "Segment": ctx.segment_opts,
-        "Classify": ctx.classify_opts,
-        "Features": getattr(ctx, "features_opts", None),
-        "Fluorescent Normalisation": getattr(
-            ctx, "fluorescent_normalisation_opts", None
-        ),
-        "Foci Detection": getattr(ctx, "foci_detection_opts", None),
-        "Embeddings": getattr(ctx, "embeddings_opts", None),
-    }
-    o = opts_map.get(name)
-    if o is None:
-        return {}
-    if is_dataclass(o):
+    o = getattr(ctx, STAGE_OPTS_ATTR.get(name, ""), None)
+    if o is not None and is_dataclass(o):
         return {k: str(v) if isinstance(v, Path) else v for k, v in asdict(o).items()}
     return {}
+
+
+_stage_opts_bulk = _stage_opts
+
+
+class PlateRun(PlateRunLogic, _PlainSignals):
+    """Single-plate run without Qt. Connect to the signals, then ``execute()``."""
+
+
+class BulkRun(BulkRunLogic, _PlainSignals):
+    """Single-file / multiple-files run without Qt. Connect, then ``execute()``."""
