@@ -28,6 +28,7 @@ from PyQt6.QtWidgets import (
 )
 
 import mycomorph
+from mycomorph.core.pipeline.config import missing_upstream_outputs
 
 from .panels.analysis_panel import AnalysisPanel
 from .features import embeddings_enabled
@@ -736,42 +737,9 @@ class MainWindow(QMainWindow):
         blocking: list[str] = []
         warnings: list[str] = []
 
-        if enables.get("Classify") and not enables.get("Segment"):
-            seg_dir = out / "02_segment"
-            if not seg_dir.exists() or not any(seg_dir.iterdir()):
-                blocking.append(
-                    "Classify is enabled but Segment is disabled and no "
-                    f"segment output exists at {seg_dir}."
-                )
-
-        # Split alone produces unfocused per-sample TIFFs (single-plane
-        # inputs need no focus picking), so it also satisfies Segment.
-        if (enables.get("Segment") and not enables.get("Focus")
-                and not enables.get("Split")):
-            focus_candidates = [
-                out / "01_split_and_focused",
-                out / "01_focus",
-                out / "01_split",
-            ]
-            has_focus = any(d.exists() and any(d.iterdir()) for d in focus_candidates)
-            if not has_focus:
-                blocking.append(
-                    "Segment is enabled but Focus and Split are both "
-                    "disabled, and no earlier output exists in any of:\n  "
-                    + "\n  ".join(str(d) for d in focus_candidates)
-                )
-
-        if enables.get("Features") and not (
-            enables.get("Segment") or enables.get("Classify")
-        ):
-            features_candidates = [out / "03_classify", out / "02_segment"]
-            has_input = any(d.exists() and any(d.iterdir()) for d in features_candidates)
-            if not has_input:
-                blocking.append(
-                    "Features is enabled but neither Segment nor Classify is "
-                    "enabled, and no upstream output exists in any of:\n  "
-                    + "\n  ".join(str(d) for d in features_candidates)
-                )
+        # Shared with ``mycomorph-cli run``: enabled stages whose input
+        # neither this run nor an earlier one provides.
+        blocking.extend(missing_upstream_outputs(out, enables))
 
         if enables.get("Segment") and self.segment_panel.opts().gpu:
             if not _gpu_available():

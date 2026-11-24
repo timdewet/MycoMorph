@@ -4,7 +4,7 @@ Bacterial microscopy pipeline and morphological-profiling workbench with a PyQt6
 
 MycoMorph takes raw Zeiss CZI plates or TIFF images from focus picking, through Cellpose-SAM segmentation and cell-quality filtering, to per-cell morphology features and fluorescent foci detection. The Analysis page compares morphological profiles across experiments. It was built around *M. tuberculosis* imaging: the bundled cell-quality classifier was trained on Mtb cells. The other stages are not species-specific.
 
-Everything runs from one desktop app. It includes **ModelPrep**, the labeller and trainer for the cell-quality classifier: you label cells from a run's crops, train a classifier, and use it on the Classify page. The same functionality is also available as Python packages (`mycomorph.core`, `mycomorph.modelprep`) and command-line tools.
+Everything runs from one desktop app. It includes **ModelPrep**, the labeller and trainer for the cell-quality classifier: you label cells from a run's crops, train a classifier, and use it on the Classify page. The same functionality is also available as Python packages (`mycomorph.core`, `mycomorph.modelprep`) and command-line tools. In particular, `mycomorph-cli run` runs the whole pipeline from a config file without the GUI (see [Command line](#command-line)).
 
 ## Contents
 
@@ -132,6 +132,7 @@ With **Reuse existing outputs** on, a re-run picks up where the last one stopped
 - Split and Focus outputs are reused whenever the expected file exists. **If you change the Focus options, untick Reuse or delete the old `01_*` folder.**
 - If you relabel wells, existing outputs are renamed to match the new labels instead of being recomputed.
 - `run_manifest.json` records each stage's options, outputs, and timing. It also records the software versions (MycoMorph, Python, Cellpose, PyTorch, and the git commit for source installs). Versions are not part of the digest, so upgrading MycoMorph does not force recomputation.
+- The manifest's `config` block holds the run as it was requested: inputs, channels, and every stage's options and whether it was ticked. `mycomorph-cli run` can [repeat the run](#running-the-pipeline-without-the-gui) from it.
 
 ## Output folder
 
@@ -253,6 +254,7 @@ The **Analysis** page plots a UMAP of per-condition profiles. Profiles are built
 | `mycomorph` | Launch the GUI (same as `python -m mycomorph`); `mycomorph --modelprep` opens ModelPrep instead |
 | `modelprep` | Launch ModelPrep (same as `python -m mycomorph.modelprep`) |
 | `modelprep-cli …` | ModelPrep's labelling and training commands (see [ModelPrep on the command line](#modelprep-on-the-command-line)) |
+| `mycomorph-cli run --config <file>` | Run the whole pipeline from a config file, without the GUI (see [below](#running-the-pipeline-without-the-gui)) |
 | `mycomorph-cli split` | Split a multi-position CZI plate into per-well TIFFs |
 | `mycomorph-cli segment` | Run Cellpose-SAM segmentation on CZI or TIFF input |
 | `mycomorph-cli library …` | Manage the morphology library: `list`, `summary`, `add`, `update`, `remove`, `precompute-ot-views`, `gene-template`, `compare-representations` |
@@ -261,6 +263,60 @@ The **Analysis** page plots a UMAP of per-condition profiles. Profiles are built
 | `mycomorph-focus review` / `label` / `compare` | Sample scenes, label best slices by hand, and score the focus metrics against those labels |
 
 Each command takes `--help`. `mycomorph-cli label`, `review`, and `train` have moved to ModelPrep: they now print the `modelprep-cli` command to use and exit. `mycomorph-focus process` defaults to whole-field focus with the `vollath_f4` metric. The GUI defaults to EDF with the ensemble metric. By default, `process` moves the source CZI into `raw/` when it succeeds; pass `--no-archive` to leave it in place.
+
+### Running the pipeline without the GUI
+
+`mycomorph-cli run --config run.json` runs the stages of the **Run** page from a terminal. It runs the same pipeline code as the app, so it writes the same [output folder](#output-folder), `.provenance.json` sidecars and `run_manifest.json`. It never loads Qt, so it also works on a machine with no display.
+
+The config is a JSON file:
+
+```json
+{
+  "mode": "plate",
+  "czi_paths": ["plate1.czi"],
+  "plate_layout_csv": "plate_layout.csv",
+  "output_dir": "results",
+  "stages": [
+    {"name": "Split"},
+    {"name": "Focus", "opts": {"mode": "edf"}},
+    {"name": "Segment", "opts": {"gpu": false}},
+    {"name": "Classify", "opts": {"model_path": "mtb-2026-06"}},
+    {"name": "Features"}
+  ]
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `mode` | `plate` (the app's Single plate) or `bulk` (Single file and Multiple files) |
+| `czi_paths`, `plate_layout_csv` | Plate mode. The plate's CZI files, and a layout CSV with a `well` column and `condition`, `reporter`, `mutant_or_drug` and `replica` labels; the CSV the Plate layout page exports works as it is. Only wells with a condition are processed. |
+| `bulk_entries_csv`, or `entries` | Bulk mode. A table with the columns `czi_path`, `condition`, `reporter`, `mutant_or_drug`, `replica` and `notes` (the CSV the Input page saves), or the same rows inline. Rows with identical labels are pooled into one sample. |
+| `output_dir` | The output folder |
+| `stages` | The stages to run: `Split`, `Focus`, `Segment`, `Classify`, `Features`, `Fluorescent Normalisation`, `Foci Detection`. Each takes optional `opts`, named as in a manifest's `opts`; options you leave out keep the app's defaults. An entry with `"enabled": false` sets a stage's options without running it. |
+| `phase_channel`, `channel_labels` | Optional. When absent they are read from the first input file, as on the Input page. |
+
+Relative paths are resolved against the folder holding the config file. As in the app, listing `Split` together with `Focus` makes Focus write the per-well files itself, to `01_split_and_focused/`; `Focus` alone writes to `01_focus/`. Classify's `model_path` takes a bundled preset's name, the path of a `.pth`, or `null` for the rule-based filter alone.
+
+A manifest is itself a config, because it holds its run's configuration. This repeats an earlier run in a new folder:
+
+```bash
+mycomorph-cli run --config results/run_manifest.json --output-dir results_repeat
+```
+
+Manifests written before the `config` block existed are read from the stages they list. Those don't record the phase channel, the channel labels, the options of stages that did not run, or the second and later CZIs of a multi-file plate, so add what you need before repeating such a run.
+
+Options: `--reuse` (the default) and `--no-reuse` match the app's **Reuse existing outputs**; `--output-dir` replaces the config's output folder; `--dry-run` checks the config and the inputs and prints what would run; `--quiet` prints only stage starts and ends. Ctrl-C stops the run at the next safe point and still writes the manifest. The exit status is 0 for a completed run, 1 for a failed one, 2 for an invalid config, and 130 for a stopped run.
+
+The same run from Python:
+
+```python
+from mycomorph.core.pipeline.config import execute, load_run_plan
+
+plan = load_run_plan("run.json")
+outcome = execute(plan.make_run(reuse_existing=True), log=print)
+```
+
+### Maintenance scripts
 
 `scripts/` holds maintenance tools for the morphology library, each run as `python scripts/<name>.py --help`:
 
@@ -282,12 +338,13 @@ Each command takes `--help`. `mycomorph-cli label`, `review`, and `train` have m
 
 ### Hidden: CNN embeddings
 
-MycoMorph can also train a CNN (an autoencoder or a supervised-contrastive ResNet-18) on the Features crops and write a per-cell embedding, and the Analysis page can compare conditions on those embeddings. This is not part of the current release: the Embeddings page and stage, the **Train embeddings** input mode and the CNN views on the Analysis page are hidden unless the environment variable `MYCOMORPH_EMBEDDINGS=1` is set (`src/mycomorph/gui/features.py`). The code stays in `core/autoencoder/` and `gui/panels/embeddings_panel.py`, and `mycomorph-cli library` still accepts its embedding options.
+MycoMorph can also train a CNN (an autoencoder or a supervised-contrastive ResNet-18) on the Features crops and write a per-cell embedding, and the Analysis page can compare conditions on those embeddings. This is not part of the current release: the Embeddings page and stage, the **Train embeddings** input mode and the CNN views on the Analysis page are hidden unless the environment variable `MYCOMORPH_EMBEDDINGS=1` is set (`src/mycomorph/gui/features.py`). The code stays in `core/autoencoder/` and `gui/panels/embeddings_panel.py`, `mycomorph-cli library` still accepts its embedding options, and `mycomorph-cli run` still accepts an `Embeddings` stage.
 
 ```
 src/mycomorph/
 ├── core/                 # library: no Qt imports
-│   ├── api.py            # facade the GUI stages call
+│   ├── api.py            # the stage functions
+│   ├── pipeline/         # stage adapters, run contexts, run logic, config files; shared by the GUI and mycomorph-cli run
 │   ├── focus/            # focus picking + mycomorph-focus CLI
 │   ├── extract/          # per-cell features, crops, QC plots, OT analysis, morphology library
 │   ├── foci/             # normalisation, crosstalk, foci detectors
@@ -296,7 +353,7 @@ src/mycomorph/
 │   └── provenance.py     # output signatures and software versions
 ├── gui/
 │   ├── panels/           # one panel per sidebar page
-│   ├── pipeline/         # stage adapters, runner, run context
+│   ├── pipeline/         # Qt runner (a QThread around core/pipeline)
 │   ├── ui/               # design system (theme, tokens, sidebar), shared with ModelPrep
 │   └── widgets/          # live preview, plate map, library browser, model inspector, …
 └── modelprep/            # ModelPrep: labeller and trainer for the cell-quality classifier

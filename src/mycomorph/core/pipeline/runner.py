@@ -55,6 +55,18 @@ SIGNAL_NAMES = (
     "runFailed",        # (str)              error message
 )
 
+# Run-page checkboxes, in pipeline order: (stage name, context flag).
+STAGE_FLAGS = (
+    ("Split", "do_split"),
+    ("Focus", "do_focus"),
+    ("Segment", "do_segment"),
+    ("Classify", "do_classify"),
+    ("Features", "do_features"),
+    ("Fluorescent Normalisation", "do_fluorescent_normalisation"),
+    ("Foci Detection", "do_foci_detection"),
+    ("Embeddings", "do_embeddings"),
+)
+
 # Context attribute holding each stage's options dataclass (Split has none).
 STAGE_OPTS_ATTR = {
     "Focus": "focus_opts",
@@ -91,6 +103,37 @@ class _PlainSignals:
         super().__init__()
         for name in SIGNAL_NAMES:
             setattr(self, name, Signal())
+
+
+def _requested_config(ctx, mode: str) -> dict:
+    """The run as it was requested, for the manifest's ``config`` block.
+
+    The manifest's ``stages`` list records what ran. It leaves out things a
+    repeat needs: a Split that was ticked but subsumed by Focus (which
+    changes the plate-mode folder name), the options of stages that did not
+    run but that later stages read (the Focus filename suffix, the
+    normalisation method Foci Detection labels its rows with), and the
+    channel settings that feed the provenance signatures. This block holds
+    all of it, in the form ``mycomorph-cli run --config`` reads
+    (:mod:`mycomorph.core.pipeline.config`), so a manifest can be replayed.
+    """
+    labels = getattr(ctx, "channel_labels", None)
+    config: dict = {"mode": mode}
+    if mode == "plate":
+        config["czi_paths"] = [str(p) for p in getattr(ctx, "all_czi_paths", [])]
+    config["output_dir"] = str(ctx.output_dir)
+    config["phase_channel"] = getattr(ctx, "phase_channel", None)
+    config["channel_labels"] = list(labels) if labels is not None else None
+    stages = []
+    for name, flag in STAGE_FLAGS:
+        enabled = bool(getattr(ctx, flag, False))
+        if name == "Embeddings" and not enabled:
+            continue  # hidden stage; its options affect no other stage
+        stages.append({
+            "name": name, "enabled": enabled, "opts": _stage_opts(ctx, name),
+        })
+    config["stages"] = stages
+    return config
 
 
 class PlateRunLogic:
@@ -494,6 +537,7 @@ class PlateRunLogic:
                 "software": software_info(),
                 "czi": str(self._ctx.czi_path),
                 "output_dir": str(self._ctx.output_dir),
+                "config": _requested_config(self._ctx, "plate"),
                 "stages": [],
             }
 
@@ -578,6 +622,7 @@ class PlateRunLogic:
             self._ctx.layout.to_csv(layout_tmp)
             layout_tmp.replace(layout_csv)
             manifest["plate_layout_csv"] = str(layout_csv)
+            manifest["config"]["plate_layout_csv"] = str(layout_csv)
 
             from mycomorph.core.provenance import atomic_write_text
             atomic_write_text(
@@ -712,6 +757,7 @@ class BulkRunLogic:
                 "software": software_info(),
                 "mode": "bulk",
                 "output_dir": str(ctx.output_dir),
+                "config": _requested_config(ctx, "bulk"),
                 "stages": [],
             }
 
@@ -851,6 +897,7 @@ class BulkRunLogic:
                     )])
             entries_tmp.replace(entries_csv)
             manifest["bulk_entries_csv"] = str(entries_csv)
+            manifest["config"]["bulk_entries_csv"] = str(entries_csv)
         except Exception:  # noqa: BLE001
             pass
         from mycomorph.core.provenance import atomic_write_text
