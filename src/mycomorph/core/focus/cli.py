@@ -7,11 +7,11 @@ from pathlib import Path
 
 import typer
 
-from . import focus, tiling
-from .pipeline import Options, process_czi
+from . import focus
+from .pipeline import TILES_REMOVED_MESSAGE, Options, process_czi
 from .review import review_czi
 
-_FOCUS_MODES = ("whole", "tiles", "edf")
+_FOCUS_MODES = ("whole", "edf")
 
 app = typer.Typer(add_completion=False, help="Pick the in-focus slice from Zeiss CZI Z-stacks.")
 
@@ -62,29 +62,21 @@ def process(
         help=(
             "How to pick focus across the FOV. "
             "'whole' picks one Z per FOV (default). "
-            "'tiles' splits the FOV into a grid (see --tile-grid) and picks one Z per tile. "
             "'edf' picks Z per pixel for an extended depth of field result."
         ),
-    ),
-    tile_grid: str = typer.Option(
-        "2x2",
-        "--tile-grid",
-        help="Tile grid as NxM (e.g. '2x2', '3x4'). Only used with --focus-mode tiles.",
     ),
 ) -> None:
     """Process a single CZI: pick best-focus slices and write OME-TIFFs per scene."""
     if metric not in focus.METRIC_NAMES:
         typer.echo(f"unknown metric {metric!r}; choose from {focus.METRIC_NAMES}", err=True)
         raise typer.Exit(code=2)
+    if focus_mode == "tiles":
+        typer.echo(f"focuspicker: {TILES_REMOVED_MESSAGE}", err=True)
+        raise typer.Exit(code=2)
     if focus_mode not in _FOCUS_MODES:
         typer.echo(
             f"unknown focus mode {focus_mode!r}; choose from {_FOCUS_MODES}", err=True
         )
-        raise typer.Exit(code=2)
-    try:
-        grid = tiling.parse_grid(tile_grid)
-    except ValueError as exc:
-        typer.echo(f"focuspicker: {exc}", err=True)
         raise typer.Exit(code=2)
 
     opts = Options(
@@ -94,7 +86,6 @@ def process(
         crop_fraction=crop,
         preblur_sigma=preblur,
         focus_mode=focus_mode,  # type: ignore[arg-type]
-        tile_grid=grid,
     )
 
     try:

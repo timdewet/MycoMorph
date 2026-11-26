@@ -4,9 +4,8 @@ The full pipeline's ``run_focus`` walks every scene of a CZI and writes
 one OME-TIFF per well. For the live preview we only need the focused
 ``(C, Y, X)`` array of one scene at one set of focus options. This shim
 calls the same primitives the real pipeline uses (``score_stack``,
-``pick_best_slice``, ``pick_per_pixel_z``, ``tiling.pick_best_z_per_tile``,
-and the ``_assemble_*_planes`` helpers) so the preview output matches a
-real run for the same scene.
+``pick_best_slice``, ``pick_per_pixel_z`` and the ``_assemble_*_planes``
+helpers) so the preview output matches a real run for the same scene.
 
 Whichever preview-only behavior we want diverges from the real pipeline
 (currently nothing), it should live here so the mycomorph.core module
@@ -38,13 +37,11 @@ def run(
         channel_id,
         focus as focus_metrics,
         io_source,
-        tiling,
     )
     from mycomorph.core.focus.pipeline import (
         Options,
         _assemble_edf_planes,
         _assemble_output_planes,
-        _assemble_tiled_planes,
     )
 
     scene = io_source.read_scene(Path(czi_path), int(fov_index))
@@ -63,7 +60,6 @@ def run(
     opts = Options(
         metric=getattr(focus_opts, "metric", "ensemble"),
         focus_mode=getattr(focus_opts, "mode", "edf"),
-        tile_grid=tuple(getattr(focus_opts, "tile_grid", (3, 3))),
         phase_channel=phase_override,
         save_mip=False,
     )
@@ -79,16 +75,6 @@ def run(
         chosen_z = focus_metrics.pick_best_slice(scores, metric=opts.metric)
         planes, names = _assemble_output_planes(
             scene.array_zcyx, scene.channel_names, phase_idx, chosen_z,
-            save_mip=opts.save_mip,
-        )
-    elif opts.focus_mode == "tiles":
-        tile_picks = tiling.pick_best_z_per_tile(
-            phase_stack, opts.tile_grid, metric=opts.metric
-        )
-        z_per_tile = {coord: chosen for coord, (chosen, _) in tile_picks.items()}
-        planes, names = _assemble_tiled_planes(
-            scene.array_zcyx, scene.channel_names, phase_idx,
-            z_per_tile, opts.tile_grid,
             save_mip=opts.save_mip,
         )
     elif opts.focus_mode == "edf":

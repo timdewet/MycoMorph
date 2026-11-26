@@ -117,7 +117,7 @@ For single-plane images, untick **Focus** and keep **Split**. Z-stacks need Focu
 | Stage | Default | What it does |
 | --- | --- | --- |
 | Split | on | Writes one TIFF per well or sample without focus picking. It is skipped when Focus is ticked, because Focus writes the same per-sample files. |
-| Focus | on | Collapses each Z-stack to one in-focus image per field of view. Modes: extended depth of field (default), per-tile, or whole-field. The ensemble metric is the default; six single metrics are also available. You can also save Z-maps or a MIP companion channel. |
+| Focus | on | Collapses each Z-stack to one in-focus image per field of view. Modes: extended depth of field (default), which takes each pixel from the Z-plane where it is sharpest, or whole-field, which keeps the single best Z-plane of each field of view. Whole-field focus scores the planes with a focus metric: the ensemble metric is the default, and six single metrics are also available. You can also save Z-maps or a MIP companion channel. |
 | Segment | on | Runs Cellpose-SAM on the phase channel and appends a `BinaryMask` channel to each image. Options: diameter, minimum size, flow and cell-probability thresholds, GPU. Pixel size is read from the metadata. |
 | Classify | on | A rule-based edge and debris filter, plus an optional CNN cell-quality classifier. Cells it rejects are removed from the mask. |
 | Features | off | Measures each cell's morphology (MicrobeJ-style shape descriptors plus sub-pixel midline measurements) and intensity, and makes QC plots. It also saves cell crops to HDF5 (on by default), and can optionally register the run in the [morphology library](#analysis-and-the-morphology-library). |

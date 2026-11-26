@@ -1,9 +1,10 @@
-"""Focus options: metric names shared by GUI and core.
+"""Focus options: metric names shared by GUI and core, and the two focus modes.
 
 The Focus page once offered ``laplacian`` and ``vollath`` while the core's
 score keys are ``laplacian_variance`` and ``vollath_f4``, so picking either
 with whole-field focus raised ``KeyError`` mid-run. These tests pin that the
-GUI lists the core's own names and that the old spellings still load.
+GUI lists the core's own names, that the old spellings still load, and that
+the removed tiled mode fails with a message that says what to use instead.
 """
 
 from __future__ import annotations
@@ -105,3 +106,93 @@ def test_preview_accepts_the_same_metric_names(tmp_path: Path):
             src, 0, FocusOpts(mode="whole", metric=name), 0
         )
         np.testing.assert_array_equal(planes[phase_idx], _zstack()[SHARP_Z])
+
+
+# ───────────────────────────────────────────────────────────── focus modes
+
+
+def test_the_gui_offers_two_modes_and_the_core_accepts_both(qtbot):
+    pytest.importorskip("PyQt6")
+    from mycomorph.core.focus.pipeline import Options
+    from mycomorph.gui.panels.stage_panels import FocusPanel
+
+    panel = FocusPanel()
+    qtbot.addWidget(panel)
+    modes = [panel.mode.itemText(i) for i in range(panel.mode.count())]
+
+    assert modes == ["edf", "whole"]
+    assert panel.opts().mode == "edf"
+    for mode in modes:
+        assert Options(focus_mode=mode).focus_mode == mode
+    assert "tile" not in " ".join(panel.state()).lower()
+    assert not hasattr(panel, "tile_rows")
+
+
+def test_both_modes_still_focus_a_stack(tmp_path: Path):
+    stack = _zstack()
+    whole = _focused_phase(tmp_path / "whole", FocusOpts(mode="whole", phase_channel=0))
+    np.testing.assert_array_equal(whole, stack[SHARP_Z])
+
+    edf = _focused_phase(tmp_path / "edf", FocusOpts(mode="edf", phase_channel=0))
+    z_map = focus.pick_per_pixel_z(stack)
+    np.testing.assert_array_equal(edf, focus.assemble_edf_plane(stack, z_map))
+
+
+def test_tiles_mode_fails_with_a_message_that_names_the_alternatives(tmp_path: Path):
+    from mycomorph.core.focus.pipeline import Options
+
+    with pytest.raises(ValueError, match="'tiles'.*removed.*'edf'.*'whole'"):
+        Options(focus_mode="tiles")
+
+    src = _zstack_tiff(tmp_path / "stack.tif")
+    with pytest.raises(ValueError, match="'tiles'.*removed"):
+        run_focus_sample([src], tmp_path / "out", "S", opts=FocusOpts(mode="tiles"))
+    assert not (tmp_path / "out" / "S_focused.tif").exists()
+
+
+def test_focus_opts_no_longer_takes_a_tile_grid():
+    from dataclasses import fields
+
+    from mycomorph.core.focus.pipeline import Options
+
+    assert "tile_grid" not in {f.name for f in fields(FocusOpts)}
+    assert "tile_grid" not in {f.name for f in fields(Options)}
+    with pytest.raises(TypeError):
+        FocusOpts(tile_grid=(3, 3))
+
+
+def test_saved_tiles_setting_falls_back_to_edf_and_says_so(qtbot):
+    pytest.importorskip("PyQt6")
+    from mycomorph.gui.panels.stage_panels import FocusPanel
+
+    panel = FocusPanel()
+    qtbot.addWidget(panel)
+    assert panel._mode_notice.isHidden()
+
+    panel.mode.setCurrentText("whole")
+    panel.restore_state({"mode": "tiles", "tile_rows": 2, "tile_cols": 4,
+                         "metric": "ensemble"})
+    assert panel.opts().mode == "edf"
+    assert not panel._mode_notice.isHidden()
+    assert "removed" in panel._mode_notice.text()
+
+    # Choosing a mode by hand dismisses the notice.
+    panel.mode.setCurrentText("whole")
+    assert panel._mode_notice.isHidden()
+
+
+def test_cli_rejects_tiles_and_no_longer_documents_it(tmp_path: Path):
+    from typer.testing import CliRunner
+
+    from mycomorph.core.focus.cli import app
+
+    runner = CliRunner()
+    src = _zstack_tiff(tmp_path / "stack.tif")
+
+    result = runner.invoke(app, ["process", str(src), "--focus-mode", "tiles", "--no-archive"])
+    assert result.exit_code == 2
+    assert "'tiles'" in result.output and "removed" in result.output
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["stack.tif"]
+
+    assert runner.invoke(app, ["process", str(src), "--tile-grid", "2x2"]).exit_code == 2
+    assert "tile" not in runner.invoke(app, ["process", "--help"]).output.lower()

@@ -113,31 +113,35 @@ class FocusPanel(QWidget):
         root.addStretch(1)
 
         self.mode = QComboBox()
-        self.mode.addItems(["edf", "tiles", "whole"])      # EDF is the default
+        self.mode.addItems(["edf", "whole"])               # EDF is the default
         self.metric = QComboBox()
         self.metric.addItems(focus_metric_choices())
         self.metric.setCurrentText("ensemble")             # tested default
 
-        # Tile-grid row, hidden unless mode == "tiles"
-        self.tile_rows = QSpinBox(); self.tile_rows.setRange(1, 16); self.tile_rows.setValue(3)
-        self.tile_cols = QSpinBox(); self.tile_cols.setRange(1, 16); self.tile_cols.setValue(3)
-        tile_row = QHBoxLayout()
-        tile_row.addWidget(self.tile_rows); tile_row.addWidget(QLabel("×")); tile_row.addWidget(self.tile_cols)
-        tile_row.addStretch(1)
-        self._tile_wrap = QWidget(); self._tile_wrap.setLayout(tile_row)
-        self._tile_label = QLabel("Tile grid (rows × cols):")
-
-        self._form.addRow("Mode:", _with_helper(
+        # Shown only when saved settings asked for the tiled mode, which
+        # no longer exists, so the switch to EDF is not silent.
+        self._mode_notice = QLabel(
+            "Your saved settings used tiled focus, which has been removed. "
+            "Mode has been set to edf."
+        )
+        self._mode_notice.setWordWrap(True)
+        self._mode_notice.setStyleSheet(
+            f"color: {tokens.active().warning}; font-size: {tokens.FS_CAPTION}px;"
+        )
+        self._mode_notice.setVisible(False)
+        mode_holder = _with_helper(
             self.mode,
-            "edf = stack the per-tile in-focus pixels (recommended). "
-            "tiles = pick best Z per tile. whole = single best Z per FOV.",
-        ))
+            "edf = extended depth of field: each pixel comes from the Z-plane "
+            "where it is sharpest (recommended). "
+            "whole = the single best Z-plane of each FOV.",
+        )
+        mode_holder.layout().addWidget(self._mode_notice)
+        self._form.addRow("Mode:", mode_holder)
         self._form.addRow("Metric:", _with_helper(
             self.metric,
             "Sharpness measure used to score Z-planes. 'ensemble' averages "
             "several robust metrics and is a safe default.",
         ))
-        self._form.addRow(self._tile_label, self._tile_wrap)
 
         self.save_zmaps = QCheckBox("Save per-FOV Z-map TIFFs (EDF debug output)")
         self.save_zmaps.setChecked(False)
@@ -147,9 +151,6 @@ class FocusPanel(QWidget):
         self.save_mip.setChecked(False)
         self._form.addRow("", self.save_mip)
 
-        self.mode.currentTextChanged.connect(self._refresh_tile_visibility)
-        self._refresh_tile_visibility(self.mode.currentText())
-
         # External phase-channel override — set from the Input tab.
         self._phase_channel: int | str | None = None
 
@@ -157,8 +158,7 @@ class FocusPanel(QWidget):
         # single ``optionsChanged`` signal the controller listens to.
         for w in (self.mode, self.metric):
             w.currentIndexChanged.connect(self._emit_options_changed)
-        for w in (self.tile_rows, self.tile_cols):
-            w.valueChanged.connect(self._emit_options_changed)
+        self.mode.currentIndexChanged.connect(self._dismiss_mode_notice)
         for w in (self.save_zmaps, self.save_mip):
             w.toggled.connect(self._emit_options_changed)
 
@@ -166,10 +166,10 @@ class FocusPanel(QWidget):
         if not self._loading:
             self.optionsChanged.emit()
 
-    def _refresh_tile_visibility(self, mode: str) -> None:
-        show = mode == "tiles"
-        self._tile_wrap.setVisible(show)
-        self._tile_label.setVisible(show)
+    def _dismiss_mode_notice(self, *_args) -> None:
+        # Once the user picks a mode themselves the notice has done its job.
+        if not self._loading:
+            self._mode_notice.setVisible(False)
 
     def set_phase_channel(self, phase: int | str | None) -> None:
         self._phase_channel = phase
@@ -178,7 +178,6 @@ class FocusPanel(QWidget):
         return FocusOpts(
             metric=self.metric.currentText(),
             mode=self.mode.currentText(),
-            tile_grid=(self.tile_rows.value(), self.tile_cols.value()),
             phase_channel=self._phase_channel,
             save_zmaps=self.save_zmaps.isChecked(),
             save_mip=self.save_mip.isChecked(),
@@ -188,8 +187,6 @@ class FocusPanel(QWidget):
         return {
             "metric": self.metric.currentText(),
             "mode": self.mode.currentText(),
-            "tile_rows": self.tile_rows.value(),
-            "tile_cols": self.tile_cols.value(),
             "save_zmaps": self.save_zmaps.isChecked(),
             "save_mip": self.save_mip.isChecked(),
         }
@@ -200,9 +197,15 @@ class FocusPanel(QWidget):
         self._loading = True
         try:
             if "mode" in s:
-                i = self.mode.findText(str(s["mode"]))
+                saved_mode = str(s["mode"])
+                i = self.mode.findText(saved_mode)
                 if i >= 0:
                     self.mode.setCurrentIndex(i)
+                elif saved_mode == "tiles":
+                    # Tiled focus was removed: fall back to EDF and say so.
+                    # (Saved ``tile_rows`` / ``tile_cols`` are ignored.)
+                    self.mode.setCurrentText("edf")
+                    self._mode_notice.setVisible(True)
             if "metric" in s:
                 # Settings saved before the page listed the core's names
                 # may hold "laplacian" or "vollath".
@@ -212,10 +215,6 @@ class FocusPanel(QWidget):
                 )
                 if i >= 0:
                     self.metric.setCurrentIndex(i)
-            if "tile_rows" in s:
-                self.tile_rows.setValue(int(s["tile_rows"]))
-            if "tile_cols" in s:
-                self.tile_cols.setValue(int(s["tile_cols"]))
             if "save_zmaps" in s:
                 self.save_zmaps.setChecked(bool(s["save_zmaps"]))
             if "save_mip" in s:
