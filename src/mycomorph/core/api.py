@@ -171,9 +171,10 @@ def split_plate(
 
 @dataclass
 class FocusOpts:
+    # Scores the Z-planes in "whole" mode; one of focus.METRIC_NAMES.
+    # "edf" does not use it.
     metric: str = "ensemble"
-    mode: str = "edf"              # "whole" | "tiles" | "edf"
-    tile_grid: tuple[int, int] = (3, 3)
+    mode: str = "edf"              # "edf" | "whole"
     phase_channel: Optional[int | str] = None  # None = auto-ID
     save_zmaps: bool = False       # EDF mode only
     save_mip: bool = False         # Add <name>_MIP channel per fluorescence channel
@@ -207,7 +208,6 @@ def run_focus(
     opts_obj = Options(
         metric=opts.metric,
         focus_mode=opts.mode,
-        tile_grid=opts.tile_grid,
         phase_channel=opts.phase_channel,
         save_mip=opts.save_mip,
     ) if not isinstance(opts, Options) else opts
@@ -271,7 +271,6 @@ def run_focus_sample(
     opts_obj = Options(
         metric=opts.metric,
         focus_mode=opts.mode,
-        tile_grid=opts.tile_grid,
         phase_channel=opts.phase_channel,
         save_mip=opts.save_mip,
     )

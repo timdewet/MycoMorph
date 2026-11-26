@@ -10,17 +10,38 @@ import json
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Literal, get_args
 
 import numpy as np
 import tifffile
 
-from . import archive, channel_id, focus, io_ometiff, io_source, tiling
+from . import archive, channel_id, focus, io_ometiff, io_source
 from .io_czi import Scene
 
+# "whole" keeps the single best Z-plane of each field of view; "edf" takes
+# each pixel from the Z-plane where it is sharpest (extended depth of field).
 # "none" writes single-plane inputs through unchanged (no focus picking);
 # it refuses Z-stacks rather than silently choosing a plane.
-FocusMode = Literal["whole", "tiles", "edf", "none"]
+FocusMode = Literal["whole", "edf", "none"]
+
+# Shown wherever an old script, command line or saved configuration still
+# asks for the tiled mode: failing is safer than quietly writing images
+# focused another way.
+TILES_REMOVED_MESSAGE = (
+    "focus mode 'tiles' (one Z-plane per tile of a grid) has been removed. "
+    "Use 'edf' (each pixel from the Z-plane where it is sharpest) or "
+    "'whole' (the single best Z-plane of each field of view)."
+)
+
+
+def check_focus_mode(mode: str) -> None:
+    """Raise ``ValueError`` unless ``mode`` is a current :data:`FocusMode`."""
+    if mode == "tiles":
+        raise ValueError(TILES_REMOVED_MESSAGE)
+    if mode not in get_args(FocusMode):
+        raise ValueError(
+            f"unknown focus mode {mode!r}; choose from {', '.join(get_args(FocusMode))}"
+        )
 
 
 @dataclass
@@ -39,11 +60,14 @@ class Options:
     crop_fraction: float = 1.0
     preblur_sigma: float = 0.0
     focus_mode: FocusMode = "whole"
-    tile_grid: tuple[int, int] = (2, 2)
     # When True, each fluorescence channel gets a companion ``<name>_MIP``
     # max-intensity projection channel in addition to the focused slice.
     # Default is False so focus output has the same channel count as the CZI.
     save_mip: bool = False
+
+    def __post_init__(self) -> None:
+        check_focus_mode(self.focus_mode)
+        self.metric = focus.canonical_metric(self.metric)
 
 
 @dataclass
@@ -93,38 +117,6 @@ def _assemble_output_planes(
             names.append(cname)
         else:
             planes.append(array_zcyx[chosen_z, c])
-            names.append(f"{cname}@z" if save_mip else cname)
-            if save_mip:
-                planes.append(array_zcyx[:, c].max(axis=0))
-                names.append(f"{cname}_MIP")
-    return np.stack(planes, axis=0), names
-
-
-def _assemble_tiled_planes(
-    array_zcyx: np.ndarray,
-    channel_names: list[str],
-    phase_idx: int,
-    z_per_tile: dict[tiling.TileCoord, int],
-    grid: tiling.GridSpec,
-    save_mip: bool = False,
-) -> tuple[np.ndarray, list[str]]:
-    """Build the output (C, Y, X) array for ``tiles`` mode.
-
-    Phase: stitched per-tile from the tile-Z map. Each fluorescence channel
-    is also stitched from the same tile-Z map; if ``save_mip`` is True a
-    companion ``<name>_MIP`` max-intensity projection is appended.
-    """
-    planes: list[np.ndarray] = []
-    names: list[str] = []
-    n_channels = array_zcyx.shape[1]
-    for c in range(n_channels):
-        cname = channel_names[c]
-        stitched = tiling.assemble_tiled_plane(array_zcyx[:, c], z_per_tile, grid)
-        if c == phase_idx:
-            planes.append(stitched)
-            names.append(cname)
-        else:
-            planes.append(stitched)
             names.append(f"{cname}@z" if save_mip else cname)
             if save_mip:
                 planes.append(array_zcyx[:, c].max(axis=0))
@@ -203,49 +195,6 @@ def _write_well_scores_csv(
                 writer.writerow(row)
 
 
-def _write_tile_scores_csv(
-    path: Path,
-    scene_index: int,
-    tile_picks: dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]],
-    grid: tiling.GridSpec,
-) -> None:
-    """One row per (tile, z): tile_y, tile_x, scene, z, <metrics>, chosen."""
-    metric_names = list(focus.METRIC_NAMES)
-    with path.open("w", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(["scene", "tile_y", "tile_x", "z", *metric_names, "chosen"])
-        for (i, j), (chosen_z, scores) in sorted(tile_picks.items()):
-            n_z = len(next(iter(scores.values())))
-            for z in range(n_z):
-                row = [scene_index, i, j, z]
-                row.extend(f"{scores[m][z]:.6g}" for m in metric_names)
-                row.append("1" if z == chosen_z else "0")
-                writer.writerow(row)
-
-
-def _write_well_tile_scores_csv(
-    path: Path,
-    well: str,
-    rows: list[tuple[int, dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]]]],
-    grid: tiling.GridSpec,
-) -> None:
-    """Per-well CSV with one row per (FOV, tile, z)."""
-    metric_names = list(focus.METRIC_NAMES)
-    with path.open("w", newline="") as fh:
-        writer = csv.writer(fh)
-        writer.writerow(
-            ["well", "fov_in_well", "scene", "tile_y", "tile_x", "z", *metric_names, "chosen"]
-        )
-        for fov_in_well, (scene_index, tile_picks) in enumerate(rows):
-            for (i, j), (chosen_z, scores) in sorted(tile_picks.items()):
-                n_z = len(next(iter(scores.values())))
-                for z in range(n_z):
-                    row = [well, fov_in_well, scene_index, i, j, z]
-                    row.extend(f"{scores[m][z]:.6g}" for m in metric_names)
-                    row.append("1" if z == chosen_z else "0")
-                    writer.writerow(row)
-
-
 def _write_acquisition_sidecar(
     tiff_path: Path,
     source_czi: Path,
@@ -311,9 +260,8 @@ class _ProcessedScene:
     planes: np.ndarray
     channel_names: list[str]
     mode: FocusMode
-    summary_z: int  # representative scalar Z (chosen_z for whole; mean for tiles/edf)
+    summary_z: int  # representative scalar Z (chosen_z for whole; mean for edf)
     scores: dict[str, np.ndarray] | None = None  # whole only
-    tile_picks: dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]] | None = None  # tiles only
     z_map: np.ndarray | None = None  # edf only
     description_extra: str = ""
 
@@ -344,27 +292,6 @@ def _process_scene(
             summary_z=chosen_z,
             scores=scores,
             description_extra=f"chosen_z={chosen_z} mode=whole",
-        )
-
-    if opts.focus_mode == "tiles":
-        tile_picks = tiling.pick_best_z_per_tile(
-            phase_stack, opts.tile_grid, metric=opts.metric
-        )
-        z_per_tile = {coord: chosen for coord, (chosen, _) in tile_picks.items()}
-        planes, names = _assemble_tiled_planes(
-            scene.array_zcyx, scene.channel_names, phase_idx, z_per_tile, opts.tile_grid,
-            save_mip=opts.save_mip,
-        )
-        zs = list(z_per_tile.values())
-        summary_z = int(round(sum(zs) / len(zs))) if zs else 0
-        rows, cols = opts.tile_grid
-        return _ProcessedScene(
-            planes=planes,
-            channel_names=names,
-            mode="tiles",
-            summary_z=summary_z,
-            tile_picks=tile_picks,
-            description_extra=f"mode=tiles grid={rows}x{cols} mean_z={summary_z}",
         )
 
     if opts.focus_mode == "edf":
@@ -466,7 +393,6 @@ def _process_well(
     first_ref: _SceneRef | None = None
     chosen_zs: list[int] = []
     whole_score_rows: list[tuple[int, int, dict[str, np.ndarray], int]] = []
-    tile_score_rows: list[tuple[int, dict[tiling.TileCoord, tuple[int, dict[str, np.ndarray]]]]] = []
     edf_z_maps: list[np.ndarray] = []
     pixel_size = (None, None)
     fov_acq_times: list[str | None] = []
@@ -507,8 +433,6 @@ def _process_well(
             whole_score_rows.append(
                 (ref.index, processed.summary_z, processed.scores, processed.summary_z)
             )
-        elif processed.mode == "tiles":
-            tile_score_rows.append((ref.index, processed.tile_picks))
         elif processed.mode == "edf":
             edf_z_maps.append(processed.z_map)
         pixel_size = scene.pixel_size_um
@@ -518,13 +442,9 @@ def _process_well(
     out_path = well_dir / f"{base}.tif"
     sources = list(dict.fromkeys(fov_sources))
 
-    mode_tag = opts.focus_mode
-    if mode_tag == "tiles":
-        rows, cols = opts.tile_grid
-        mode_tag = f"tiles({rows}x{cols})"
     description = (
         f"FocusPicker source={', '.join(sources)} well={well} "
-        f"n_fov={len(refs)} metric={opts.metric} mode={mode_tag}"
+        f"n_fov={len(refs)} metric={opts.metric} mode={opts.focus_mode}"
     )
     io_ometiff.write_tcyx(
         out_path,
@@ -546,9 +466,6 @@ def _process_well(
     if opts.focus_mode == "whole":
         scores_path = well_dir / f"{base}_focus_scores.csv"
         _write_well_scores_csv(scores_path, well, whole_score_rows)
-    elif opts.focus_mode == "tiles":
-        scores_path = well_dir / f"{base}_focus_scores.csv"
-        _write_well_tile_scores_csv(scores_path, well, tile_score_rows, opts.tile_grid)
     elif opts.focus_mode == "edf":
         scores_path = well_dir / f"{base}_zmaps.tif"
         if save_zmaps:
@@ -708,11 +625,6 @@ def process_czi(
             if processed.mode == "whole":
                 scores_path = out_dir / f"{stem}{scene_tag}_focus_scores.csv"
                 _write_scores_csv(scores_path, scene.index, processed.scores, processed.summary_z)
-            elif processed.mode == "tiles":
-                scores_path = out_dir / f"{stem}{scene_tag}_focus_scores.csv"
-                _write_tile_scores_csv(
-                    scores_path, scene.index, processed.tile_picks, opts.tile_grid
-                )
             elif processed.mode == "edf":
                 scores_path = out_dir / f"{stem}{scene_tag}_zmap.tif"
                 if save_zmaps:

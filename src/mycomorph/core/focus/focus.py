@@ -2,13 +2,15 @@
 
 Six classical sharpness metrics are computed for every slice. Each one is
 restricted to a foreground mask (computed once per stack) so that the score
-is not diluted by empty agar; the per-Z score curves are then mildly smoothed
-along Z to suppress single-slice noise spikes; and a 7th "ensemble" score is
-derived as the mean of per-metric min-max-normalised scores. ``ensemble`` is
-the default for slice selection because no single classical metric is
-reliable across every FOV — the rank-averaged combination is consistently
-better than the best individual metric on real bacteria phase-contrast
-images.
+is not diluted by empty agar. A 7th "ensemble" score is the mean of the six
+score curves, each min-max-normalised along Z to [0, 1] first. The curves
+are not smoothed along Z unless ``score_stack(smooth_z=True)`` asks for it.
+
+``ensemble`` is the app's default for slice selection (``FocusOpts.metric``)
+because no single classical metric is reliable across every FOV — the
+averaged combination is consistently better than the best individual metric
+on real bacteria phase-contrast images. ``DEFAULT_METRIC`` below is the
+default of ``mycomorph-focus process`` and of :func:`pick_best_slice`.
 """
 
 from __future__ import annotations
@@ -32,6 +34,28 @@ DEFAULT_METRIC = "vollath_f4"
 
 # Names of the raw classical metrics (everything except the ensemble).
 _RAW_METRICS = tuple(m for m in METRIC_NAMES if m != "ensemble")
+
+# Spellings the app's Focus page offered before it listed ``METRIC_NAMES``
+# itself. They never matched a score key; they are accepted so that saved
+# settings holding them still load.
+LEGACY_METRIC_ALIASES = {
+    "laplacian": "laplacian_variance",
+    "vollath": "vollath_f4",
+}
+
+
+def canonical_metric(name: str) -> str:
+    """Return the :data:`METRIC_NAMES` entry that ``name`` refers to.
+
+    Accepts the spellings in :data:`LEGACY_METRIC_ALIASES`; raises
+    ``ValueError`` for anything else that is not a metric name.
+    """
+    name = LEGACY_METRIC_ALIASES.get(name, name)
+    if name not in METRIC_NAMES:
+        raise ValueError(
+            f"unknown focus metric {name!r}; choose from {', '.join(METRIC_NAMES)}"
+        )
+    return name
 
 
 def _as_float(image: np.ndarray) -> np.ndarray:
@@ -208,10 +232,10 @@ def score_stack(
         If True, restrict scoring to a foreground mask computed once per
         stack. The mask is the same for every Z (computed from the union of
         bandpass responses) so it does not bias toward sharper slices.
-    smooth_z : bool, default True
+    smooth_z : bool, default False
         If True, smooth each metric's per-Z score vector with [1,2,1]/4
-        before returning. Suppresses single-slice noise spikes that flip
-        argmax between adjacent near-tied slices.
+        before the ensemble is formed. Suppresses single-slice noise spikes
+        that flip argmax between adjacent near-tied slices.
 
     Returns
     -------
@@ -286,7 +310,10 @@ def pick_best_slice(scores: Dict[str, np.ndarray], metric: str = DEFAULT_METRIC)
     """Return the index of the best-focused slice.
 
     Ties are broken in favour of the slice closest to the middle of the stack.
+    ``metric`` is a key of ``scores``; the legacy spellings in
+    :data:`LEGACY_METRIC_ALIASES` are also accepted.
     """
+    metric = LEGACY_METRIC_ALIASES.get(metric, metric)
     if metric not in scores:
         raise KeyError(f"metric {metric!r} not in scores; have {list(scores)}")
     values = scores[metric]
