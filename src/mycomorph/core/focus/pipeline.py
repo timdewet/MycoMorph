@@ -45,6 +45,9 @@ class Options:
     # Default is False so focus output has the same channel count as the CZI.
     save_mip: bool = False
 
+    def __post_init__(self) -> None:
+        self.metric = focus.canonical_metric(self.metric)
+
 
 @dataclass
 class SceneResult:

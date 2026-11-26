@@ -41,6 +41,7 @@ from mycomorph.core.api import (
 from mycomorph.core.cell_quality_classifier import read_decision_threshold
 from mycomorph.core.foci import DetectorOpts
 from mycomorph.core.foci.normalise import NORMALISER_REGISTRY
+from mycomorph.core.focus import focus as focus_metrics
 
 from ..pipeline.context import (
     FluorescentNormalisationOpts,
@@ -78,6 +79,15 @@ def _with_helper(widget: QWidget, helper: str) -> QWidget:
     return holder
 
 
+def focus_metric_choices() -> list[str]:
+    """Metric names for the Focus page: the core's own, with ensemble first.
+
+    Read from ``focus.METRIC_NAMES`` so the page cannot offer a name the
+    core does not score.
+    """
+    return ["ensemble", *(m for m in focus_metrics.METRIC_NAMES if m != "ensemble")]
+
+
 class FocusPanel(QWidget):
     # Fires whenever any option widget on this panel changes value. The
     # live preview controller listens for this and re-runs focus +
@@ -105,8 +115,7 @@ class FocusPanel(QWidget):
         self.mode = QComboBox()
         self.mode.addItems(["edf", "tiles", "whole"])      # EDF is the default
         self.metric = QComboBox()
-        self.metric.addItems(["ensemble", "normalized_variance", "brenner",
-                              "tenengrad", "laplacian", "sml", "vollath"])
+        self.metric.addItems(focus_metric_choices())
         self.metric.setCurrentText("ensemble")             # tested default
 
         # Tile-grid row, hidden unless mode == "tiles"
@@ -195,7 +204,12 @@ class FocusPanel(QWidget):
                 if i >= 0:
                     self.mode.setCurrentIndex(i)
             if "metric" in s:
-                i = self.metric.findText(str(s["metric"]))
+                # Settings saved before the page listed the core's names
+                # may hold "laplacian" or "vollath".
+                saved_metric = str(s["metric"])
+                i = self.metric.findText(
+                    focus_metrics.LEGACY_METRIC_ALIASES.get(saved_metric, saved_metric)
+                )
                 if i >= 0:
                     self.metric.setCurrentIndex(i)
             if "tile_rows" in s:

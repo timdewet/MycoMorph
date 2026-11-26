@@ -33,6 +33,28 @@ DEFAULT_METRIC = "vollath_f4"
 # Names of the raw classical metrics (everything except the ensemble).
 _RAW_METRICS = tuple(m for m in METRIC_NAMES if m != "ensemble")
 
+# Spellings the app's Focus page offered before it listed ``METRIC_NAMES``
+# itself. They never matched a score key; they are accepted so that saved
+# settings holding them still load.
+LEGACY_METRIC_ALIASES = {
+    "laplacian": "laplacian_variance",
+    "vollath": "vollath_f4",
+}
+
+
+def canonical_metric(name: str) -> str:
+    """Return the :data:`METRIC_NAMES` entry that ``name`` refers to.
+
+    Accepts the spellings in :data:`LEGACY_METRIC_ALIASES`; raises
+    ``ValueError`` for anything else that is not a metric name.
+    """
+    name = LEGACY_METRIC_ALIASES.get(name, name)
+    if name not in METRIC_NAMES:
+        raise ValueError(
+            f"unknown focus metric {name!r}; choose from {', '.join(METRIC_NAMES)}"
+        )
+    return name
+
 
 def _as_float(image: np.ndarray) -> np.ndarray:
     return image.astype(np.float64, copy=False)
@@ -286,7 +308,10 @@ def pick_best_slice(scores: Dict[str, np.ndarray], metric: str = DEFAULT_METRIC)
     """Return the index of the best-focused slice.
 
     Ties are broken in favour of the slice closest to the middle of the stack.
+    ``metric`` is a key of ``scores``; the legacy spellings in
+    :data:`LEGACY_METRIC_ALIASES` are also accepted.
     """
+    metric = LEGACY_METRIC_ALIASES.get(metric, metric)
     if metric not in scores:
         raise KeyError(f"metric {metric!r} not in scores; have {list(scores)}")
     values = scores[metric]
