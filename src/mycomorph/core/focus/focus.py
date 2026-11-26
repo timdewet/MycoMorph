@@ -2,13 +2,15 @@
 
 Six classical sharpness metrics are computed for every slice. Each one is
 restricted to a foreground mask (computed once per stack) so that the score
-is not diluted by empty agar; the per-Z score curves are then mildly smoothed
-along Z to suppress single-slice noise spikes; and a 7th "ensemble" score is
-derived as the mean of per-metric min-max-normalised scores. ``ensemble`` is
-the default for slice selection because no single classical metric is
-reliable across every FOV — the rank-averaged combination is consistently
-better than the best individual metric on real bacteria phase-contrast
-images.
+is not diluted by empty agar. A 7th "ensemble" score is the mean of the six
+score curves, each min-max-normalised along Z to [0, 1] first. The curves
+are not smoothed along Z unless ``score_stack(smooth_z=True)`` asks for it.
+
+``ensemble`` is the app's default for slice selection (``FocusOpts.metric``)
+because no single classical metric is reliable across every FOV — the
+averaged combination is consistently better than the best individual metric
+on real bacteria phase-contrast images. ``DEFAULT_METRIC`` below is the
+default of ``mycomorph-focus process`` and of :func:`pick_best_slice`.
 """
 
 from __future__ import annotations
@@ -230,10 +232,10 @@ def score_stack(
         If True, restrict scoring to a foreground mask computed once per
         stack. The mask is the same for every Z (computed from the union of
         bandpass responses) so it does not bias toward sharper slices.
-    smooth_z : bool, default True
+    smooth_z : bool, default False
         If True, smooth each metric's per-Z score vector with [1,2,1]/4
-        before returning. Suppresses single-slice noise spikes that flip
-        argmax between adjacent near-tied slices.
+        before the ensemble is formed. Suppresses single-slice noise spikes
+        that flip argmax between adjacent near-tied slices.
 
     Returns
     -------

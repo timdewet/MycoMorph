@@ -108,6 +108,15 @@ def test_preview_accepts_the_same_metric_names(tmp_path: Path):
         np.testing.assert_array_equal(planes[phase_idx], _zstack()[SHARP_Z])
 
 
+def test_ensemble_is_the_unsmoothed_mean_of_minmax_normalised_curves():
+    """Pins the arithmetic the ``focus`` module docstring describes."""
+    scores = focus.score_stack(_zstack())
+    raw = [scores[m] for m in focus.METRIC_NAMES if m != "ensemble"]
+    assert len(raw) == 6
+    expected = np.mean([(r - r.min()) / (r.max() - r.min()) for r in raw], axis=0)
+    np.testing.assert_allclose(scores["ensemble"], expected, rtol=0, atol=1e-12)
+
+
 # ───────────────────────────────────────────────────────────── focus modes
 
 
